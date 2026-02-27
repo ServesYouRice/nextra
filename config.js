@@ -63,7 +63,7 @@ module.exports = {
     ALLOW_TRYCLOUDFLARE_ORIGINS: parseBoolEnv(process.env.ALLOW_TRYCLOUDFLARE_ORIGINS, false),
     ALLOW_SOCKET_NO_ORIGIN: parseBoolEnv(process.env.ALLOW_SOCKET_NO_ORIGIN, false),
     EXPOSE_LAN_URL: parseBoolEnv(process.env.EXPOSE_LAN_URL, false),
-    AUTO_PUBLIC_TUNNEL: parseBoolEnv(process.env.AUTO_PUBLIC_TUNNEL, true),
+    AUTO_PUBLIC_TUNNEL: parseBoolEnv(process.env.AUTO_PUBLIC_TUNNEL, false),
     PUBLIC_TUNNEL_PROVIDER: (process.env.PUBLIC_TUNNEL_PROVIDER || 'cloudflared').trim().toLowerCase(),
     CLOUDFLARED_PATH: (process.env.CLOUDFLARED_PATH || '').trim(),
     PUBLIC_TUNNEL_NO_TLS_VERIFY: parseBoolEnv(process.env.PUBLIC_TUNNEL_NO_TLS_VERIFY, true),
@@ -140,6 +140,7 @@ module.exports = {
 
     // Rate limits
     MEDIA_TOGGLE_COOLDOWN_MS: 1000,
+    MEDIA_TOGGLE_VIEWER_COOLDOWN_MS: parseIntEnv(process.env.MEDIA_TOGGLE_VIEWER_COOLDOWN_MS, 3000),
     JOIN_RATE_LIMIT_MAX: 5,
     JOIN_RATE_LIMIT_WINDOW_MS: 60000,
 
@@ -160,6 +161,8 @@ module.exports = {
     HOST_RECONNECT_GRACE_MS: parseIntEnv(process.env.HOST_RECONNECT_GRACE_MS, 300000),
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     ALLOW_REMOTE_METRICS: parseBoolEnv(process.env.ALLOW_REMOTE_METRICS, false),
+    METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),
+    ALLOW_REMOTE_MEDIA_CONTROL: parseBoolEnv(process.env.ALLOW_REMOTE_MEDIA_CONTROL, false),
 
     // Public share URL (recommended when using a tunnel/reverse proxy)
     SHARE_BASE_URL: (process.env.SHARE_BASE_URL || '').trim(),

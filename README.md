@@ -8,7 +8,7 @@ Vibe coded this into existence as other apps like Discord were always found lack
 
 - Host: Windows machine running `Nextra.exe`
 - Viewers: any modern browser (no install)
-- Internet sharing: included by default in release builds (auto tunnel)
+- Internet sharing: opt-in (enable tunnel or set `SHARE_BASE_URL`)
 
 ## Host Guide (Fast Path)
 
@@ -28,12 +28,13 @@ Vibe coded this into existence as other apps like Discord were always found lack
 
 No install is required for viewers.
 
-## Internet Sharing (Default Behavior)
+## Internet Sharing (Opt-In)
 
-Nextra tries internet sharing automatically on startup (Cloudflare quick tunnel).
+Nextra does not expose internet sharing unless you opt in.
 
-- If successful: host sees a `Public Link` and can share it immediately.
-- If unavailable: app still works in local/LAN mode.
+- Set `AUTO_PUBLIC_TUNNEL=true` to auto-start Cloudflare quick tunnel.
+- Or set `SHARE_BASE_URL` when behind your own reverse proxy/domain.
+- Without either, the app stays local/LAN only.
 
 ## Quality Expectations
 
@@ -54,6 +55,9 @@ Current model:
 - Room-code based access (no user accounts)
 - Rate limiting and connection limits on signaling
 - Strict default proxy/header trust settings
+- Public tunnel disabled by default (explicit opt-in)
+- Remote media-control disabled by default (`ALLOW_REMOTE_MEDIA_CONTROL=false`)
+- Remote metrics can require `METRICS_TOKEN`
 - `.env`, TLS keys, binaries ignored by default in source workflow
 - Media is not persisted by Nextra itself
 
@@ -67,7 +71,8 @@ Important limits:
 
 - No public link:
   - Wait a few seconds after startup.
-  - If still missing, share local link/room code (LAN) or configure manual `SHARE_BASE_URL`.
+  - Enable `AUTO_PUBLIC_TUNNEL=true` or configure `SHARE_BASE_URL`.
+  - If still missing, share local link/room code (LAN).
 - Viewers cannot connect:
   - Confirm host firewall allows app traffic.
   - Keep host app running.
@@ -86,5 +91,13 @@ npm run package
 ```
 
 `npm run package` builds a release `Nextra.exe` and bundles runtime dependencies for end users.
+
+If cloudflared is not already available locally, secure download fallback is disabled by default.
+To allow it for packaging, set:
+
+```bash
+ALLOW_CLOUDFLARED_DOWNLOAD=1
+CLOUDFLARED_DOWNLOAD_SHA256=<expected_sha256>
+```
 
 > **Note on Distribution:** Do not commit the generated `Nextra.exe` to the Git repository. Instead, distribute it to users via **GitHub Releases**.
