@@ -1,7 +1,8 @@
 # Nextra
 
-Nextra is a low-latency screen sharing app.
-One person hosts a stream, others join from a browser.
+Nextra is a low-latency screen-sharing app.
+One person hosts a stream, and others join from a browser.
+Vibe coded this into existence as other apps like Discord were always found lacking. If you notice any mistakes or want to contribute, feel free to do so. 
 
 ## What You Need
 
