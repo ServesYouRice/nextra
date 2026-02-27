@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -117,6 +118,12 @@ function downloadFileWithRedirects(url, destinationPath, redirectsLeft = 6) {
     });
 }
 
+function getFileSha256(filePath) {
+    const hash = crypto.createHash('sha256');
+    hash.update(fs.readFileSync(filePath));
+    return hash.digest('hex');
+}
+
 function copyCloudflaredToStage(sourcePath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath) {
     const sameAsPrimary = path.resolve(sourcePath) === path.resolve(stageCloudflaredPath);
     if (!sameAsPrimary) {
@@ -135,6 +142,16 @@ async function bundleCloudflared() {
     const stageLibCloudflaredPath = path.join(stageDir, 'lib', bundledName);
     const stageBinCloudflaredPath = path.join(stageDir, 'node_modules', '.bin', bundledName);
     const allowLocalCloudflared = process.env.ALLOW_LOCAL_CLOUDFLARED === '1';
+    const explicitCloudflaredPath = (process.env.CLOUDFLARED_PATH || '').trim();
+
+    if (explicitCloudflaredPath) {
+        if (!fs.existsSync(explicitCloudflaredPath)) {
+            throw new Error(`CLOUDFLARED_PATH does not exist: ${explicitCloudflaredPath}`);
+        }
+        copyCloudflaredToStage(explicitCloudflaredPath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
+        console.log(`Bundled cloudflared from CLOUDFLARED_PATH: ${explicitCloudflaredPath}`);
+        return;
+    }
 
     const localCandidates = [
         path.join(projectRoot, bundledName),
@@ -163,12 +180,30 @@ async function bundleCloudflared() {
         return;
     }
 
+    const allowDownload = process.env.ALLOW_CLOUDFLARED_DOWNLOAD === '1';
+    if (!allowDownload) {
+        throw new Error(
+            'No trusted cloudflared binary found locally. Install cloudflared or set CLOUDFLARED_PATH/PATH. '
+            + 'To allow downloading, set ALLOW_CLOUDFLARED_DOWNLOAD=1 and CLOUDFLARED_DOWNLOAD_SHA256.'
+        );
+    }
+
+    const expectedSha256 = (process.env.CLOUDFLARED_DOWNLOAD_SHA256 || '').trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(expectedSha256)) {
+        throw new Error('CLOUDFLARED_DOWNLOAD_SHA256 must be set to the expected 64-char SHA-256 hash.');
+    }
+
     const assetName = getCloudflaredAssetName();
     const downloadUrl = `https://github.com/cloudflare/cloudflared/releases/latest/download/${assetName}`;
     console.log(`Downloading cloudflared for packaging: ${downloadUrl}`);
     await downloadFileWithRedirects(downloadUrl, stageCloudflaredPath);
+    const actualSha256 = getFileSha256(stageCloudflaredPath);
+    if (actualSha256 !== expectedSha256) {
+        try { fs.unlinkSync(stageCloudflaredPath); } catch { }
+        throw new Error(`cloudflared checksum mismatch (expected ${expectedSha256}, got ${actualSha256}).`);
+    }
     copyCloudflaredToStage(stageCloudflaredPath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
-    console.log('Bundled cloudflared via automatic download.');
+    console.log('Bundled cloudflared via verified download.');
 }
 
 async function main() {

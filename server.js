@@ -88,15 +88,27 @@ function isLocalClientIp(ip) {
     return false;
 }
 
+function getRemoteAddressFromReq(req) {
+    return normalizeIp(
+        req?.socket?.remoteAddress
+        || req?.connection?.remoteAddress
+        || 'unknown'
+    );
+}
+
+function shouldTrustForwardedHeaders(remoteAddress) {
+    if (!config.TRUST_X_FORWARDED_HEADERS) return false;
+    return isLocalClientIp(normalizeIp(remoteAddress));
+}
+
 function getRequestClientIp(req) {
-    if (config.TRUST_X_FORWARDED_HEADERS) {
+    if (shouldTrustForwardedHeaders(getRemoteAddressFromReq(req))) {
         const forwardedFor = parseForwardedFirst(req.headers['x-forwarded-for']);
         if (forwardedFor) return normalizeIp(forwardedFor);
     }
 
     return normalizeIp(
-        req.ip
-        || req.socket?.remoteAddress
+        req.socket?.remoteAddress
         || req.connection?.remoteAddress
         || 'unknown'
     );
@@ -181,7 +193,7 @@ function getShareBaseUrl(req) {
         return manualShareBase;
     }
 
-    if (config.TRUST_X_FORWARDED_HEADERS) {
+    if (shouldTrustForwardedHeaders(getRemoteAddressFromReq(req))) {
         const forwardedProto = parseForwardedFirst(req.headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(req.headers['x-forwarded-host']);
         const proto = (forwardedProto || '').toLowerCase();
@@ -216,8 +228,8 @@ function getLocalBaseUrl() {
     return `https://${config.LAN_IP}:${config.PORT}`;
 }
 
-function getShareBaseUrlFromHeaders(headers = {}) {
-    if (config.TRUST_X_FORWARDED_HEADERS) {
+function getShareBaseUrlFromHeaders(headers = {}, remoteAddress = '') {
+    if (shouldTrustForwardedHeaders(remoteAddress)) {
         const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(headers['x-forwarded-host']);
         const proto = (forwardedProto || '').toLowerCase();
@@ -246,7 +258,10 @@ function getShareBaseUrlForSocket(socket) {
         return manualShareBase;
     }
 
-    const headerBase = getShareBaseUrlFromHeaders(socket?.handshake?.headers || {});
+    const headerBase = getShareBaseUrlFromHeaders(
+        socket?.handshake?.headers || {},
+        socket?.request?.socket?.remoteAddress || socket?.conn?.remoteAddress || socket?.handshake?.address || ''
+    );
     if (headerBase) {
         return headerBase;
     }
@@ -259,7 +274,9 @@ function getShareBaseUrlForSocket(socket) {
 }
 
 function getSocketHandshakeIp(socket) {
-    if (config.TRUST_X_FORWARDED_HEADERS) {
+    if (shouldTrustForwardedHeaders(
+        socket?.request?.socket?.remoteAddress || socket?.conn?.remoteAddress || socket?.handshake?.address || ''
+    )) {
         const forwardedFor = parseForwardedFirst(socket?.handshake?.headers?.['x-forwarded-for']);
         if (forwardedFor) return normalizeIp(forwardedFor);
     }
@@ -297,6 +314,41 @@ function emitServerConfigToAll(io) {
     io.sockets.sockets.forEach((socket) => emitServerConfigToSocket(socket));
 }
 
+function extractMetricsToken(req) {
+    const authHeader = typeof req.headers.authorization === 'string'
+        ? req.headers.authorization.trim()
+        : '';
+    if (authHeader.toLowerCase().startsWith('bearer ')) {
+        return authHeader.slice(7).trim();
+    }
+
+    const headerToken = typeof req.headers['x-metrics-token'] === 'string'
+        ? req.headers['x-metrics-token'].trim()
+        : '';
+    if (headerToken) return headerToken;
+
+    if (typeof req.query?.token === 'string') {
+        return req.query.token.trim();
+    }
+
+    return '';
+}
+
+function timingSafeStringEqual(a, b) {
+    const left = Buffer.from(typeof a === 'string' ? a : '', 'utf-8');
+    const right = Buffer.from(typeof b === 'string' ? b : '', 'utf-8');
+    if (left.length === 0 || right.length === 0) return false;
+    if (left.length !== right.length) return false;
+    return crypto.timingSafeEqual(left, right);
+}
+
+function isMetricsTokenAuthorized(req) {
+    const expected = config.METRICS_TOKEN;
+    if (!expected) return false;
+    const provided = extractMetricsToken(req);
+    return timingSafeStringEqual(provided, expected);
+}
+
 app.get('/api/config', (req, res) => {
     res.json({
         hostUploadMbps: config.HOST_UPLOAD_MBPS,
@@ -309,12 +361,22 @@ app.get('/api/config', (req, res) => {
 
 app.get('/api/metrics', (req, res) => {
     const clientIp = getRequestClientIp(req);
-    if (!config.ALLOW_REMOTE_METRICS && !isLocalClientIp(clientIp)) {
+    const isLocalClient = isLocalClientIp(clientIp);
+    if (!config.ALLOW_REMOTE_METRICS && !isLocalClient) {
         res.status(403).json({ error: 'Metrics access denied for remote clients.' });
         return;
     }
 
+    if (!isLocalClient && config.METRICS_TOKEN && !isMetricsTokenAuthorized(req)) {
+        res.status(401).json({ error: 'Metrics token required for remote access.' });
+        return;
+    }
+
     const rooms = getAllRoomStats();
+    const includeSensitiveRoomFields = isLocalClient || isMetricsTokenAuthorized(req);
+    const roomList = includeSensitiveRoomFields
+        ? rooms
+        : rooms.map(({ code: _code, hostSocketId: _hostSocketId, ...room }) => room);
     const totalViewers = rooms.reduce((sum, room) => sum + room.viewerCount, 0);
     const totalRelayViewers = rooms.reduce((sum, room) => sum + room.relayViewerCount, 0);
     const totalConsumers = rooms.reduce((sum, room) => sum + room.mediasoupConsumerCount, 0);
@@ -327,7 +389,8 @@ app.get('/api/metrics', (req, res) => {
             totalViewers,
             totalRelayViewers,
             totalMediasoupConsumers: totalConsumers,
-            list: rooms,
+            list: roomList,
+            sensitiveFieldsIncluded: includeSensitiveRoomFields,
         },
         sockets: getSocketRuntimeMetrics(),
     });
@@ -363,7 +426,7 @@ const CONNECTION_WINDOW_MS = config.CONNECTION_WINDOW_MS;
 
 function getSocketClientIp(rawSocket) {
     const req = rawSocket.request;
-    if (config.TRUST_X_FORWARDED_HEADERS) {
+    if (shouldTrustForwardedHeaders(req?.socket?.remoteAddress || req?.connection?.remoteAddress || '')) {
         const forwardedFor = parseForwardedFirst(req?.headers?.['x-forwarded-for']);
         if (forwardedFor) return normalizeIp(forwardedFor);
     }
@@ -474,6 +537,9 @@ function cleanupGlobalResources() {
         console.log(`Public IP: ${config.PUBLIC_IP}`);
     } else {
         console.log('Public IP: not set (use SHARE_BASE_URL or enable AUTO_DETECT_PUBLIC_IP)');
+    }
+    if (config.TRUST_X_FORWARDED_HEADERS) {
+        console.log('Forwarded header trust: enabled for local/private proxy peers only.');
     }
 
     const { cert, key } = await getOrCreateCert();
