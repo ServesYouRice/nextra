@@ -24,7 +24,7 @@ function copyEntry(relativePath) {
     }
 
     fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.cpSync(src, dest, { recursive: true });
+    fs.cpSync(src, dest, { recursive: true, dereference: true });
 }
 
 function run(command, args) {
