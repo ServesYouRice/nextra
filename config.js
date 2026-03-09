@@ -45,6 +45,7 @@ const lanIp = (process.env.LAN_IP || '').trim() || getLanIp();
 const explicitPublicIp = (process.env.PUBLIC_IP || '').trim();
 const bindHost = (process.env.BIND_HOST || '127.0.0.1').trim() || '127.0.0.1';
 const rtcListenIp = (process.env.RTC_LISTEN_IP || (bindHost === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1')).trim();
+const isPackagedRuntime = process.env.NEXTRA_PACKAGED === '1';
 
 module.exports = {
     // Server
@@ -63,7 +64,8 @@ module.exports = {
     ALLOW_TRYCLOUDFLARE_ORIGINS: parseBoolEnv(process.env.ALLOW_TRYCLOUDFLARE_ORIGINS, false),
     ALLOW_SOCKET_NO_ORIGIN: parseBoolEnv(process.env.ALLOW_SOCKET_NO_ORIGIN, false),
     EXPOSE_LAN_URL: parseBoolEnv(process.env.EXPOSE_LAN_URL, false),
-    AUTO_PUBLIC_TUNNEL: parseBoolEnv(process.env.AUTO_PUBLIC_TUNNEL, false),
+    // Packaged builds auto-enable the public tunnel so end users can share from the EXE without editing .env.
+    AUTO_PUBLIC_TUNNEL: parseBoolEnv(process.env.AUTO_PUBLIC_TUNNEL, isPackagedRuntime),
     PUBLIC_TUNNEL_PROVIDER: (process.env.PUBLIC_TUNNEL_PROVIDER || 'cloudflared').trim().toLowerCase(),
     CLOUDFLARED_PATH: (process.env.CLOUDFLARED_PATH || '').trim(),
     PUBLIC_TUNNEL_NO_TLS_VERIFY: parseBoolEnv(process.env.PUBLIC_TUNNEL_NO_TLS_VERIFY, true),

@@ -5,6 +5,24 @@ import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
 
+function isLikelyLocalOrigin(origin) {
+    try {
+        const parsed = new URL(origin);
+        const host = parsed.hostname.toLowerCase();
+        return (
+            host === 'localhost'
+            || host === '127.0.0.1'
+            || host === '::1'
+            || host === '[::1]'
+            || /^192\.168\./.test(host)
+            || /^10\./.test(host)
+            || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+        );
+    } catch {
+        return true;
+    }
+}
+
 function getSpatialLayerForPreference(preference) {
     switch (preference) {
     case 'low':
@@ -227,6 +245,10 @@ export default function WatchView({ initialCode = '' }) {
         chunkQueueRef.current = [];
         queuedBytesRef.current = 0;
         let appendingLock = false;
+        let mimeType = 'video/webm;codecs=vp8,opus';
+        let initResultData = null;
+        let liveInitPayload = null;
+        let resolveLiveInit = null;
 
         const enqueueChunk = (buf) => {
             const uint = new Uint8Array(buf);
@@ -264,6 +286,16 @@ export default function WatchView({ initialCode = '' }) {
             }
         };
 
+        const onMediaInit = (payload = {}) => {
+            if (!payload?.mimeType) return;
+            liveInitPayload = payload;
+            mimeType = payload.mimeType;
+            if (resolveLiveInit) {
+                resolveLiveInit(payload);
+                resolveLiveInit = null;
+            }
+        };
+
         const processQueue = () => {
             if (appendingLock || !sourceBufferRef.current || sourceBufferRef.current.updating) return;
             if (!chunkQueueRef.current.length) return;
@@ -285,8 +317,9 @@ export default function WatchView({ initialCode = '' }) {
             }
         };
 
-        let mimeType = 'video/webm;codecs=vp8,opus';
-        let initResultData = null;
+        socket.on('media-init', onMediaInit);
+        socket.on('media-chunk', onChunk);
+
         try {
             initResultData = await socketRequest(socket, 'get-media-init');
             if (initResultData.init?.mimeType) {
@@ -297,23 +330,21 @@ export default function WatchView({ initialCode = '' }) {
         }
 
         if (!initResultData?.init?.mimeType) {
-            const liveInit = await new Promise((resolve, reject) => {
+            const liveInit = liveInitPayload || await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
-                    cleanup();
+                    cleanupWait();
                     reject(new Error('Relay stream is not ready yet. Try again in a moment.'));
                 }, 7000);
 
-                const onMediaInit = (payload = {}) => {
-                    cleanup();
+                const cleanupWait = () => {
+                    clearTimeout(timeout);
+                    resolveLiveInit = null;
+                };
+
+                resolveLiveInit = (payload) => {
+                    cleanupWait();
                     resolve(payload);
                 };
-
-                const cleanup = () => {
-                    clearTimeout(timeout);
-                    socket.off('media-init', onMediaInit);
-                };
-
-                socket.on('media-init', onMediaInit);
             });
 
             if (liveInit?.mimeType) {
@@ -325,8 +356,6 @@ export default function WatchView({ initialCode = '' }) {
         if (!mseMimeSupported) {
             throw new Error('Your browser does not support live WebM streaming. Use Chrome, Edge, or Firefox.');
         }
-
-        socket.on('media-chunk', onChunk);
 
         const mediaSource = new MediaSource();
         mediaSourceRef.current = mediaSource;
@@ -392,6 +421,7 @@ export default function WatchView({ initialCode = '' }) {
         }, 200);
 
         relayCleanupRef.current = () => {
+            socket.off('media-init', onMediaInit);
             socket.off('media-chunk', onChunk);
             clearInterval(safetyInterval);
         };
@@ -510,20 +540,33 @@ export default function WatchView({ initialCode = '' }) {
         setWatchLoading(true);
         cleanupPlayback();
 
+        const preferRelayFirst = !isLikelyLocalOrigin(window.location.origin);
+
         try {
+            if (preferRelayFirst) {
+                await startRelayPlayback();
+                setError('Using compatibility relay mode (higher latency than WebRTC).');
+                return;
+            }
+
             await startMediasoupPlayback();
-        } catch (mediasoupErr) {
-            console.warn('[Nextra] mediasoup playback failed; trying relay fallback:', mediasoupErr.message);
+        } catch (primaryErr) {
+            const fallbackLabel = preferRelayFirst ? 'mediasoup fallback' : 'relay fallback';
+            console.warn(`[Nextra] Primary playback failed; trying ${fallbackLabel}:`, primaryErr.message);
             cleanupPlayback();
 
             try {
-                await startRelayPlayback();
-                setError('Using compatibility relay mode (higher latency than WebRTC).');
-            } catch (relayErr) {
+                if (preferRelayFirst) {
+                    await startMediasoupPlayback();
+                } else {
+                    await startRelayPlayback();
+                    setError('Using compatibility relay mode (higher latency than WebRTC).');
+                }
+            } catch (fallbackErr) {
                 cleanupPlayback();
                 setWatching(false);
-                console.error('[Nextra] Watch failed:', relayErr);
-                setError(relayErr.message || mediasoupErr.message || 'Failed to start watching.');
+                console.error('[Nextra] Watch failed:', fallbackErr);
+                setError(fallbackErr.message || primaryErr.message || 'Failed to start watching.');
             }
         } finally {
             setWatchLoading(false);

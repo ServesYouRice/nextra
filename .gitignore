@@ -22,6 +22,7 @@ certs/
 *.pfx
 *.cer
 Nextra.exe
+Nextra.exe.sha256
 cloudflared.exe
 cloudflared
 .caxa-stage/

@@ -66,6 +66,8 @@ export default function HostView() {
     const [hostUploadMbps, setHostUploadMbps] = useState(20);
     const [lanBaseUrl, setLanBaseUrl] = useState(window.location.origin);
     const [shareBaseUrl, setShareBaseUrl] = useState('');
+    const [publicShareStatus, setPublicShareStatus] = useState('disabled');
+    const [publicShareError, setPublicShareError] = useState('');
     const [relayFlushIntervalMs, setRelayFlushIntervalMs] = useState(300);
     const [relayVideoBitsPerSecond, setRelayVideoBitsPerSecond] = useState(2_500_000);
     const [relayViewerCount, setRelayViewerCount] = useState(0);
@@ -504,6 +506,12 @@ export default function HostView() {
         } else if (!isLikelyLocalOrigin(window.location.origin)) {
             setShareBaseUrl(window.location.origin.replace(/\/$/, ''));
         }
+        if (typeof data.publicShareStatus === 'string') {
+            setPublicShareStatus(data.publicShareStatus);
+        }
+        if (typeof data.publicShareError === 'string') {
+            setPublicShareError(data.publicShareError);
+        }
         if (typeof data.relayFlushIntervalMs === 'number' && data.relayFlushIntervalMs >= 100) {
             setRelayFlushIntervalMs(data.relayFlushIntervalMs);
         }
@@ -539,6 +547,13 @@ export default function HostView() {
     const localWatchLink = roomCode ? `${lanBaseUrl}/#watch/${roomCode}` : '';
     const publicWatchLink = roomCode && shareBaseUrl ? `${shareBaseUrl}/#watch/${roomCode}` : '';
     const showPublicLink = !!publicWatchLink && publicWatchLink !== localWatchLink;
+    const publicLinkHint = showPublicLink
+        ? ''
+        : publicShareStatus === 'starting'
+            ? 'Public link is starting automatically. Wait a few seconds and it will appear here.'
+            : publicShareStatus === 'error'
+                ? `Public link unavailable on this machine. ${publicShareError || 'Built-in tunnel startup failed.'}`
+                : 'Public link unavailable on this machine. Share the local link or room code instead.';
     const formattedRoomCode = roomCode ? `${roomCode.slice(0, 3)}-${roomCode.slice(3)}` : '';
 
     return (
@@ -689,7 +704,7 @@ export default function HostView() {
 
                         {!showPublicLink && (
                             <span className="copy-hint" style={{ marginTop: '0.5rem' }}>
-                                Public link unavailable. Start with `cloudflared` available for auto tunnel, or set `SHARE_BASE_URL` in `.env`.
+                                {publicLinkHint}
                             </span>
                         )}
 
