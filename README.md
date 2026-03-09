@@ -8,7 +8,7 @@ Vibe coded this into existence as other apps like Discord were always found lack
 
 - Host: Windows machine running `Nextra.exe`
 - Viewers: any modern browser (no install)
-- Internet sharing: opt-in (enable tunnel or set `SHARE_BASE_URL`)
+- Internet sharing: automatic in packaged `Nextra.exe`, configurable in source/dev
 
 ## Host Guide (Fast Path)
 
@@ -28,9 +28,10 @@ Vibe coded this into existence as other apps like Discord were always found lack
 
 No install is required for viewers.
 
-## Internet Sharing (Opt-In)
+## Internet Sharing
 
-Nextra does not expose internet sharing unless you opt in.
+Packaged `Nextra.exe` automatically starts a Cloudflare quick tunnel and shows a `Public Link` once it is ready.
+Source/dev runs remain configurable.
 
 - Set `AUTO_PUBLIC_TUNNEL=true` to auto-start Cloudflare quick tunnel.
 - Or set `SHARE_BASE_URL` when behind your own reverse proxy/domain.
@@ -55,7 +56,7 @@ Current model:
 - Room-code based access (no user accounts)
 - Rate limiting and connection limits on signaling
 - Strict default proxy/header trust settings
-- Public tunnel disabled by default (explicit opt-in)
+- Packaged app auto-starts a public tunnel unless you explicitly disable it
 - Remote media-control disabled by default (`ALLOW_REMOTE_MEDIA_CONTROL=false`)
 - Remote metrics can require `METRICS_TOKEN`
 - `.env`, TLS keys, binaries ignored by default in source workflow
@@ -71,7 +72,7 @@ Important limits:
 
 - No public link:
   - Wait a few seconds after startup.
-  - Enable `AUTO_PUBLIC_TUNNEL=true` or configure `SHARE_BASE_URL`.
+  - In source/dev, enable `AUTO_PUBLIC_TUNNEL=true` or configure `SHARE_BASE_URL`.
   - If still missing, share local link/room code (LAN).
 - Viewers cannot connect:
   - Confirm host firewall allows app traffic.

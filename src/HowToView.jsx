@@ -41,9 +41,9 @@ export default function HowToView() {
             <div className="article-step">
                 <strong>3. Share links</strong>
                 <p>
-                    Use the Room Code for direct joins. Nextra will try to create a public link automatically
-                    if <code>cloudflared</code> is available. You can also set <code>SHARE_BASE_URL</code>
-                    manually (for example your own tunnel/reverse-proxy domain).
+                    Use the Room Code for direct joins. Packaged <code>Nextra.exe</code> automatically creates
+                    a public link when its built-in tunnel is ready. In source/dev setups, you can also set
+                    <code>SHARE_BASE_URL</code> manually or enable <code>AUTO_PUBLIC_TUNNEL</code>.
                 </p>
             </div>
 

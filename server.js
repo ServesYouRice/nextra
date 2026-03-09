@@ -22,6 +22,8 @@ const app = express();
 let runtimeShareBaseUrl = '';
 let stopPublicTunnel = null;
 let ioServer = null;
+let publicShareStatus = normalizeBaseUrl(config.SHARE_BASE_URL) ? 'manual' : (config.AUTO_PUBLIC_TUNNEL ? 'starting' : 'disabled');
+let publicShareError = '';
 
 if (config.TRUST_PROXY !== false) {
     app.set('trust proxy', config.TRUST_PROXY);
@@ -149,6 +151,73 @@ function normalizeOrigin(origin) {
 function normalizeBaseUrl(url) {
     const normalized = normalizeOrigin(url);
     return normalized.replace(/\/$/, '');
+}
+
+function isAllowedSocketOrigin(origin) {
+    const normalized = normalizeOrigin(origin);
+    if (!normalized) return false;
+
+    const allowed = getAllowedOrigins();
+    if (allowed.has(normalized)) return true;
+
+    return config.ALLOW_TRYCLOUDFLARE_ORIGINS
+        && /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/i.test(normalized);
+}
+
+function getSocketRequestHostOrigin(req) {
+    const remoteAddress = getRemoteAddressFromReq(req);
+    let proto = req?.socket?.encrypted ? 'https' : 'http';
+
+    if (shouldTrustForwardedHeaders(remoteAddress)) {
+        const forwardedProto = parseForwardedFirst(req?.headers?.['x-forwarded-proto']);
+        if (forwardedProto === 'http' || forwardedProto === 'https') {
+            proto = forwardedProto;
+        }
+    }
+
+    const hostHeader = typeof req?.headers?.host === 'string' ? req.headers.host : '';
+    const hostParts = parseUrlHostParts(hostHeader);
+    if (!hostParts) return '';
+
+    return `${proto}://${hostParts.hostWithPort}`;
+}
+
+function validateSocketHandshakeRequest(req) {
+    const originHeader = typeof req?.headers?.origin === 'string' ? req.headers.origin : '';
+    const normalizedOrigin = normalizeOrigin(originHeader);
+
+    if (normalizedOrigin) {
+        if (isAllowedSocketOrigin(normalizedOrigin)) {
+            return { ok: true };
+        }
+
+        return {
+            ok: false,
+            reason: `Blocked CORS origin: ${originHeader}`,
+        };
+    }
+
+    if (config.ALLOW_SOCKET_NO_ORIGIN) {
+        return { ok: true };
+    }
+
+    const refererHeader = typeof req?.headers?.referer === 'string'
+        ? req.headers.referer
+        : (typeof req?.headers?.referrer === 'string' ? req.headers.referrer : '');
+    const refererOrigin = normalizeOrigin(refererHeader);
+    if (refererOrigin && isAllowedSocketOrigin(refererOrigin)) {
+        return { ok: true };
+    }
+
+    const hostOrigin = getSocketRequestHostOrigin(req);
+    if (hostOrigin && isAllowedSocketOrigin(hostOrigin)) {
+        return { ok: true };
+    }
+
+    return {
+        ok: false,
+        reason: 'Blocked socket connection with missing or untrusted Origin header.',
+    };
 }
 
 function getAllowedOrigins() {
@@ -301,6 +370,8 @@ function buildSocketConfigPayload(socket) {
         lanUrl: shouldExposeLanForSocket(socket) ? getLocalBaseUrl() : '',
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
+        publicShareStatus,
+        publicShareError,
     };
 }
 
@@ -356,6 +427,8 @@ app.get('/api/config', (req, res) => {
         lanUrl: shouldExposeLanUrl(req) ? getLocalBaseUrl() : '',
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
+        publicShareStatus,
+        publicShareError,
     });
 });
 
@@ -465,17 +538,28 @@ async function detectPublicIpIfEnabled() {
 
 async function maybeStartPublicTunnel() {
     if (normalizeBaseUrl(config.SHARE_BASE_URL)) {
+        publicShareStatus = 'manual';
+        publicShareError = '';
         return;
     }
 
     if (!config.AUTO_PUBLIC_TUNNEL) {
+        publicShareStatus = 'disabled';
+        publicShareError = '';
         return;
     }
 
     if (config.PUBLIC_TUNNEL_PROVIDER !== 'cloudflared') {
+        publicShareStatus = 'error';
+        publicShareError = `Unsupported tunnel provider: ${config.PUBLIC_TUNNEL_PROVIDER}`;
         console.warn(`Unsupported PUBLIC_TUNNEL_PROVIDER: ${config.PUBLIC_TUNNEL_PROVIDER}. Skipping tunnel startup.`);
+        emitServerConfigToAll(ioServer);
         return;
     }
+
+    publicShareStatus = 'starting';
+    publicShareError = '';
+    emitServerConfigToAll(ioServer);
 
     try {
         const tunnel = await startCloudflareQuickTunnel({
@@ -487,6 +571,8 @@ async function maybeStartPublicTunnel() {
 
         runtimeShareBaseUrl = normalizeBaseUrl(tunnel.baseUrl);
         stopPublicTunnel = tunnel.stop;
+        publicShareStatus = 'active';
+        publicShareError = '';
         console.log(`Public tunnel active: ${runtimeShareBaseUrl}`);
         emitServerConfigToAll(ioServer);
 
@@ -496,11 +582,16 @@ async function maybeStartPublicTunnel() {
             }
             runtimeShareBaseUrl = '';
             stopPublicTunnel = null;
+            publicShareStatus = 'error';
+            publicShareError = 'Built-in public tunnel closed.';
             emitServerConfigToAll(ioServer);
         });
     } catch (err) {
+        publicShareStatus = 'error';
+        publicShareError = err?.message || 'Built-in public tunnel failed to start.';
         console.warn(`Public tunnel unavailable: ${err.message}`);
         console.warn('Continuing in local/LAN mode. Set SHARE_BASE_URL manually or install cloudflared for auto internet links.');
+        emitServerConfigToAll(ioServer);
     }
 }
 
@@ -527,6 +618,8 @@ function cleanupGlobalResources() {
 
     ioServer = null;
     runtimeShareBaseUrl = '';
+    publicShareStatus = normalizeBaseUrl(config.SHARE_BASE_URL) ? 'manual' : (config.AUTO_PUBLIC_TUNNEL ? 'starting' : 'disabled');
+    publicShareError = '';
 }
 
 (async () => {
@@ -554,25 +647,25 @@ function cleanupGlobalResources() {
     const io = new Server(httpsServer, {
         path: config.SOCKET_PATH,
         maxHttpBufferSize: config.SOCKET_MAX_HTTP_BUFFER_SIZE,
+        allowRequest: (req, callback) => {
+            const validation = validateSocketHandshakeRequest(req);
+            if (!validation.ok) {
+                console.warn(validation.reason);
+                return callback(validation.reason, false);
+            }
+
+            return callback(null, true);
+        },
         cors: {
             origin: (origin, cb) => {
                 if (!origin) {
-                    if (config.ALLOW_SOCKET_NO_ORIGIN) return cb(null, true);
-                    console.warn('Blocked socket connection with missing Origin header.');
-                    return cb(new Error('Origin header required'));
-                }
-
-                const normalized = normalizeOrigin(origin);
-                const allowed = getAllowedOrigins();
-                if (normalized && allowed.has(normalized)) {
                     return cb(null, true);
                 }
 
-                if (config.ALLOW_TRYCLOUDFLARE_ORIGINS && /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/i.test(normalized)) {
+                if (isAllowedSocketOrigin(origin)) {
                     return cb(null, true);
                 }
 
-                console.warn(`Blocked CORS origin: ${origin}`);
                 cb(new Error('Origin not allowed'));
             },
             methods: ['GET', 'POST'],
@@ -664,3 +757,4 @@ function cleanupGlobalResources() {
     cleanupGlobalResources();
     process.exit(1);
 });
+
