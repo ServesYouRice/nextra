@@ -76,6 +76,9 @@ Important limits:
 - Viewers cannot connect:
   - Confirm host firewall allows app traffic.
   - Keep host app running.
+- App closes immediately:
+  - Nextra now shows a Windows error popup when startup fails.
+  - Check `%LOCALAPPDATA%\\Nextra\\logs\\startup-latest.log` for the last startup failure.
 - Poor quality:
   - Reduce host desktop load.
   - Lower expected resolution/framerate.
@@ -90,7 +93,7 @@ npm run build
 npm run package
 ```
 
-`npm run package` builds a release `Nextra.exe` and bundles runtime dependencies for end users.
+`npm run package` builds `Nextra.exe`, writes `Nextra.exe.sha256`, and bundles runtime dependencies for end users.
 
 If cloudflared is not already available locally, secure download fallback is disabled by default.
 To allow it for packaging, set:

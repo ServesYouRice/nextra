@@ -7,10 +7,13 @@ const { spawnSync } = require('child_process');
 const projectRoot = path.resolve(__dirname, '..');
 const stageDir = path.join(projectRoot, '.caxa-stage');
 const outputExe = path.join(projectRoot, 'Nextra.exe');
+const outputSha256 = path.join(projectRoot, 'Nextra.exe.sha256');
 
 const requiredEntries = [
     'server.js',
     'config.js',
+    'package.json',
+    'package-lock.json',
     'lib',
     'dist',
     'node_modules',
@@ -124,6 +127,60 @@ function getFileSha256(filePath) {
     return hash.digest('hex');
 }
 
+function hashPathRecursive(hash, fullPath, relativePath) {
+    const normalizedRelativePath = relativePath.split(path.sep).join('/');
+    const stats = fs.statSync(fullPath);
+
+    if (stats.isDirectory()) {
+        hash.update(`dir:${normalizedRelativePath}\n`);
+        fs.readdirSync(fullPath)
+            .sort((left, right) => left.localeCompare(right))
+            .forEach((name) => {
+                hashPathRecursive(
+                    hash,
+                    path.join(fullPath, name),
+                    path.join(relativePath, name)
+                );
+            });
+        return;
+    }
+
+    hash.update(`file:${normalizedRelativePath}:${stats.size}\n`);
+    hash.update(fs.readFileSync(fullPath));
+}
+
+function getBuildIdentifier() {
+    const hash = crypto.createHash('sha256');
+    const identifierInputs = [
+        'server.js',
+        'config.js',
+        'package.json',
+        'package-lock.json',
+        'lib',
+        'dist',
+    ];
+
+    identifierInputs.forEach((relativePath) => {
+        const fullPath = path.join(stageDir, relativePath);
+        if (!fs.existsSync(fullPath)) return;
+        hashPathRecursive(hash, fullPath, relativePath);
+    });
+
+    const bundledCloudflared = path.join(stageDir, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
+    if (fs.existsSync(bundledCloudflared)) {
+        hashPathRecursive(hash, bundledCloudflared, path.basename(bundledCloudflared));
+    }
+
+    return `nextra-${hash.digest('hex').slice(0, 12)}`;
+}
+
+function writeReleaseChecksum() {
+    const checksum = getFileSha256(outputExe);
+    const line = `${checksum} *${path.basename(outputExe)}\n`;
+    fs.writeFileSync(outputSha256, line, 'utf8');
+    console.log(`Wrote checksum: ${outputSha256}`);
+}
+
 function copyCloudflaredToStage(sourcePath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath) {
     const sameAsPrimary = path.resolve(sourcePath) === path.resolve(stageCloudflaredPath);
     if (!sameAsPrimary) {
@@ -212,6 +269,7 @@ async function main() {
 
     requiredEntries.forEach(copyEntry);
     await bundleCloudflared();
+    const buildIdentifier = getBuildIdentifier();
 
     run('npx', [
         'caxa',
@@ -219,10 +277,15 @@ async function main() {
         stageDir,
         '--output',
         outputExe,
+        '--identifier',
+        buildIdentifier,
         '--',
         '{{caxa}}/node_modules/.bin/node',
-        'server.js',
+        '-r',
+        '{{caxa}}/lib/startupRuntime.js',
+        '{{caxa}}/server.js',
     ]);
+    writeReleaseChecksum();
 
     fs.rmSync(stageDir, { recursive: true, force: true });
     console.log(`Packaged executable: ${outputExe}`);
