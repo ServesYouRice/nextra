@@ -151,14 +151,7 @@ function hashPathRecursive(hash, fullPath, relativePath) {
 
 function getBuildIdentifier() {
     const hash = crypto.createHash('sha256');
-    const identifierInputs = [
-        'server.js',
-        'config.js',
-        'package.json',
-        'package-lock.json',
-        'lib',
-        'dist',
-    ];
+    const identifierInputs = requiredEntries;
 
     identifierInputs.forEach((relativePath) => {
         const fullPath = path.join(stageDir, relativePath);

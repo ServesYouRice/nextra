@@ -297,6 +297,58 @@ function getLocalBaseUrl() {
     return `https://${config.LAN_IP}:${config.PORT}`;
 }
 
+function getLoopbackBaseUrl() {
+    return `https://127.0.0.1:${config.PORT}`;
+}
+
+async function probeExistingNextraInstance() {
+    return new Promise((resolve) => {
+        const req = https.get(
+            {
+                hostname: '127.0.0.1',
+                port: config.PORT,
+                path: '/api/config',
+                rejectUnauthorized: false,
+                timeout: 1500,
+                headers: {
+                    accept: 'application/json',
+                },
+            },
+            (res) => {
+                if (res.statusCode !== 200) {
+                    res.resume();
+                    resolve(null);
+                    return;
+                }
+
+                let body = '';
+                res.setEncoding('utf8');
+                res.on('data', (chunk) => {
+                    body += chunk;
+                    if (body.length > 8192) {
+                        body = body.slice(0, 8192);
+                    }
+                });
+                res.on('end', () => {
+                    try {
+                        const parsed = JSON.parse(body);
+                        const looksLikeNextra = parsed
+                            && typeof parsed === 'object'
+                            && Object.prototype.hasOwnProperty.call(parsed, 'publicShareStatus')
+                            && Object.prototype.hasOwnProperty.call(parsed, 'hostUploadMbps');
+                        resolve(looksLikeNextra ? parsed : null);
+                    } catch {
+                        resolve(null);
+                    }
+                });
+            }
+        );
+
+        req.on('timeout', () => req.destroy(new Error('probe timeout')));
+        req.on('error', () => resolve(null));
+    });
+}
+
 function getShareBaseUrlFromHeaders(headers = {}, remoteAddress = '') {
     if (shouldTrustForwardedHeaders(remoteAddress)) {
         const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
@@ -622,6 +674,27 @@ function cleanupGlobalResources() {
     publicShareError = '';
 }
 
+async function handleHttpsServerError(err) {
+    console.error(`HTTPS server error: ${err.message}`);
+    if (err.code === 'EADDRINUSE') {
+        const runningInstance = await probeExistingNextraInstance();
+        if (runningInstance) {
+            console.log(`Nextra is already running at ${getLoopbackBaseUrl()}.`);
+            cleanupGlobalResources();
+            process.exit(0);
+            return;
+        }
+
+        console.error(`Port ${config.PORT} is already in use on ${config.BIND_HOST}.`);
+        cleanupGlobalResources();
+        process.exit(1);
+        return;
+    }
+
+    cleanupGlobalResources();
+    process.exit(1);
+}
+
 (async () => {
     await detectPublicIpIfEnabled();
 
@@ -710,12 +783,7 @@ function cleanupGlobalResources() {
     startJoinCleanup();
 
     httpsServer.on('error', (err) => {
-        console.error(`HTTPS server error: ${err.message}`);
-        if (err.code === 'EADDRINUSE') {
-            console.error(`Port ${config.PORT} is already in use on ${config.BIND_HOST}.`);
-        }
-        cleanupGlobalResources();
-        process.exit(1);
+        void handleHttpsServerError(err);
     });
 
     httpsServer.listen(config.PORT, config.BIND_HOST, () => {
