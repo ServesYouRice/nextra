@@ -20,6 +20,7 @@
   --red: #E55B5B;
   --amber: #E5A84B;
   --amber-muted: rgba(229, 168, 75, 0.08);
+  --media-stage-max-width: 1680px;
   --radius: 8px;
   --radius-lg: 12px;
   --transition: 180ms ease;
@@ -356,8 +357,7 @@ body {
 /* ========== VIDEO ========== */
 .video-container {
   position: relative;
-  width: 90%;
-  max-width: 1200px;
+  width: min(100%, var(--media-stage-max-width));
   margin: 0 auto 0.5rem;
   aspect-ratio: 16 / 9;
   background: var(--bg-2);
@@ -371,6 +371,16 @@ body {
   height: 100%;
   object-fit: contain;
   background: #0a0a0c;
+}
+
+.watch-video {
+  max-width: 60%;
+}
+
+@media (max-width: 900px) {
+  .watch-video {
+    max-width: 100%;
+  }
 }
 
 .video-overlay {
@@ -473,11 +483,12 @@ body {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  width: min(100%, var(--media-stage-max-width));
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 1.25rem 1.5rem;
-  margin-bottom: 1rem;
+  margin: 0 auto 1rem;
 }
 
 .room-code-display {
@@ -569,6 +580,8 @@ body {
   align-items: center;
   gap: 0.4rem;
   justify-content: center;
+  width: min(100%, var(--media-stage-max-width));
+  margin: 0 auto;
   color: var(--text-3);
   font-size: 0.8rem;
 }
@@ -662,6 +675,58 @@ body {
   }
 }
 
+/* ========== HOST LAYOUT ========== */
+.host-layout {
+  display: flex;
+  gap: 3rem;
+  align-items: flex-start;
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+.host-video-section {
+  flex: 1;
+  max-width: 720px;
+  min-width: 0;
+}
+
+.host-side-panel {
+  flex: 1;
+  max-width: 450px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.host-side-panel .settings-panel,
+.host-side-panel .room-info {
+  margin: 0;
+  width: 100%;
+}
+
+.host-side-panel .room-info {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1rem;
+}
+
+.select-input {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-1);
+  outline: none;
+  width: 100%;
+  cursor: pointer;
+  transition: border-color var(--transition);
+}
+
+.select-input:focus {
+  border-color: var(--accent);
+}
+
 /* ========== RESPONSIVE ========== */
 @media (max-width: 640px) {
   .card-grid {
@@ -705,5 +770,14 @@ body {
 
   .nav-links {
     gap: 1rem;
+  }
+}
+
+@media (max-width: 900px) {
+  .host-layout {
+    flex-direction: column;
+  }
+  .host-side-panel {
+    width: 100%;
   }
 }

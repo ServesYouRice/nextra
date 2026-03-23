@@ -105,6 +105,8 @@ function shouldTrustForwardedHeaders(remoteAddress) {
 
 function getRequestClientIp(req) {
     if (shouldTrustForwardedHeaders(getRemoteAddressFromReq(req))) {
+        const cfConnectingIp = parseForwardedFirst(req.headers['cf-connecting-ip']);
+        if (cfConnectingIp) return normalizeIp(cfConnectingIp);
         const forwardedFor = parseForwardedFirst(req.headers['x-forwarded-for']);
         if (forwardedFor) return normalizeIp(forwardedFor);
     }
@@ -398,6 +400,8 @@ function getSocketHandshakeIp(socket) {
     if (shouldTrustForwardedHeaders(
         socket?.request?.socket?.remoteAddress || socket?.conn?.remoteAddress || socket?.handshake?.address || ''
     )) {
+        const cfConnectingIp = parseForwardedFirst(socket?.handshake?.headers?.['cf-connecting-ip']);
+        if (cfConnectingIp) return normalizeIp(cfConnectingIp);
         const forwardedFor = parseForwardedFirst(socket?.handshake?.headers?.['x-forwarded-for']);
         if (forwardedFor) return normalizeIp(forwardedFor);
     }
@@ -552,6 +556,8 @@ const CONNECTION_WINDOW_MS = config.CONNECTION_WINDOW_MS;
 function getSocketClientIp(rawSocket) {
     const req = rawSocket.request;
     if (shouldTrustForwardedHeaders(req?.socket?.remoteAddress || req?.connection?.remoteAddress || '')) {
+        const cfConnectingIp = parseForwardedFirst(req?.headers?.['cf-connecting-ip']);
+        if (cfConnectingIp) return normalizeIp(cfConnectingIp);
         const forwardedFor = parseForwardedFirst(req?.headers?.['x-forwarded-for']);
         if (forwardedFor) return normalizeIp(forwardedFor);
     }

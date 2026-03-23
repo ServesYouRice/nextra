@@ -5,35 +5,52 @@ import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
 
-function isLikelyLocalOrigin(origin) {
-    try {
-        const parsed = new URL(origin);
-        const host = parsed.hostname.toLowerCase();
-        return (
-            host === 'localhost'
-            || host === '127.0.0.1'
-            || host === '::1'
-            || host === '[::1]'
-            || /^192\.168\./.test(host)
-            || /^10\./.test(host)
-            || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
-        );
-    } catch {
-        return true;
-    }
-}
 
 function getSpatialLayerForPreference(preference) {
     switch (preference) {
-    case 'low':
-        return 0;
-    case 'balanced':
-        return 1;
-    case 'high':
-    case 'auto':
-    default:
-        return 2;
+        case 'low':
+            return 0;
+        case 'balanced':
+            return 1;
+        case 'high':
+        case 'auto':
+        default:
+            return 2;
     }
+}
+
+function toUint8ArraySync(data) {
+    if (!data) return null;
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (ArrayBuffer.isView(data)) {
+        return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    }
+    if (Array.isArray(data)) {
+        return Uint8Array.from(data);
+    }
+    if (data?.data instanceof ArrayBuffer) return new Uint8Array(data.data);
+    if (ArrayBuffer.isView(data?.data)) {
+        return new Uint8Array(data.data.buffer, data.data.byteOffset, data.data.byteLength);
+    }
+    if (Array.isArray(data?.data)) {
+        return Uint8Array.from(data.data);
+    }
+    return null;
+}
+
+async function toUint8Array(data) {
+    if (data instanceof Blob) {
+        return new Uint8Array(await data.arrayBuffer());
+    }
+    return toUint8ArraySync(data);
+}
+
+function areUint8ArraysEqual(left, right) {
+    if (!left || !right || left.byteLength !== right.byteLength) return false;
+    for (let index = 0; index < left.byteLength; index += 1) {
+        if (left[index] !== right[index]) return false;
+    }
+    return true;
 }
 
 export default function WatchView({ initialCode = '' }) {
@@ -47,10 +64,10 @@ export default function WatchView({ initialCode = '' }) {
     const [mediaControlStatus, setMediaControlStatus] = useState('');
     const [hasProducer, setHasProducer] = useState(false);
     const [allowMediaControl, setAllowMediaControl] = useState(true);
-    const [isMuted, setIsMuted] = useState(true);
+    const [isMuted, setIsMuted] = useState(false);
     const [watchLoading, setWatchLoading] = useState(false);
     const [playbackMode, setPlaybackMode] = useState('');
-    const [viewerLayerPreference, setViewerLayerPreference] = useState('auto');
+    const [viewerLayerPreference, setViewerLayerPreference] = useState('high');
 
     const videoRef = useRef(null);
     const deviceRef = useRef(null);
@@ -64,6 +81,7 @@ export default function WatchView({ initialCode = '' }) {
     const userPausedRef = useRef(false);
     const relayCleanupRef = useRef(null);
     const relaySubscribedRef = useRef(false);
+    const relayUnsupportedWarnedRef = useRef(false);
     const mediaStreamRef = useRef(null);
     const consumedProducerIdsRef = useRef(new Set());
     const videoConsumerIdsRef = useRef(new Set());
@@ -114,26 +132,43 @@ export default function WatchView({ initialCode = '' }) {
         sourceBufferRef.current = null;
         chunkQueueRef.current = [];
         queuedBytesRef.current = 0;
+        relayUnsupportedWarnedRef.current = false;
         setPlaybackMode('');
     }, [socket]);
+
+    const syncMutedState = useCallback((muted) => {
+        if (videoRef.current) {
+            videoRef.current.muted = muted;
+        }
+        setIsMuted(muted);
+    }, []);
 
     const playVideoElement = useCallback(async (stream) => {
         if (!videoRef.current) throw new Error('Video element not found');
 
-        videoRef.current.muted = true;
-        setIsMuted(true);
-
         if (stream) {
-            videoRef.current.srcObject = stream;
-            videoRef.current.src = '';
+            if (videoRef.current.srcObject !== stream) {
+                videoRef.current.srcObject = stream;
+            }
+        }
+
+        if (videoRef.current.volume === 0) {
+            videoRef.current.volume = 1;
         }
 
         try {
             await videoRef.current.play();
-        } catch {
-            // Autoplay may require a user gesture.
+        } catch (err) {
+            if (err?.name === 'NotAllowedError') {
+                syncMutedState(true);
+                try {
+                    await videoRef.current.play();
+                } catch {
+                    // Playback may still require an explicit user action.
+                }
+            }
         }
-    }, []);
+    }, [syncMutedState]);
 
     const applyLayerPreference = useCallback(async (consumerId, preference = viewerLayerPreference) => {
         if (!consumerId) return;
@@ -164,15 +199,14 @@ export default function WatchView({ initialCode = '' }) {
         });
 
         consumersRef.current.push(consumer);
-        consumedProducerIdsRef.current.add(producerId);
         producerToConsumerIdRef.current.set(producerId, consumer.id);
         if (consumer.kind === 'video') {
             videoConsumerIdsRef.current.add(consumer.id);
         }
 
-        const stream = mediaStreamRef.current || new MediaStream();
-        mediaStreamRef.current = stream;
-        stream.addTrack(consumer.track);
+        const existingTracks = mediaStreamRef.current ? mediaStreamRef.current.getTracks() : [];
+        const newStream = new MediaStream([...existingTracks, consumer.track]);
+        mediaStreamRef.current = newStream;
 
         consumer.on('transportclose', () => {
             consumedProducerIdsRef.current.delete(producerId);
@@ -185,7 +219,20 @@ export default function WatchView({ initialCode = '' }) {
             videoConsumerIdsRef.current.delete(consumer.id);
         });
 
-        await socketRequest(socket, 'consumer-resume', { consumerId: consumer.id });
+        try {
+            await socketRequest(socket, 'consumer-resume', { consumerId: consumer.id });
+        } catch (err) {
+            // Cleanup partial state so a retry can re-attempt this producer.
+            producerToConsumerIdRef.current.delete(producerId);
+            videoConsumerIdsRef.current.delete(consumer.id);
+            try { consumer.close(); } catch { }
+            consumersRef.current = consumersRef.current.filter((c) => c.id !== consumer.id);
+            throw err;
+        }
+
+        // Only mark consumed AFTER the full chain succeeds.
+        consumedProducerIdsRef.current.add(producerId);
+
         if (consumer.kind === 'video') {
             try {
                 await applyLayerPreference(consumer.id);
@@ -193,8 +240,11 @@ export default function WatchView({ initialCode = '' }) {
                 console.warn('[Nextra] Failed to apply viewer layer preference:', err.message);
             }
         }
-        await playVideoElement(stream);
+        await playVideoElement(newStream);
     }, [socket, playVideoElement, applyLayerPreference]);
+
+    const isTunnelOrigin = /\.trycloudflare\.com$/i.test(window.location.hostname)
+        || /\.cloudflare/i.test(window.location.hostname);
 
     const startMediasoupPlayback = useCallback(async () => {
         const device = deviceRef.current;
@@ -230,11 +280,48 @@ export default function WatchView({ initialCode = '' }) {
             await consumeProducer(producer.producerId);
         }
 
+        // Wait for the ICE/DTLS connection to actually establish, with a timeout.
+        // Tunnel viewers get a short timeout (4s) — if TURN is configured, ICE
+        // connects in 1-2s via TCP relay. If not, fail fast and fall back to
+        // relay playback instead of hanging for 15s on unreachable UDP candidates.
+        const iceTimeoutMs = isTunnelOrigin ? 4000 : 15000;
+        const connectionState = recvTransport.connectionState;
+        if (connectionState !== 'connected') {
+            await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    cleanup();
+                    reject(new Error(
+                        isTunnelOrigin
+                            ? 'WebRTC could not connect through tunnel (no TURN server configured).'
+                            : 'WebRTC connection timed out (ICE could not connect). Try refreshing or check firewall settings.'
+                    ));
+                }, iceTimeoutMs);
+
+                const cleanup = () => {
+                    clearTimeout(timeout);
+                    recvTransport.off('connectionstatechange', onStateChange);
+                };
+
+                const onStateChange = (state) => {
+                    console.log(`[Nextra] ICE connection state: ${state}`);
+                    if (state === 'connected') {
+                        cleanup();
+                        resolve();
+                    } else if (state === 'failed' || state === 'closed') {
+                        cleanup();
+                        reject(new Error(`WebRTC connection ${state}.`));
+                    }
+                };
+
+                recvTransport.on('connectionstatechange', onStateChange);
+            });
+        }
+
         setPlaybackMode('mediasoup');
         setWatching(true);
         setHostDisconnected(false);
         setHasProducer(true);
-    }, [socket, consumeProducer]);
+    }, [socket, consumeProducer, isTunnelOrigin]);
 
     const startRelayPlayback = useCallback(async () => {
         if (!videoRef.current) throw new Error('Video element not found');
@@ -249,10 +336,31 @@ export default function WatchView({ initialCode = '' }) {
         let initResultData = null;
         let liveInitPayload = null;
         let resolveLiveInit = null;
+        let firstBufferedSettled = false;
+        let resolveFirstBuffered = null;
+        let rejectFirstBuffered = null;
+
+        const firstBufferedPromise = new Promise((resolve, reject) => {
+            resolveFirstBuffered = resolve;
+            rejectFirstBuffered = reject;
+        });
+
+        const settleFirstBuffered = (err = null) => {
+            if (firstBufferedSettled) return;
+            firstBufferedSettled = true;
+            if (err) rejectFirstBuffered?.(err);
+            else resolveFirstBuffered?.();
+        };
 
         const enqueueChunk = (buf) => {
-            const uint = new Uint8Array(buf);
-            if (!uint.byteLength) return;
+            const uint = toUint8ArraySync(buf);
+            if (!uint?.byteLength) {
+                if (!relayUnsupportedWarnedRef.current) {
+                    relayUnsupportedWarnedRef.current = true;
+                    console.warn('[Nextra] Ignoring unsupported relay chunk payload.');
+                }
+                return;
+            }
 
             chunkQueueRef.current.push(uint);
             queuedBytesRef.current += uint.byteLength;
@@ -279,10 +387,8 @@ export default function WatchView({ initialCode = '' }) {
         const onChunk = (data) => {
             if (data instanceof Blob) {
                 data.arrayBuffer().then(enqueueChunk);
-            } else if (data instanceof ArrayBuffer) {
+            } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data) || data?.data) {
                 enqueueChunk(data);
-            } else if (data?.data) {
-                enqueueChunk(data.data);
             }
         };
 
@@ -371,29 +477,19 @@ export default function WatchView({ initialCode = '' }) {
 
         const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
         sourceBufferRef.current = sourceBuffer;
-        sourceBuffer.mode = 'segments';
-
-        if (initResultData?.initChunk && mediaSource.readyState === 'open') {
-            let initBuffer = null;
-            const initData = initResultData.initChunk;
-            if (initData instanceof Blob) initBuffer = new Uint8Array(await initData.arrayBuffer());
-            else if (initData instanceof ArrayBuffer) initBuffer = new Uint8Array(initData);
-            else if (initData?.data) initBuffer = new Uint8Array(initData.data);
-
-            if (initBuffer?.byteLength) {
-                appendingLock = true;
-                await new Promise((resolve) => {
-                    sourceBuffer.addEventListener('updateend', resolve, { once: true });
-                    sourceBuffer.appendBuffer(initBuffer);
-                });
-                appendingLock = false;
+        try {
+            if (sourceBuffer.mode === 'segments') {
+                sourceBuffer.mode = 'sequence';
             }
+        } catch (err) {
+            console.warn('[Nextra] Could not switch SourceBuffer to sequence mode:', err.message);
         }
 
         sourceBuffer.addEventListener('updateend', () => {
             appendingLock = false;
 
             if (videoRef.current && sourceBuffer.buffered.length > 0) {
+                settleFirstBuffered();
                 const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
                 const currentTime = videoRef.current.currentTime;
 
@@ -408,6 +504,32 @@ export default function WatchView({ initialCode = '' }) {
 
             processQueue();
         });
+
+        if (initResultData?.initChunk && mediaSource.readyState === 'open') {
+            const initBuffer = await toUint8Array(initResultData.initChunk);
+
+            if (initBuffer?.byteLength) {
+                const queuedFirstChunk = chunkQueueRef.current[0];
+                if (areUint8ArraysEqual(queuedFirstChunk, initBuffer)) {
+                    chunkQueueRef.current.shift();
+                    queuedBytesRef.current = Math.max(0, queuedBytesRef.current - queuedFirstChunk.byteLength);
+                }
+
+                appendingLock = true;
+                try {
+                    await new Promise((resolve) => {
+                        sourceBuffer.addEventListener('updateend', resolve, { once: true });
+                        sourceBuffer.appendBuffer(initBuffer);
+                    });
+                } finally {
+                    appendingLock = false;
+                }
+
+                if (sourceBuffer.buffered.length > 0) {
+                    settleFirstBuffered();
+                }
+            }
+        }
 
         const safetyInterval = setInterval(() => {
             if (
@@ -424,10 +546,17 @@ export default function WatchView({ initialCode = '' }) {
             socket.off('media-init', onMediaInit);
             socket.off('media-chunk', onChunk);
             clearInterval(safetyInterval);
+            settleFirstBuffered(new Error('Relay playback was cleaned up before media buffered.'));
         };
 
         processQueue();
         await playVideoElement(null);
+        await Promise.race([
+            firstBufferedPromise,
+            new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('Relay connected but no playable media buffered.')), 12000);
+            }),
+        ]);
 
         setPlaybackMode('relay');
         setWatching(true);
@@ -540,36 +669,37 @@ export default function WatchView({ initialCode = '' }) {
         setWatchLoading(true);
         cleanupPlayback();
 
-        const preferRelayFirst = !isLikelyLocalOrigin(window.location.origin);
+        // Safety net: never stay in "Connecting..." state for more than 25s total.
+        let watchTimedOut = false;
+        const watchTimeout = setTimeout(() => {
+            watchTimedOut = true;
+            cleanupPlayback();
+            setWatching(false);
+            setWatchLoading(false);
+            setError('Connection timed out. Check your network or try again.');
+        }, 25000);
 
         try {
-            if (preferRelayFirst) {
-                await startRelayPlayback();
-                setError('Using compatibility relay mode (higher latency than WebRTC).');
-                return;
-            }
-
             await startMediasoupPlayback();
         } catch (primaryErr) {
-            const fallbackLabel = preferRelayFirst ? 'mediasoup fallback' : 'relay fallback';
-            console.warn(`[Nextra] Primary playback failed; trying ${fallbackLabel}:`, primaryErr.message);
+            if (watchTimedOut) return;
+            console.warn('[Nextra] Primary playback failed; trying relay fallback:', primaryErr.message);
             cleanupPlayback();
 
             try {
-                if (preferRelayFirst) {
-                    await startMediasoupPlayback();
-                } else {
-                    await startRelayPlayback();
-                    setError('Using compatibility relay mode (higher latency than WebRTC).');
-                }
+                await startRelayPlayback();
             } catch (fallbackErr) {
+                if (watchTimedOut) return;
                 cleanupPlayback();
                 setWatching(false);
                 console.error('[Nextra] Watch failed:', fallbackErr);
                 setError(fallbackErr.message || primaryErr.message || 'Failed to start watching.');
             }
         } finally {
-            setWatchLoading(false);
+            clearTimeout(watchTimeout);
+            if (!watchTimedOut) {
+                setWatchLoading(false);
+            }
         }
     }, [cleanupPlayback, startMediasoupPlayback, startRelayPlayback]);
 
@@ -600,8 +730,33 @@ export default function WatchView({ initialCode = '' }) {
         setHostReconnectingReason('');
         setError('');
         setPlaybackMode('');
+        setIsMuted(false);
         setViewerLayerPreference('auto');
     }, [cleanupPlayback, socket]);
+
+    // Detect socket reconnection while viewer thinks they're in a room.
+    // After reconnect the server has no record of this socket ID, so all
+    // subsequent requests would silently fail — reset to the join screen.
+    useEffect(() => {
+        const onReconnect = () => {
+            if (!joined) return;
+            console.warn('[Nextra] Socket reconnected while in a room — resetting viewer state.');
+            cleanupPlayback();
+            resetDevice();
+            setJoined(false);
+            setWatching(false);
+            setHasProducer(false);
+            setHostDisconnected(false);
+            setHostReconnectingReason('');
+            setPlaybackMode('');
+            setIsMuted(false);
+            setViewerLayerPreference('auto');
+            setError('Connection was lost. Please rejoin the room.');
+        };
+
+        socket.on('connect', onReconnect);
+        return () => socket.off('connect', onReconnect);
+    }, [socket, joined, cleanupPlayback]);
 
     useEffect(() => () => {
         socket.emit('leave-room');
@@ -643,7 +798,7 @@ export default function WatchView({ initialCode = '' }) {
                 </div>
             ) : (
                 <>
-                    <div className="video-container">
+                    <div className="video-container watch-video">
                         <video
                             ref={videoRef}
                             className="video-player"
@@ -693,7 +848,7 @@ export default function WatchView({ initialCode = '' }) {
                                 className={`btn ${isMuted ? 'btn-primary' : 'btn-secondary'}`}
                                 onClick={() => {
                                     if (!videoRef.current) return;
-                                    videoRef.current.muted = !videoRef.current.muted;
+                                    syncMutedState(!videoRef.current.muted);
                                 }}
                             >
                                 {isMuted ? 'Unmute Audio' : 'Mute Audio'}

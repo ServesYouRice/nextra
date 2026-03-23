@@ -59,7 +59,7 @@ export default function HowToView() {
             <div className="article-step">
                 <strong>2. Optional remote media control</strong>
                 <p>
-                    If the host enables it, viewers can send Play/Pause media-key commands.
+                    If the host enables it, viewers can send Play/Pause media-key commands from local or remote sessions.
                     This does not grant full keyboard control.
                 </p>
             </div>
