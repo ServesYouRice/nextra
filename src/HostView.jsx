@@ -3,31 +3,31 @@ import { SocketContext } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 
 const BASE_SIMULCAST_ENCODINGS = [
-    { rid: 'r0', maxBitrate: 500_000, scaleResolutionDownBy: 4 },
-    { rid: 'r1', maxBitrate: 2_500_000, scaleResolutionDownBy: 2 },
-    { rid: 'r2', maxBitrate: 15_000_000 },
+    { rid: 'r0', maxBitrate: 900_000, scaleResolutionDownBy: 4 },
+    { rid: 'r1', maxBitrate: 4_000_000, scaleResolutionDownBy: 2 },
+    { rid: 'r2', maxBitrate: 18_000_000 },
 ];
 
 const CODEC_OPTIONS = { videoGoogleStartBitrate: 10_000 };
 
 const QUALITY_PROFILES = {
-    max: {
-        label: 'Max Quality',
+    '4k': {
+        label: '4K',
         maxSpatialLayer: 2,
-        capture: { width: 1920, height: 1080, frameRate: 60 },
-        relayBitsPerSecond: 2_500_000,
+        capture: { width: 3840, height: 2160 },
+        relayBitsPerSecond: 8_000_000,
     },
-    balanced: {
-        label: 'Balanced',
+    '1440p': {
+        label: '1440p',
+        maxSpatialLayer: 2,
+        capture: { width: 2560, height: 1440 },
+        relayBitsPerSecond: 6_000_000,
+    },
+    '1080p': {
+        label: '1080p',
         maxSpatialLayer: 1,
-        capture: { width: 1600, height: 900, frameRate: 45 },
-        relayBitsPerSecond: 1_800_000,
-    },
-    efficient: {
-        label: 'Efficiency',
-        maxSpatialLayer: 0,
-        capture: { width: 1280, height: 720, frameRate: 30 },
-        relayBitsPerSecond: 1_100_000,
+        capture: { width: 1920, height: 1080 },
+        relayBitsPerSecond: 4_000_000,
     },
 };
 
@@ -61,20 +61,21 @@ export default function HostView() {
     const [roomCode, setRoomCode] = useState(null);
     const [isSharing, setIsSharing] = useState(false);
     const [viewerCount, setViewerCount] = useState(0);
-    const [contentMode, setContentMode] = useState('motion');
-    const [allowMediaControl, setAllowMediaControl] = useState(false);
+    const contentMode = 'motion';
+    const [allowMediaControl, setAllowMediaControl] = useState(true);
     const [hostUploadMbps, setHostUploadMbps] = useState(20);
     const [lanBaseUrl, setLanBaseUrl] = useState(window.location.origin);
     const [shareBaseUrl, setShareBaseUrl] = useState('');
     const [publicShareStatus, setPublicShareStatus] = useState('disabled');
     const [publicShareError, setPublicShareError] = useState('');
     const [relayFlushIntervalMs, setRelayFlushIntervalMs] = useState(300);
-    const [relayVideoBitsPerSecond, setRelayVideoBitsPerSecond] = useState(2_500_000);
+    const [relayVideoBitsPerSecond, setRelayVideoBitsPerSecond] = useState(6_000_000);
     const [relayViewerCount, setRelayViewerCount] = useState(0);
     const [error, setError] = useState('');
     const [copied, setCopied] = useState(false);
     const [status, setStatus] = useState('idle');
-    const [qualityProfile, setQualityProfile] = useState('max');
+    const [qualityProfile, setQualityProfile] = useState('1440p');
+    const [frameRate, setFrameRate] = useState(60);
     const [autoTuneQuality, setAutoTuneQuality] = useState(true);
     const [roomMetrics, setRoomMetrics] = useState(null);
 
@@ -92,7 +93,7 @@ export default function HostView() {
     const bandwidthWarning = viewerCount >= 3 && bitratePerViewer < 7
         ? `${viewerCount} viewers x ~${bitratePerViewer.toFixed(1)} Mbps each. Consider 720p.`
         : '';
-    const selectedProfile = QUALITY_PROFILES[qualityProfile] || QUALITY_PROFILES.max;
+    const selectedProfile = QUALITY_PROFILES[qualityProfile] || QUALITY_PROFILES['1440p'];
     const effectiveRelayBitsPerSecond = Math.min(relayVideoBitsPerSecond, selectedProfile.relayBitsPerSecond);
 
     const maybeAutoTuneProfile = useCallback((nextViewerCount, nextRelayViewerCount) => {
@@ -102,11 +103,12 @@ export default function HostView() {
         const relayCount = Math.max(0, Number(nextRelayViewerCount) || 0);
         const perViewer = viewers > 0 ? (hostUploadMbps / viewers) : hostUploadMbps;
 
-        let recommended = 'max';
+        let recommended = qualityProfile;
+        const currentIndex = ['1080p', '1440p', '4k'].indexOf(qualityProfile);
         if (relayCount >= 2 || perViewer < 5 || viewers >= 8) {
-            recommended = 'efficient';
+            recommended = '1080p';
         } else if (relayCount >= 1 || perViewer < 8 || viewers >= 4) {
-            recommended = 'balanced';
+            recommended = currentIndex > 1 ? '1440p' : qualityProfile;
         }
 
         setQualityProfile((current) => (current === recommended ? current : recommended));
@@ -210,11 +212,15 @@ export default function HostView() {
         });
         mediaRecorderRef.current = recorder;
 
-        socket.emit('media-init', { mimeType });
-
         let chunkCount = 0;
+        let lastChunkAt = 0;
+        recorder.onstart = () => {
+            lastChunkAt = Date.now();
+            socket.emit('media-init', { mimeType });
+        };
         recorder.ondataavailable = (evt) => {
             if (evt.data && evt.data.size > 0) {
+                lastChunkAt = Date.now();
                 chunkCount += 1;
                 if (chunkCount % 20 === 0) {
                     console.log(`[Nextra-Host] Emitted ${chunkCount} relay chunks. Latest size: ${evt.data.size}`);
@@ -222,22 +228,36 @@ export default function HostView() {
                 socket.emit('media-chunk', evt.data);
             }
         };
+        recorder.onerror = (evt) => {
+            const message = evt?.error?.message || evt?.error?.name || 'unknown recorder error';
+            console.error('[Nextra-Host] Relay recorder error:', message);
+        };
         recorder.onstop = () => {
             if (mediaRecorderRef.current === recorder) {
                 mediaRecorderRef.current = null;
             }
         };
 
-        recorder.start();
+        try {
+            recorder.start(relayFlushIntervalMs);
+        } catch (err) {
+            mediaRecorderRef.current = null;
+            console.error('[Nextra-Host] Failed to start relay recorder:', err.message);
+            return;
+        }
 
         if (safetyFlushIntervalRef.current) {
             clearInterval(safetyFlushIntervalRef.current);
         }
         safetyFlushIntervalRef.current = setInterval(() => {
-            if (recorder.state === 'recording') {
+            if (
+                recorder.state === 'recording'
+                && lastChunkAt > 0
+                && (Date.now() - lastChunkAt) > Math.max(1500, relayFlushIntervalMs * 4)
+            ) {
                 recorder.requestData();
             }
-        }, relayFlushIntervalMs);
+        }, Math.max(1000, relayFlushIntervalMs * 2));
     }, [socket, effectiveRelayBitsPerSecond, relayFlushIntervalMs]);
 
     const cleanup = useCallback(() => {
@@ -293,6 +313,7 @@ export default function HostView() {
         const onRoomMetrics = (data) => {
             setRoomMetrics(data || null);
             if (data) {
+                setRelayViewerCount(Math.max(0, Number(data.relayViewerCount) || 0));
                 maybeAutoTuneProfile(data.viewerCount, data.relayViewerCount);
             }
         };
@@ -310,7 +331,12 @@ export default function HostView() {
     useEffect(() => {
         if (!roomCode) return;
         socketRequest(socket, 'get-room-metrics', {}, { timeoutMs: 8000, maxAttempts: 1 })
-            .then(({ metrics }) => setRoomMetrics(metrics || null))
+            .then(({ metrics }) => {
+                setRoomMetrics(metrics || null);
+                if (metrics) {
+                    setRelayViewerCount(Math.max(0, Number(metrics.relayViewerCount) || 0));
+                }
+            })
             .catch(() => { });
     }, [socket, roomCode]);
 
@@ -321,19 +347,14 @@ export default function HostView() {
             const nextCount = Math.max(0, Number(count) || 0);
             setRelayViewerCount(nextCount);
             maybeAutoTuneProfile(viewerCount, nextCount);
-            if (nextCount > 0) {
-                startRelayRecorder();
-            } else {
-                stopRelayRecorder();
-            }
         };
 
         socket.on('relay-demand-changed', onRelayDemandChanged);
         return () => socket.off('relay-demand-changed', onRelayDemandChanged);
-    }, [socket, isSharing, startRelayRecorder, stopRelayRecorder, viewerCount, maybeAutoTuneProfile]);
+    }, [socket, isSharing, viewerCount, maybeAutoTuneProfile]);
 
-    const applyQualityProfileToLiveStream = useCallback(async (profileKey) => {
-        const profile = QUALITY_PROFILES[profileKey] || QUALITY_PROFILES.max;
+    const applyQualityProfileToLiveStream = useCallback(async (profileKey, fps) => {
+        const profile = QUALITY_PROFILES[profileKey] || QUALITY_PROFILES['1440p'];
         const videoProducer = videoProducerRef.current;
         if (videoProducer) {
             try {
@@ -350,7 +371,7 @@ export default function HostView() {
                 await track.applyConstraints({
                     width: { ideal: profile.capture.width },
                     height: { ideal: profile.capture.height },
-                    frameRate: { ideal: profile.capture.frameRate },
+                    frameRate: { ideal: fps },
                 });
             } catch (err) {
                 console.warn('[Nextra-Host] Failed to apply capture profile constraints:', err.message);
@@ -360,15 +381,18 @@ export default function HostView() {
 
     useEffect(() => {
         if (!isSharing) return;
-        void applyQualityProfileToLiveStream(qualityProfile);
+        void applyQualityProfileToLiveStream(qualityProfile, frameRate);
 
-        if (relayViewerCount > 0 && mediaRecorderRef.current) {
+        if (relayViewerCount > 0) {
             stopRelayRecorder();
             startRelayRecorder();
+        } else {
+            stopRelayRecorder();
         }
     }, [
         isSharing,
         qualityProfile,
+        frameRate,
         relayViewerCount,
         relayFlushIntervalMs,
         effectiveRelayBitsPerSecond,
@@ -394,7 +418,7 @@ export default function HostView() {
                 video: {
                     width: selectedProfile.capture.width,
                     height: selectedProfile.capture.height,
-                    frameRate: selectedProfile.capture.frameRate,
+                    frameRate: frameRate,
                 },
                 audio: isChromium ? { channelCount: 2 } : false,
             };
@@ -492,7 +516,7 @@ export default function HostView() {
             socket.emit('host-stopped');
             cleanup();
         }
-    }, [socket, contentMode, allowMediaControl, cleanup, selectedProfile]);
+    }, [socket, allowMediaControl, cleanup, selectedProfile, frameRate]);
 
     const applyServerConfig = useCallback((data = {}) => {
         if (typeof data.hostUploadMbps === 'number') {
@@ -563,173 +587,180 @@ export default function HostView() {
                 <p className="subtitle">Share your screen with viewers</p>
             </div>
 
-            {status === 'idle' && (
-                <div className="settings-panel">
-                    <h3>Settings</h3>
-                    <div className="setting-row">
-                        <input
-                            type="checkbox"
-                            id="allowMediaControl"
-                            checked={allowMediaControl}
-                            onChange={(evt) => setAllowMediaControl(evt.target.checked)}
-                        />
-                        <label htmlFor="allowMediaControl">
-                            Allow viewers to pause/play media
-                            <span className="setting-hint">
-                                Viewers can remotely press Play/Pause on your keyboard
-                            </span>
-                        </label>
-                    </div>
-                    <div className="setting-row" style={{ alignItems: 'center' }}>
-                        <label htmlFor="qualityProfile" style={{ minWidth: '140px' }}>
-                            Stream quality profile
-                        </label>
-                        <select
-                            id="qualityProfile"
-                            value={qualityProfile}
-                            onChange={(evt) => setQualityProfile(evt.target.value)}
-                            className="input-code"
-                            style={{ maxWidth: '220px', height: '44px' }}
-                        >
-                            {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                <option key={key} value={key}>{profile.label}</option>
-                            ))}
-                        </select>
-                    </div>
-                    <div className="setting-row">
-                        <input
-                            type="checkbox"
-                            id="autoTuneQuality"
-                            checked={autoTuneQuality}
-                            onChange={(evt) => setAutoTuneQuality(evt.target.checked)}
-                        />
-                        <label htmlFor="autoTuneQuality">
-                            Auto-tune quality from live room metrics
-                            <span className="setting-hint">
-                                Uses viewer count, relay usage, and host upload estimate
-                            </span>
-                        </label>
-                    </div>
-                </div>
-            )}
-
-            {error && <div className="alert alert-error">{error}</div>}
-            {bandwidthWarning && <div className="alert alert-warning">{bandwidthWarning}</div>}
-
-            <div className="video-container">
-                <video ref={videoRef} autoPlay muted playsInline className="video-player" />
-                {status === 'idle' && (
-                    <div className="video-overlay">
-                        <p>No screen shared yet</p>
-                    </div>
-                )}
-            </div>
-
-            <div className="controls">
-                {!isSharing ? (
-                    <button
-                        className="btn btn-primary btn-large"
-                        onClick={handleStartSharing}
-                        disabled={status === 'connecting'}
-                    >
-                        {status === 'connecting' ? 'Connecting...' : 'Start Sharing'}
-                    </button>
-                ) : (
-                    <>
-                        <button className="btn btn-danger" onClick={handleStopSharing}>
-                            Stop Sharing
-                        </button>
-                        <div className="mode-toggle">
-                            <button
-                                className={contentMode === 'motion' ? 'active' : ''}
-                                onClick={() => {
-                                    setContentMode('motion');
-                                    if (streamRef.current) {
-                                        const track = streamRef.current.getVideoTracks()[0];
-                                        if (track) track.contentHint = 'motion';
-                                    }
-                                }}
-                            >
-                                Video (60fps)
-                            </button>
-                            <button
-                                className={contentMode === 'detail' ? 'active' : ''}
-                                onClick={() => {
-                                    setContentMode('detail');
-                                    if (streamRef.current) {
-                                        const track = streamRef.current.getVideoTracks()[0];
-                                        if (track) track.contentHint = 'detail';
-                                    }
-                                }}
-                            >
-                                Text (Sharp)
-                            </button>
-                        </div>
-                    </>
-                )}
-            </div>
-
-            {roomCode && (
-                <div className="room-info">
-                    <div className="room-code-display">
-                        <span className="room-code-label">Room Code</span>
-                        <span className="room-code" onClick={() => handleCopyCode(formattedRoomCode)} title="Click to copy">
-                            {formattedRoomCode}
-                        </span>
-
-                        <div style={{ display: 'flex', gap: '2rem', marginTop: '1rem', flexWrap: 'wrap' }}>
-                            <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                <span className="room-code-label">Local Link</span>
-                                <span
-                                    className="room-link"
-                                    onClick={() => handleCopyCode(localWatchLink)}
-                                    title="Click to copy local link"
-                                >
-                                    {localWatchLink}
-                                </span>
+            <div className="host-layout">
+                <div className="host-video-section">
+                    <div className="video-container">
+                        <video ref={videoRef} autoPlay muted playsInline className="video-player" />
+                        {status === 'idle' && (
+                            <div className="video-overlay">
+                                <p>No screen shared yet</p>
                             </div>
-                            {showPublicLink && (
-                                <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                    <span className="room-code-label">Public Link</span>
-                                    <span
-                                        className="room-link"
-                                        onClick={() => handleCopyCode(publicWatchLink)}
-                                        title="Click to copy public link"
-                                    >
-                                        {publicWatchLink}
-                                    </span>
-                                </div>
-                            )}
-                        </div>
-
-                        {!showPublicLink && (
-                            <span className="copy-hint" style={{ marginTop: '0.5rem' }}>
-                                {publicLinkHint}
-                            </span>
                         )}
+                    </div>
 
-                        <span className="copy-hint" style={{ marginTop: '0.75rem' }}>
-                            {copied ? 'Copied!' : 'Click any link above to copy'}
-                        </span>
+                    <div className="controls">
+                        {!isSharing ? (
+                            <button
+                                className="btn btn-primary btn-large"
+                                onClick={handleStartSharing}
+                                disabled={status === 'connecting'}
+                            >
+                                {status === 'connecting' ? 'Connecting...' : 'Start Sharing'}
+                            </button>
+                        ) : (
+                            <>
+                                <button className="btn btn-danger" onClick={handleStopSharing}>
+                                    Stop Sharing
+                                </button>
+                                <div className="mode-toggle">
+                                    <button
+                                        className={frameRate === 60 ? 'active' : ''}
+                                        onClick={() => setFrameRate(60)}
+                                    >
+                                        60fps
+                                    </button>
+                                    <button
+                                        className={frameRate === 30 ? 'active' : ''}
+                                        onClick={() => setFrameRate(30)}
+                                    >
+                                        30fps
+                                    </button>
+                                </div>
+                            </>
+                        )}
                     </div>
-                    <div className="viewer-count">
-                        <span className="viewer-icon" style={{ fontSize: '1.2rem', marginRight: '0.2rem' }}>&bull;</span>
-                        <span>{viewerCount} viewer{viewerCount !== 1 ? 's' : ''}</span>
-                    </div>
-                    {roomMetrics && (
-                        <div className="copy-hint" style={{ marginTop: '0.75rem' }}>
-                            WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0)}
+
+                    {isSharing && (
+                        <div className="status-bar">
+                            <span className="status-dot streaming" /> Streaming ({QUALITY_PROFILES[qualityProfile]?.label || qualityProfile} @ {frameRate}fps)
+                            {relayViewerCount > 0 ? ` | Relay fallback viewers: ${relayViewerCount}` : ''}
                         </div>
                     )}
                 </div>
-            )}
 
-            {isSharing && (
-                <div className="status-bar">
-                    <span className="status-dot streaming" /> Streaming ({QUALITY_PROFILES[qualityProfile]?.label || 'Profile'})
-                    {relayViewerCount > 0 ? ` | Relay fallback viewers: ${relayViewerCount}` : ''}
+                <div className="host-side-panel">
+                    {status === 'idle' && (
+                        <div className="settings-panel">
+                            <h3>Settings</h3>
+                            <div className="setting-row">
+                                <input
+                                    type="checkbox"
+                                    id="allowMediaControl"
+                                    checked={allowMediaControl}
+                                    onChange={(evt) => setAllowMediaControl(evt.target.checked)}
+                                />
+                                <label htmlFor="allowMediaControl">
+                                    Allow viewers to pause/play media
+                                    <span className="setting-hint">
+                                        Viewers can remotely press Play/Pause on your keyboard
+                                    </span>
+                                </label>
+                            </div>
+                            <div className="setting-row" style={{ alignItems: 'center' }}>
+                                <label htmlFor="qualityProfile" style={{ minWidth: '140px' }}>
+                                    Resolution
+                                </label>
+                                <select
+                                    id="qualityProfile"
+                                    value={qualityProfile}
+                                    onChange={(evt) => setQualityProfile(evt.target.value)}
+                                    className="select-input"
+                                >
+                                    {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
+                                        <option key={key} value={key}>{profile.label}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div className="setting-row" style={{ alignItems: 'center' }}>
+                                <label htmlFor="frameRate" style={{ minWidth: '140px' }}>
+                                    Frame rate
+                                </label>
+                                <select
+                                    id="frameRate"
+                                    value={frameRate}
+                                    onChange={(evt) => setFrameRate(Number(evt.target.value))}
+                                    className="select-input"
+                                >
+                                    <option value={60}>60 fps</option>
+                                    <option value={30}>30 fps</option>
+                                </select>
+                            </div>
+                            <div className="setting-row">
+                                <input
+                                    type="checkbox"
+                                    id="autoTuneQuality"
+                                    checked={autoTuneQuality}
+                                    onChange={(evt) => setAutoTuneQuality(evt.target.checked)}
+                                />
+                                <label htmlFor="autoTuneQuality">
+                                    Auto-tune quality from live room metrics
+                                    <span className="setting-hint">
+                                        Uses viewer count, relay usage, and host upload estimate
+                                    </span>
+                                </label>
+                            </div>
+                        </div>
+                    )}
+
+                    {error && <div className="alert alert-error">{error}</div>}
+                    {bandwidthWarning && <div className="alert alert-warning">{bandwidthWarning}</div>}
+
+                    {roomCode && (
+                        <div className="room-info">
+                            <div className="room-code-display">
+                                <span className="room-code-label">Room Code</span>
+                                <span className="room-code" onClick={() => handleCopyCode(formattedRoomCode)} title="Click to copy">
+                                    {formattedRoomCode}
+                                </span>
+
+                                <div style={{ display: 'flex', gap: '2rem', marginTop: '1rem', flexWrap: 'wrap' }}>
+                                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                        <span className="room-code-label">Local Link</span>
+                                        <span
+                                            className="room-link"
+                                            onClick={() => handleCopyCode(localWatchLink)}
+                                            title="Click to copy local link"
+                                        >
+                                            {localWatchLink}
+                                        </span>
+                                    </div>
+                                    {showPublicLink && (
+                                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                            <span className="room-code-label">Public Link</span>
+                                            <span
+                                                className="room-link"
+                                                onClick={() => handleCopyCode(publicWatchLink)}
+                                                title="Click to copy public link"
+                                            >
+                                                {publicWatchLink}
+                                            </span>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {!showPublicLink && (
+                                    <span className="copy-hint" style={{ marginTop: '0.5rem' }}>
+                                        {publicLinkHint}
+                                    </span>
+                                )}
+
+                                <span className="copy-hint" style={{ marginTop: '0.75rem' }}>
+                                    {copied ? 'Copied!' : 'Click any link above to copy'}
+                                </span>
+                            </div>
+                            <div className="viewer-count">
+                                <span className="viewer-icon" style={{ fontSize: '1.2rem', marginRight: '0.2rem' }}>&bull;</span>
+                                <span>{viewerCount} viewer{viewerCount !== 1 ? 's' : ''}</span>
+                            </div>
+                            {roomMetrics && (
+                                <div className="copy-hint" style={{ marginTop: '0.75rem' }}>
+                                    WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0)}
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
-            )}
+            </div>
         </div>
     );
 }

@@ -89,9 +89,9 @@ module.exports = {
 
     // Simulcast encodings - host produces 3 layers
     SIMULCAST_ENCODINGS: [
-        { rid: 'r0', maxBitrate: 500_000, scaleResolutionDownBy: 4 },
-        { rid: 'r1', maxBitrate: 2_500_000, scaleResolutionDownBy: 2 },
-        { rid: 'r2', maxBitrate: 15_000_000 },
+        { rid: 'r0', maxBitrate: 900_000, scaleResolutionDownBy: 4 },
+        { rid: 'r1', maxBitrate: 4_000_000, scaleResolutionDownBy: 2 },
+        { rid: 'r2', maxBitrate: 18_000_000 },
     ],
     CODEC_OPTIONS: { videoGoogleStartBitrate: 10_000 },
 
@@ -159,13 +159,11 @@ module.exports = {
     SOCKET_MAX_HTTP_BUFFER_SIZE: parseIntEnv(process.env.SOCKET_MAX_HTTP_BUFFER_SIZE, 8 * 1024 * 1024),
     MEDIA_MAX_CHUNK_SIZE: parseIntEnv(process.env.MEDIA_MAX_CHUNK_SIZE, 4 * 1024 * 1024),
     RELAY_FLUSH_INTERVAL_MS: parseIntEnv(process.env.RELAY_FLUSH_INTERVAL_MS, 300),
-    RELAY_VIDEO_BITS_PER_SECOND: parseIntEnv(process.env.RELAY_VIDEO_BITS_PER_SECOND, 2500000),
+    RELAY_VIDEO_BITS_PER_SECOND: parseIntEnv(process.env.RELAY_VIDEO_BITS_PER_SECOND, 6000000),
     HOST_RECONNECT_GRACE_MS: parseIntEnv(process.env.HOST_RECONNECT_GRACE_MS, 300000),
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     ALLOW_REMOTE_METRICS: parseBoolEnv(process.env.ALLOW_REMOTE_METRICS, false),
     METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),
-    ALLOW_REMOTE_MEDIA_CONTROL: parseBoolEnv(process.env.ALLOW_REMOTE_MEDIA_CONTROL, false),
-
     // Public share URL (recommended when using a tunnel/reverse proxy)
     SHARE_BASE_URL: (process.env.SHARE_BASE_URL || '').trim(),
     EXTRA_ALLOWED_ORIGINS: (process.env.EXTRA_ALLOWED_ORIGINS || '').trim(),
