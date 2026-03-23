@@ -39,7 +39,7 @@ Source/dev runs remain configurable.
 
 ## Quality Expectations
 
-Nextra targets high quality (up to 1080p/60 when conditions allow), but real quality depends on:
+Nextra targets ultra-high quality (up to 4K resolution at 60fps when conditions allow), but real quality depends on:
 
 - Host upload bandwidth
 - Viewer download bandwidth
@@ -57,7 +57,7 @@ Current model:
 - Rate limiting and connection limits on signaling
 - Strict default proxy/header trust settings
 - Packaged app auto-starts a public tunnel unless you explicitly disable it
-- Remote media-control is host-controlled per room
+- Remote media-control (letting viewers pause/play the host's media) is enabled by default, but host-controllable
 - Remote metrics can require `METRICS_TOKEN`
 - `.env`, TLS keys, binaries ignored by default in source workflow
 - Media is not persisted by Nextra itself
