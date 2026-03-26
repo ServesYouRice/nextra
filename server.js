@@ -155,6 +155,13 @@ function normalizeBaseUrl(url) {
     return normalized.replace(/\/$/, '');
 }
 
+function getHasTurnServer() {
+    return config.getIceServers().some((server) => {
+        const urls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
+        return urls.some((url) => typeof url === 'string' && url.trim().toLowerCase().startsWith('turn:'));
+    });
+}
+
 function isAllowedSocketOrigin(origin) {
     const normalized = normalizeOrigin(origin);
     if (!normalized) return false;
@@ -424,6 +431,8 @@ function buildSocketConfigPayload(socket) {
         hostUploadMbps: config.HOST_UPLOAD_MBPS,
         shareBaseUrl: getShareBaseUrlForSocket(socket),
         lanUrl: shouldExposeLanForSocket(socket) ? getLocalBaseUrl() : '',
+        hasTurnServer: getHasTurnServer(),
+        mediaMaxChunkSize: config.MEDIA_MAX_CHUNK_SIZE,
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
         publicShareStatus,
@@ -481,6 +490,8 @@ app.get('/api/config', (req, res) => {
         hostUploadMbps: config.HOST_UPLOAD_MBPS,
         shareBaseUrl: getShareBaseUrl(req),
         lanUrl: shouldExposeLanUrl(req) ? getLocalBaseUrl() : '',
+        hasTurnServer: getHasTurnServer(),
+        mediaMaxChunkSize: config.MEDIA_MAX_CHUNK_SIZE,
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
         publicShareStatus,

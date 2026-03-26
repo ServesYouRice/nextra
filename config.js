@@ -87,11 +87,12 @@ module.exports = {
         { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 },
     ],
 
-    // Simulcast encodings - host produces 3 layers
+    // Legacy fallback simulcast encodings. The host UI applies profile/fps-aware
+    // values at runtime, but keep the defaults aligned with the highest preset.
     SIMULCAST_ENCODINGS: [
-        { rid: 'r0', maxBitrate: 900_000, scaleResolutionDownBy: 4 },
-        { rid: 'r1', maxBitrate: 4_000_000, scaleResolutionDownBy: 2 },
-        { rid: 'r2', maxBitrate: 18_000_000 },
+        { rid: 'r0', maxBitrate: 4_320_000, scaleResolutionDownBy: 4 },
+        { rid: 'r1', maxBitrate: 14_400_000, scaleResolutionDownBy: 2 },
+        { rid: 'r2', maxBitrate: 36_000_000 },
     ],
     CODEC_OPTIONS: { videoGoogleStartBitrate: 10_000 },
 
@@ -135,7 +136,7 @@ module.exports = {
     },
 
     // Bandwidth management
-    HOST_UPLOAD_MBPS: parseFloatEnv(process.env.HOST_UPLOAD_MBPS, 20),
+    HOST_UPLOAD_MBPS: parseFloatEnv(process.env.HOST_UPLOAD_MBPS, 36),
 
     // Room limits
     MAX_VIEWERS_PER_ROOM: parseIntEnv(process.env.MAX_VIEWERS_PER_ROOM, 20),
@@ -159,7 +160,7 @@ module.exports = {
     SOCKET_MAX_HTTP_BUFFER_SIZE: parseIntEnv(process.env.SOCKET_MAX_HTTP_BUFFER_SIZE, 8 * 1024 * 1024),
     MEDIA_MAX_CHUNK_SIZE: parseIntEnv(process.env.MEDIA_MAX_CHUNK_SIZE, 4 * 1024 * 1024),
     RELAY_FLUSH_INTERVAL_MS: parseIntEnv(process.env.RELAY_FLUSH_INTERVAL_MS, 300),
-    RELAY_VIDEO_BITS_PER_SECOND: parseIntEnv(process.env.RELAY_VIDEO_BITS_PER_SECOND, 6000000),
+    RELAY_VIDEO_BITS_PER_SECOND: parseIntEnv(process.env.RELAY_VIDEO_BITS_PER_SECOND, 36000000),
     HOST_RECONNECT_GRACE_MS: parseIntEnv(process.env.HOST_RECONNECT_GRACE_MS, 300000),
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     ALLOW_REMOTE_METRICS: parseBoolEnv(process.env.ALLOW_REMOTE_METRICS, false),
