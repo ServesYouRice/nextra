@@ -2,12 +2,6 @@ import React, { useState, useRef, useEffect, useCallback, useContext } from 'rea
 import { SocketContext } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 
-const BASE_SIMULCAST_ENCODINGS = [
-    { rid: 'r0', maxBitrate: 900_000, scaleResolutionDownBy: 4 },
-    { rid: 'r1', maxBitrate: 4_000_000, scaleResolutionDownBy: 2 },
-    { rid: 'r2', maxBitrate: 18_000_000 },
-];
-
 const CODEC_OPTIONS = { videoGoogleStartBitrate: 10_000 };
 
 const QUALITY_PROFILES = {
@@ -15,21 +9,58 @@ const QUALITY_PROFILES = {
         label: '4K',
         maxSpatialLayer: 2,
         capture: { width: 3840, height: 2160 },
-        relayBitsPerSecond: 8_000_000,
+        relayBitsPerSecond: { 30: 24_000_000, 60: 36_000_000 },
     },
     '1440p': {
         label: '1440p',
         maxSpatialLayer: 2,
         capture: { width: 2560, height: 1440 },
-        relayBitsPerSecond: 6_000_000,
+        relayBitsPerSecond: { 30: 14_000_000, 60: 21_000_000 },
     },
     '1080p': {
         label: '1080p',
-        maxSpatialLayer: 1,
+        maxSpatialLayer: 2,
         capture: { width: 1920, height: 1080 },
-        relayBitsPerSecond: 4_000_000,
+        relayBitsPerSecond: { 30: 8_000_000, 60: 12_000_000 },
     },
 };
+
+function getQualityProfile(profileKey) {
+    return QUALITY_PROFILES[profileKey] || QUALITY_PROFILES['1440p'];
+}
+
+function getProfileRelayBitsPerSecond(profileKey, fps) {
+    const profile = getQualityProfile(profileKey);
+    return fps >= 60 ? profile.relayBitsPerSecond[60] : profile.relayBitsPerSecond[30];
+}
+
+function getSimulcastEncodings(profileKey, fps) {
+    const topBitrate = getProfileRelayBitsPerSecond(profileKey, fps);
+    return [
+        { rid: 'r0', maxBitrate: Math.max(900_000, Math.round(topBitrate * 0.12)), scaleResolutionDownBy: 4 },
+        { rid: 'r1', maxBitrate: Math.max(3_000_000, Math.round(topBitrate * 0.4)), scaleResolutionDownBy: 2 },
+        { rid: 'r2', maxBitrate: topBitrate },
+    ];
+}
+
+async function applyProducerBitrateProfile(videoProducer, profileKey, fps) {
+    const sender = videoProducer?.rtpSender;
+    if (!sender?.getParameters || !sender?.setParameters) return;
+
+    const params = sender.getParameters();
+    if (!Array.isArray(params.encodings) || params.encodings.length === 0) return;
+
+    const targetEncodings = getSimulcastEncodings(profileKey, fps);
+    params.encodings = params.encodings.map((encoding, index) => {
+        const target = targetEncodings[index] || targetEncodings[targetEncodings.length - 1];
+        return {
+            ...encoding,
+            maxBitrate: target.maxBitrate,
+        };
+    });
+
+    await sender.setParameters(params);
+}
 
 function isLikelyLocalOrigin(origin) {
     try {
@@ -68,15 +99,17 @@ export default function HostView() {
     const [shareBaseUrl, setShareBaseUrl] = useState('');
     const [publicShareStatus, setPublicShareStatus] = useState('disabled');
     const [publicShareError, setPublicShareError] = useState('');
+    const [hasTurnServer, setHasTurnServer] = useState(false);
     const [relayFlushIntervalMs, setRelayFlushIntervalMs] = useState(300);
-    const [relayVideoBitsPerSecond, setRelayVideoBitsPerSecond] = useState(6_000_000);
+    const [relayVideoBitsPerSecond, setRelayVideoBitsPerSecond] = useState(36_000_000);
+    const [relayMaxChunkSize, setRelayMaxChunkSize] = useState(4 * 1024 * 1024);
     const [relayViewerCount, setRelayViewerCount] = useState(0);
     const [error, setError] = useState('');
     const [copied, setCopied] = useState(false);
     const [status, setStatus] = useState('idle');
-    const [qualityProfile, setQualityProfile] = useState('1440p');
-    const [frameRate, setFrameRate] = useState(60);
-    const [autoTuneQuality, setAutoTuneQuality] = useState(true);
+    const [qualityProfile, setQualityProfile] = useState('1080p');
+    const [frameRate, setFrameRate] = useState(30);
+    const [autoTuneQuality, setAutoTuneQuality] = useState(false);
     const [roomMetrics, setRoomMetrics] = useState(null);
 
     const videoRef = useRef(null);
@@ -93,8 +126,24 @@ export default function HostView() {
     const bandwidthWarning = viewerCount >= 3 && bitratePerViewer < 7
         ? `${viewerCount} viewers x ~${bitratePerViewer.toFixed(1)} Mbps each. Consider 720p.`
         : '';
-    const selectedProfile = QUALITY_PROFILES[qualityProfile] || QUALITY_PROFILES['1440p'];
-    const effectiveRelayBitsPerSecond = Math.min(relayVideoBitsPerSecond, selectedProfile.relayBitsPerSecond);
+    const selectedProfile = getQualityProfile(qualityProfile);
+    const profileRelayBits = getProfileRelayBitsPerSecond(qualityProfile, frameRate);
+    const effectiveRelayBitsPerSecond = Math.min(relayVideoBitsPerSecond, profileRelayBits);
+    const relayChunkEmitSize = Math.max(256 * 1024, relayMaxChunkSize - (64 * 1024));
+    const estimatedMaxChunkDurationMs = Math.max(
+        250,
+        Math.floor((relayChunkEmitSize * 8 * 1000) / Math.max(effectiveRelayBitsPerSecond, 1)),
+    );
+    const relayFlushThresholdMs = Math.max(
+        250,
+        Math.min(relayFlushIntervalMs * 2, Math.floor(estimatedMaxChunkDurationMs * 0.45)),
+    );
+    const relayFlushPollIntervalMs = Math.max(
+        150,
+        Math.min(relayFlushIntervalMs, Math.floor(relayFlushThresholdMs / 2)),
+    );
+    const hasRemoteShareLink = !!shareBaseUrl && !isLikelyLocalOrigin(shareBaseUrl);
+    const shouldPrewarmRelay = hasRemoteShareLink && !hasTurnServer;
 
     const maybeAutoTuneProfile = useCallback((nextViewerCount, nextRelayViewerCount) => {
         if (!isSharing || !autoTuneQuality) return;
@@ -112,7 +161,7 @@ export default function HostView() {
         }
 
         setQualityProfile((current) => (current === recommended ? current : recommended));
-    }, [isSharing, autoTuneQuality, hostUploadMbps]);
+    }, [isSharing, autoTuneQuality, hostUploadMbps, qualityProfile]);
 
     useEffect(() => {
         if (!roomCode) return undefined;
@@ -168,6 +217,28 @@ export default function HostView() {
             audioCtxRef.current = null;
         }
     }, []);
+
+    const emitRelayChunk = useCallback((blob) => {
+        if (!blob || blob.size <= 0) return;
+
+        if (blob.size <= relayMaxChunkSize) {
+            socket.emit('media-chunk', blob);
+            return;
+        }
+
+        let emittedParts = 0;
+        for (let offset = 0; offset < blob.size; offset += relayChunkEmitSize) {
+            const part = blob.slice(offset, Math.min(offset + relayChunkEmitSize, blob.size));
+            if (part.size > 0) {
+                socket.emit('media-chunk', part);
+                emittedParts += 1;
+            }
+        }
+
+        console.warn(
+            `[Nextra-Host] Split oversized relay chunk (${blob.size} bytes) into ${emittedParts} parts of up to ${relayChunkEmitSize} bytes.`,
+        );
+    }, [socket, relayMaxChunkSize, relayChunkEmitSize]);
 
     const startRelayRecorder = useCallback(() => {
         if (mediaRecorderRef.current || !streamRef.current) return;
@@ -225,7 +296,7 @@ export default function HostView() {
                 if (chunkCount % 20 === 0) {
                     console.log(`[Nextra-Host] Emitted ${chunkCount} relay chunks. Latest size: ${evt.data.size}`);
                 }
-                socket.emit('media-chunk', evt.data);
+                emitRelayChunk(evt.data);
             }
         };
         recorder.onerror = (evt) => {
@@ -253,12 +324,19 @@ export default function HostView() {
             if (
                 recorder.state === 'recording'
                 && lastChunkAt > 0
-                && (Date.now() - lastChunkAt) > Math.max(1500, relayFlushIntervalMs * 4)
+                && (Date.now() - lastChunkAt) > relayFlushThresholdMs
             ) {
                 recorder.requestData();
             }
-        }, Math.max(1000, relayFlushIntervalMs * 2));
-    }, [socket, effectiveRelayBitsPerSecond, relayFlushIntervalMs]);
+        }, relayFlushPollIntervalMs);
+    }, [
+        socket,
+        emitRelayChunk,
+        effectiveRelayBitsPerSecond,
+        relayFlushPollIntervalMs,
+        relayFlushThresholdMs,
+        relayFlushIntervalMs,
+    ]);
 
     const cleanup = useCallback(() => {
         stopRelayRecorder();
@@ -354,13 +432,18 @@ export default function HostView() {
     }, [socket, isSharing, viewerCount, maybeAutoTuneProfile]);
 
     const applyQualityProfileToLiveStream = useCallback(async (profileKey, fps) => {
-        const profile = QUALITY_PROFILES[profileKey] || QUALITY_PROFILES['1440p'];
+        const profile = getQualityProfile(profileKey);
         const videoProducer = videoProducerRef.current;
         if (videoProducer) {
             try {
                 await videoProducer.setMaxSpatialLayer(profile.maxSpatialLayer);
             } catch (err) {
                 console.warn('[Nextra-Host] Failed to apply producer layer profile:', err.message);
+            }
+            try {
+                await applyProducerBitrateProfile(videoProducer, profileKey, fps);
+            } catch (err) {
+                console.warn('[Nextra-Host] Failed to apply producer bitrate profile:', err.message);
             }
         }
 
@@ -383,7 +466,7 @@ export default function HostView() {
         if (!isSharing) return;
         void applyQualityProfileToLiveStream(qualityProfile, frameRate);
 
-        if (relayViewerCount > 0) {
+        if (relayViewerCount > 0 || shouldPrewarmRelay) {
             stopRelayRecorder();
             startRelayRecorder();
         } else {
@@ -394,6 +477,7 @@ export default function HostView() {
         qualityProfile,
         frameRate,
         relayViewerCount,
+        shouldPrewarmRelay,
         relayFlushIntervalMs,
         effectiveRelayBitsPerSecond,
         applyQualityProfileToLiveStream,
@@ -489,7 +573,7 @@ export default function HostView() {
 
             const videoProducer = await sendTransport.produce({
                 track: videoTrack,
-                encodings: BASE_SIMULCAST_ENCODINGS,
+                encodings: getSimulcastEncodings(qualityProfile, frameRate),
                 codecOptions: CODEC_OPTIONS,
             });
             videoProducerRef.current = videoProducer;
@@ -516,7 +600,7 @@ export default function HostView() {
             socket.emit('host-stopped');
             cleanup();
         }
-    }, [socket, allowMediaControl, cleanup, selectedProfile, frameRate]);
+    }, [socket, allowMediaControl, cleanup, selectedProfile, qualityProfile, frameRate]);
 
     const applyServerConfig = useCallback((data = {}) => {
         if (typeof data.hostUploadMbps === 'number') {
@@ -536,11 +620,17 @@ export default function HostView() {
         if (typeof data.publicShareError === 'string') {
             setPublicShareError(data.publicShareError);
         }
+        if (typeof data.hasTurnServer === 'boolean') {
+            setHasTurnServer(data.hasTurnServer);
+        }
         if (typeof data.relayFlushIntervalMs === 'number' && data.relayFlushIntervalMs >= 100) {
             setRelayFlushIntervalMs(data.relayFlushIntervalMs);
         }
         if (typeof data.relayVideoBitsPerSecond === 'number' && data.relayVideoBitsPerSecond > 0) {
             setRelayVideoBitsPerSecond(data.relayVideoBitsPerSecond);
+        }
+        if (typeof data.mediaMaxChunkSize === 'number' && data.mediaMaxChunkSize > 0) {
+            setRelayMaxChunkSize(data.mediaMaxChunkSize);
         }
     }, []);
 
@@ -764,4 +854,3 @@ export default function HostView() {
         </div>
     );
 }
-
