@@ -38,20 +38,6 @@ function toUint8ArraySync(data) {
     return null;
 }
 
-async function toUint8Array(data) {
-    if (data instanceof Blob) {
-        return new Uint8Array(await data.arrayBuffer());
-    }
-    return toUint8ArraySync(data);
-}
-
-function areUint8ArraysEqual(left, right) {
-    if (!left || !right || left.byteLength !== right.byteLength) return false;
-    for (let index = 0; index < left.byteLength; index += 1) {
-        if (left[index] !== right[index]) return false;
-    }
-    return true;
-}
 
 export default function WatchView({ initialCode = '' }) {
     const socket = useSocket();
@@ -68,6 +54,7 @@ export default function WatchView({ initialCode = '' }) {
     const [watchLoading, setWatchLoading] = useState(false);
     const [playbackMode, setPlaybackMode] = useState('');
     const [viewerLayerPreference, setViewerLayerPreference] = useState('high');
+    const [hasTurnServer, setHasTurnServer] = useState(false);
 
     const videoRef = useRef(null);
     const deviceRef = useRef(null);
@@ -132,6 +119,7 @@ export default function WatchView({ initialCode = '' }) {
         sourceBufferRef.current = null;
         chunkQueueRef.current = [];
         queuedBytesRef.current = 0;
+        userPausedRef.current = false;
         relayUnsupportedWarnedRef.current = false;
         setPlaybackMode('');
     }, [socket]);
@@ -245,6 +233,19 @@ export default function WatchView({ initialCode = '' }) {
 
     const isTunnelOrigin = /\.trycloudflare\.com$/i.test(window.location.hostname)
         || /\.cloudflare/i.test(window.location.hostname);
+    const preferRelayFirst = isTunnelOrigin && !hasTurnServer;
+
+    useEffect(() => {
+        const onServerConfig = (data = {}) => {
+            if (typeof data.hasTurnServer === 'boolean') {
+                setHasTurnServer(data.hasTurnServer);
+            }
+        };
+
+        socket.on('server-config', onServerConfig);
+        socket.emit('request-server-config');
+        return () => socket.off('server-config', onServerConfig);
+    }, [socket]);
 
     const startMediasoupPlayback = useCallback(async () => {
         const device = deviceRef.current;
@@ -281,10 +282,10 @@ export default function WatchView({ initialCode = '' }) {
         }
 
         // Wait for the ICE/DTLS connection to actually establish, with a timeout.
-        // Tunnel viewers get a short timeout (4s) — if TURN is configured, ICE
-        // connects in 1-2s via TCP relay. If not, fail fast and fall back to
-        // relay playback instead of hanging for 15s on unreachable UDP candidates.
-        const iceTimeoutMs = isTunnelOrigin ? 4000 : 15000;
+        // Tunnel viewers get a very short timeout (2s) — mediasoup WebRTC cannot
+        // work through a Cloudflare tunnel (no UDP), so fail fast and fall back
+        // to relay playback instead of wasting time on unreachable candidates.
+        const iceTimeoutMs = isTunnelOrigin ? 2000 : 8000;
         const connectionState = recvTransport.connectionState;
         if (connectionState !== 'connected') {
             await new Promise((resolve, reject) => {
@@ -326,7 +327,9 @@ export default function WatchView({ initialCode = '' }) {
     const startRelayPlayback = useCallback(async () => {
         if (!videoRef.current) throw new Error('Video element not found');
 
+        console.log('[Nextra] relay-consume-start…');
         await socketRequest(socket, 'relay-consume-start');
+        console.log('[Nextra] relay-consume-start OK');
         relaySubscribedRef.current = true;
 
         chunkQueueRef.current = [];
@@ -352,14 +355,19 @@ export default function WatchView({ initialCode = '' }) {
             else resolveFirstBuffered?.();
         };
 
+        let enqueueCount = 0;
         const enqueueChunk = (buf) => {
             const uint = toUint8ArraySync(buf);
             if (!uint?.byteLength) {
                 if (!relayUnsupportedWarnedRef.current) {
                     relayUnsupportedWarnedRef.current = true;
-                    console.warn('[Nextra] Ignoring unsupported relay chunk payload.');
+                    console.warn('[Nextra] Ignoring unsupported relay chunk payload. buf type:', typeof buf, buf?.constructor?.name);
                 }
                 return;
+            }
+            enqueueCount += 1;
+            if (enqueueCount <= 3) {
+                console.log(`[Nextra] enqueueChunk #${enqueueCount}: ${uint.byteLength} bytes, queue=${chunkQueueRef.current.length}`);
             }
 
             chunkQueueRef.current.push(uint);
@@ -384,16 +392,34 @@ export default function WatchView({ initialCode = '' }) {
             }
         };
 
+        let chunkArrivalCount = 0;
         const onChunk = (data) => {
+            chunkArrivalCount += 1;
+            if (chunkArrivalCount <= 3 || chunkArrivalCount % 20 === 0) {
+                console.log(`[Nextra] media-chunk #${chunkArrivalCount} arrived, type=${typeof data}, constructor=${data?.constructor?.name}, size=${data?.size ?? data?.byteLength ?? '?'}`);
+            }
             if (data instanceof Blob) {
-                data.arrayBuffer().then(enqueueChunk);
+                data.arrayBuffer()
+                    .then(enqueueChunk)
+                    .catch((err) => {
+                        console.warn('[Nextra] Failed to convert relay blob chunk:', err?.message || err);
+                    });
             } else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data) || data?.data) {
                 enqueueChunk(data);
+            } else {
+                console.warn('[Nextra] media-chunk: unrecognized data format', typeof data, data?.constructor?.name);
             }
         };
 
         const onMediaInit = (payload = {}) => {
             if (!payload?.mimeType) return;
+            // A new recorder session started — discard any stale chunks from
+            // the previous session so the fresh init segment is appended first.
+            if (chunkQueueRef.current.length > 0) {
+                console.log(`[Nextra] media-init received, flushing ${chunkQueueRef.current.length} stale chunks`);
+                chunkQueueRef.current.length = 0;
+                queuedBytesRef.current = 0;
+            }
             liveInitPayload = payload;
             mimeType = payload.mimeType;
             if (resolveLiveInit) {
@@ -426,142 +452,156 @@ export default function WatchView({ initialCode = '' }) {
         socket.on('media-init', onMediaInit);
         socket.on('media-chunk', onChunk);
 
-        try {
-            initResultData = await socketRequest(socket, 'get-media-init');
-            if (initResultData.init?.mimeType) {
-                mimeType = initResultData.init.mimeType;
-            }
-        } catch {
-            // Relay can start before init metadata is cached; wait for live media-init below.
-        }
-
-        if (!initResultData?.init?.mimeType) {
-            const liveInit = liveInitPayload || await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                    cleanupWait();
-                    reject(new Error('Relay stream is not ready yet. Try again in a moment.'));
-                }, 7000);
-
-                const cleanupWait = () => {
-                    clearTimeout(timeout);
-                    resolveLiveInit = null;
-                };
-
-                resolveLiveInit = (payload) => {
-                    cleanupWait();
-                    resolve(payload);
-                };
-            });
-
-            if (liveInit?.mimeType) {
-                mimeType = liveInit.mimeType;
-            }
-        }
-
-        const mseMimeSupported = window.MediaSource && MediaSource.isTypeSupported(mimeType);
-        if (!mseMimeSupported) {
-            throw new Error('Your browser does not support live WebM streaming. Use Chrome, Edge, or Firefox.');
-        }
-
-        const mediaSource = new MediaSource();
-        mediaSourceRef.current = mediaSource;
-        const objectUrl = URL.createObjectURL(mediaSource);
-        objectUrlRef.current = objectUrl;
-        videoRef.current.src = objectUrl;
-        videoRef.current.srcObject = null;
-
-        await new Promise((resolve, reject) => {
-            mediaSource.addEventListener('sourceopen', resolve, { once: true });
-            setTimeout(() => reject(new Error('MediaSource did not open')), 5000);
-        });
-
-        const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-        sourceBufferRef.current = sourceBuffer;
-        try {
-            if (sourceBuffer.mode === 'segments') {
-                sourceBuffer.mode = 'sequence';
-            }
-        } catch (err) {
-            console.warn('[Nextra] Could not switch SourceBuffer to sequence mode:', err.message);
-        }
-
-        sourceBuffer.addEventListener('updateend', () => {
-            appendingLock = false;
-
-            if (videoRef.current && sourceBuffer.buffered.length > 0) {
-                settleFirstBuffered();
-                const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                const currentTime = videoRef.current.currentTime;
-
-                if (!userPausedRef.current && bufferedEnd - currentTime > 2.5) {
-                    videoRef.current.currentTime = bufferedEnd - 0.35;
-                }
-
-                if (videoRef.current.paused && !userPausedRef.current) {
-                    videoRef.current.play().catch(() => { });
-                }
-            }
-
-            processQueue();
-        });
-
-        if (initResultData?.initChunk && mediaSource.readyState === 'open') {
-            const initBuffer = await toUint8Array(initResultData.initChunk);
-
-            if (initBuffer?.byteLength) {
-                const queuedFirstChunk = chunkQueueRef.current[0];
-                if (areUint8ArraysEqual(queuedFirstChunk, initBuffer)) {
-                    chunkQueueRef.current.shift();
-                    queuedBytesRef.current = Math.max(0, queuedBytesRef.current - queuedFirstChunk.byteLength);
-                }
-
-                appendingLock = true;
-                try {
-                    await new Promise((resolve) => {
-                        sourceBuffer.addEventListener('updateend', resolve, { once: true });
-                        sourceBuffer.appendBuffer(initBuffer);
-                    });
-                } finally {
-                    appendingLock = false;
-                }
-
-                if (sourceBuffer.buffered.length > 0) {
-                    settleFirstBuffered();
-                }
-            }
-        }
-
-        const safetyInterval = setInterval(() => {
-            if (
-                mediaSourceRef.current?.readyState === 'open'
-                && !appendingLock
-                && !sourceBufferRef.current?.updating
-                && chunkQueueRef.current.length > 0
-            ) {
-                processQueue();
-            }
-        }, 200);
-
-        relayCleanupRef.current = () => {
+        let safetyInterval = null;
+        let relayCleanupDone = false;
+        const cleanupRelayAttempt = () => {
+            if (relayCleanupDone) return;
+            relayCleanupDone = true;
             socket.off('media-init', onMediaInit);
             socket.off('media-chunk', onChunk);
-            clearInterval(safetyInterval);
+            if (safetyInterval) {
+                clearInterval(safetyInterval);
+                safetyInterval = null;
+            }
             settleFirstBuffered(new Error('Relay playback was cleaned up before media buffered.'));
         };
+        relayCleanupRef.current = cleanupRelayAttempt;
 
-        processQueue();
-        await playVideoElement(null);
-        await Promise.race([
-            firstBufferedPromise,
-            new Promise((_, reject) => {
-                setTimeout(() => reject(new Error('Relay connected but no playable media buffered.')), 12000);
-            }),
-        ]);
+        try {
+            try {
+                initResultData = await socketRequest(socket, 'get-media-init');
+                console.log('[Nextra] get-media-init OK:', initResultData?.init?.mimeType || 'no mime');
+                if (initResultData.init?.mimeType) {
+                    mimeType = initResultData.init.mimeType;
+                }
+            } catch {
+                console.log('[Nextra] get-media-init not cached yet, waiting for live media-init…');
+            }
 
-        setPlaybackMode('relay');
-        setWatching(true);
-        setHostDisconnected(false);
-    }, [socket, playVideoElement]);
+            // When the relay recorder is prewarmed (tunnel with no TURN), a
+            // recorder restart happens when we join.  We MUST wait for the live
+            // media-init event before creating the MediaSource — that event
+            // flushes stale chunks from the old recorder so the first thing
+            // appended to the SourceBuffer is the fresh WebM init segment.
+            // Even when get-media-init already returned a mimeType, we still
+            // need the live event to synchronise the queue.
+            const needsLiveInit = !initResultData?.init?.mimeType || isTunnelOrigin;
+
+            if (needsLiveInit) {
+                const liveInit = liveInitPayload || await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        cleanupWait();
+                        reject(new Error('Relay stream is not ready yet. Try again in a moment.'));
+                    }, 7000);
+
+                    const cleanupWait = () => {
+                        clearTimeout(timeout);
+                        resolveLiveInit = null;
+                    };
+
+                    resolveLiveInit = (payload) => {
+                        cleanupWait();
+                        resolve(payload);
+                    };
+                });
+
+                if (liveInit?.mimeType) {
+                    mimeType = liveInit.mimeType;
+                }
+                console.log('[Nextra] Got live media-init:', mimeType);
+            }
+
+            console.log('[Nextra] Setting up MediaSource with mime:', mimeType);
+            const mseMimeSupported = window.MediaSource && MediaSource.isTypeSupported(mimeType);
+            if (!mseMimeSupported) {
+                throw new Error('Your browser does not support live WebM streaming. Use Chrome, Edge, or Firefox.');
+            }
+
+            const mediaSource = new MediaSource();
+            mediaSourceRef.current = mediaSource;
+            const objectUrl = URL.createObjectURL(mediaSource);
+            objectUrlRef.current = objectUrl;
+            videoRef.current.src = objectUrl;
+            videoRef.current.srcObject = null;
+
+            await new Promise((resolve, reject) => {
+                mediaSource.addEventListener('sourceopen', resolve, { once: true });
+                setTimeout(() => reject(new Error('MediaSource did not open')), 5000);
+            });
+
+            const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+            sourceBufferRef.current = sourceBuffer;
+            try {
+                if (sourceBuffer.mode === 'segments') {
+                    sourceBuffer.mode = 'sequence';
+                }
+            } catch (err) {
+                console.warn('[Nextra] Could not switch SourceBuffer to sequence mode:', err.message);
+            }
+
+            sourceBuffer.addEventListener('error', (e) => {
+                console.error('[Nextra] SourceBuffer error event:', e);
+                appendingLock = false;
+            });
+
+            sourceBuffer.addEventListener('updateend', () => {
+                appendingLock = false;
+
+                if (videoRef.current && sourceBuffer.buffered.length > 0) {
+                    settleFirstBuffered();
+                    const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+                    const currentTime = videoRef.current.currentTime;
+
+                    if (!userPausedRef.current && bufferedEnd - currentTime > 2.5) {
+                        videoRef.current.currentTime = bufferedEnd - 0.35;
+                    }
+
+                    if (videoRef.current.paused && !userPausedRef.current) {
+                        videoRef.current.play().catch(() => { });
+                    }
+                }
+
+                processQueue();
+            });
+
+            // Don't use the cached initChunk from get-media-init — when the relay
+            // recorder is prewarmed, it's from the start of the session and
+            // incompatible with live chunks arriving minutes later. Instead, let
+            // processQueue append the first chunk from the (re)started recorder,
+            // which contains a fresh WebM init segment + current keyframe.
+
+            safetyInterval = setInterval(() => {
+                if (
+                    mediaSourceRef.current?.readyState === 'open'
+                    && !appendingLock
+                    && !sourceBufferRef.current?.updating
+                    && chunkQueueRef.current.length > 0
+                ) {
+                    processQueue();
+                }
+            }, 200);
+
+            console.log('[Nextra] MediaSource ready, waiting for first buffered media…');
+            processQueue();
+            await playVideoElement(null);
+            await Promise.race([
+                firstBufferedPromise,
+                new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Relay connected but no playable media buffered.')), 18000);
+                }),
+            ]);
+
+            setPlaybackMode('relay');
+            setWatching(true);
+            setHostDisconnected(false);
+        } catch (err) {
+            cleanupRelayAttempt();
+            if (relayCleanupRef.current === cleanupRelayAttempt) {
+                relayCleanupRef.current = null;
+            }
+            throw err;
+        }
+    }, [socket, playVideoElement, isTunnelOrigin]);
 
     useEffect(() => {
         if (!joined) return undefined;
@@ -625,6 +665,25 @@ export default function WatchView({ initialCode = '' }) {
     }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback]);
 
     useEffect(() => {
+        const onTransportFailed = ({ reason } = {}) => {
+            cleanupPlayback();
+            resetDevice();
+            setJoined(false);
+            setWatching(false);
+            setHasProducer(false);
+            setHostDisconnected(false);
+            setHostReconnectingReason('');
+            setPlaybackMode('');
+            setIsMuted(false);
+            setViewerLayerPreference('auto');
+            setError(reason || 'Stream connection failed. Please rejoin the room.');
+        };
+
+        socket.on('transport-failed', onTransportFailed);
+        return () => socket.off('transport-failed', onTransportFailed);
+    }, [socket, cleanupPlayback]);
+
+    useEffect(() => {
         if (!watching || playbackMode !== 'mediasoup') return;
         if (!videoConsumerIdsRef.current.size) return;
 
@@ -669,7 +728,7 @@ export default function WatchView({ initialCode = '' }) {
         setWatchLoading(true);
         cleanupPlayback();
 
-        // Safety net: never stay in "Connecting..." state for more than 25s total.
+        // Safety net: never stay in "Connecting..." state for more than 40s total.
         let watchTimedOut = false;
         const watchTimeout = setTimeout(() => {
             watchTimedOut = true;
@@ -677,22 +736,56 @@ export default function WatchView({ initialCode = '' }) {
             setWatching(false);
             setWatchLoading(false);
             setError('Connection timed out. Check your network or try again.');
-        }, 25000);
+        }, 30000);
+
+        if (preferRelayFirst) {
+            try {
+                console.log('[Nextra] Starting relay playback first for public tunnel viewer.');
+                await startRelayPlayback();
+                console.log('[Nextra] Relay playback connected.');
+            } catch (primaryErr) {
+                if (watchTimedOut) return;
+                console.warn('[Nextra] Relay-first playback failed; trying WebRTC fallback:', primaryErr.message);
+                cleanupPlayback();
+
+                try {
+                    console.log('[Nextra] Trying mediasoup fallback.');
+                    await startMediasoupPlayback();
+                    console.log('[Nextra] Mediasoup fallback connected.');
+                } catch (fallbackErr) {
+                    if (watchTimedOut) return;
+                    cleanupPlayback();
+                    setWatching(false);
+                    console.error('[Nextra] Secondary playback attempt failed:', fallbackErr.message);
+                    setError(fallbackErr.message || primaryErr.message || 'Failed to start watching.');
+                }
+            } finally {
+                clearTimeout(watchTimeout);
+                if (!watchTimedOut) {
+                    setWatchLoading(false);
+                }
+            }
+            return;
+        }
 
         try {
+            console.log('[Nextra] Starting mediasoup playback…');
             await startMediasoupPlayback();
+            console.log('[Nextra] Mediasoup playback connected.');
         } catch (primaryErr) {
             if (watchTimedOut) return;
             console.warn('[Nextra] Primary playback failed; trying relay fallback:', primaryErr.message);
             cleanupPlayback();
 
             try {
+                console.log('[Nextra] Starting relay playback…');
                 await startRelayPlayback();
+                console.log('[Nextra] Relay playback connected.');
             } catch (fallbackErr) {
                 if (watchTimedOut) return;
                 cleanupPlayback();
                 setWatching(false);
-                console.error('[Nextra] Watch failed:', fallbackErr);
+                console.error('[Nextra] Relay fallback also failed:', fallbackErr.message);
                 setError(fallbackErr.message || primaryErr.message || 'Failed to start watching.');
             }
         } finally {
@@ -701,7 +794,7 @@ export default function WatchView({ initialCode = '' }) {
                 setWatchLoading(false);
             }
         }
-    }, [cleanupPlayback, startMediasoupPlayback, startRelayPlayback]);
+    }, [cleanupPlayback, preferRelayFirst, startMediasoupPlayback, startRelayPlayback]);
 
     const handleToggleMedia = useCallback(async () => {
         setMediaControlStatus('');

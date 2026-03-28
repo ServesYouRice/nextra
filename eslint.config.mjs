@@ -5,7 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'node_modules', 'poc-mediasoup/node_modules']),
+  globalIgnores(['dist', 'node_modules', 'poc-mediasoup/node_modules', '.caxa-stage']),
   {
     files: ['src/**/*.{js,jsx}'],
     extends: [

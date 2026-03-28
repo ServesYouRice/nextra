@@ -9,9 +9,10 @@
     "build": "vite build",
     "start": "node server.js",
     "lint": "eslint .",
+    "test": "node --test",
     "package": "npm run build && node scripts/package-app.js",
     "oss:check": "node scripts/opensource-preflight.js",
-    "release:prep": "npm run lint && npm run build && npm run oss:check"
+    "release:prep": "npm run lint && npm test && npm run build && npm run oss:check"
   },
   "dependencies": {
     "dotenv": "^17.3.1",

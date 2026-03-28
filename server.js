@@ -13,10 +13,19 @@ const {
     startJoinCleanup,
     stopJoinCleanup,
     getSocketRuntimeMetrics,
+    destroyRoomWithReason,
 } = require('./lib/socket');
 const { startRoomCleanup, stopRoomCleanup, getAllRoomStats } = require('./lib/rooms');
 const { getOrCreateCert } = require('./lib/https');
 const { startCloudflareQuickTunnel } = require('./lib/tunnel');
+const {
+    normalizeIp,
+    parseForwardedFirst,
+    isLocalHostname,
+    isLocalClientIp,
+    shouldTrustForwardedHeaders,
+    getTrustedForwardedClientIp,
+} = require('./lib/network');
 
 const app = express();
 let runtimeShareBaseUrl = '';
@@ -54,42 +63,6 @@ app.use((req, res, next) => {
     })(req, res, next);
 });
 
-function normalizeIp(ip) {
-    if (!ip || typeof ip !== 'string') return 'unknown';
-    if (ip.startsWith('::ffff:')) return ip.slice(7);
-    return ip;
-}
-
-function parseForwardedFirst(value) {
-    if (!value || typeof value !== 'string') return '';
-    return value.split(',')[0].trim();
-}
-
-function isLocalHostname(hostname) {
-    const name = (hostname || '').toLowerCase();
-    if (!name) return true;
-    if (name === 'localhost' || name === '::1' || name === '[::1]') return true;
-    if (name === config.LAN_IP || name === '127.0.0.1') return true;
-    if (/^127\.\d+\.\d+\.\d+$/.test(name)) return true;
-    if (/^10\.\d+\.\d+\.\d+$/.test(name)) return true;
-    if (/^192\.168\.\d+\.\d+$/.test(name)) return true;
-    if (/^172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+$/.test(name)) return true;
-    return false;
-}
-
-function isLocalClientIp(ip) {
-    const normalized = normalizeIp(ip).toLowerCase();
-    if (!normalized || normalized === 'unknown') return false;
-    if (normalized === '::1' || normalized === '[::1]') return true;
-    if (/^127\.\d+\.\d+\.\d+$/.test(normalized)) return true;
-    if (/^10\.\d+\.\d+\.\d+$/.test(normalized)) return true;
-    if (/^192\.168\.\d+\.\d+$/.test(normalized)) return true;
-    if (/^172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+$/.test(normalized)) return true;
-    if (/^(fc|fd)[0-9a-f:]+$/.test(normalized)) return true;
-    if (/^fe80:[0-9a-f:]+$/.test(normalized)) return true;
-    return false;
-}
-
 function getRemoteAddressFromReq(req) {
     return normalizeIp(
         req?.socket?.remoteAddress
@@ -98,18 +71,14 @@ function getRemoteAddressFromReq(req) {
     );
 }
 
-function shouldTrustForwardedHeaders(remoteAddress) {
-    if (!config.TRUST_X_FORWARDED_HEADERS) return false;
-    return isLocalClientIp(normalizeIp(remoteAddress));
-}
-
 function getRequestClientIp(req) {
-    if (shouldTrustForwardedHeaders(getRemoteAddressFromReq(req))) {
-        const cfConnectingIp = parseForwardedFirst(req.headers['cf-connecting-ip']);
-        if (cfConnectingIp) return normalizeIp(cfConnectingIp);
-        const forwardedFor = parseForwardedFirst(req.headers['x-forwarded-for']);
-        if (forwardedFor) return normalizeIp(forwardedFor);
-    }
+    const remoteAddress = getRemoteAddressFromReq(req);
+    const forwardedIp = getTrustedForwardedClientIp(
+        req?.headers || {},
+        remoteAddress,
+        config.TRUST_X_FORWARDED_HEADERS
+    );
+    if (forwardedIp) return forwardedIp;
 
     return normalizeIp(
         req.socket?.remoteAddress
@@ -177,7 +146,7 @@ function getSocketRequestHostOrigin(req) {
     const remoteAddress = getRemoteAddressFromReq(req);
     let proto = req?.socket?.encrypted ? 'https' : 'http';
 
-    if (shouldTrustForwardedHeaders(remoteAddress)) {
+    if (shouldTrustForwardedHeaders(remoteAddress, config.TRUST_X_FORWARDED_HEADERS)) {
         const forwardedProto = parseForwardedFirst(req?.headers?.['x-forwarded-proto']);
         if (forwardedProto === 'http' || forwardedProto === 'https') {
             proto = forwardedProto;
@@ -276,7 +245,7 @@ function getShareBaseUrl(req) {
         const forwardedHost = parseForwardedFirst(req.headers['x-forwarded-host']);
         const proto = (forwardedProto || '').toLowerCase();
         const hostParts = parseUrlHostParts(forwardedHost);
-        if ((proto === 'http' || proto === 'https') && hostParts && !isLocalHostname(hostParts.hostname)) {
+        if ((proto === 'http' || proto === 'https') && hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
             return `${proto}://${hostParts.hostWithPort}`;
         }
     }
@@ -284,7 +253,7 @@ function getShareBaseUrl(req) {
     const reqProto = req.protocol === 'https' ? 'https' : 'http';
     const hostHeader = req.get('host') || '';
     const hostParts = parseUrlHostParts(hostHeader);
-    if (hostParts && !isLocalHostname(hostParts.hostname)) {
+    if (hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
         return `${reqProto}://${hostParts.hostWithPort}`;
     }
 
@@ -359,19 +328,19 @@ async function probeExistingNextraInstance() {
 }
 
 function getShareBaseUrlFromHeaders(headers = {}, remoteAddress = '') {
-    if (shouldTrustForwardedHeaders(remoteAddress)) {
+    if (shouldTrustForwardedHeaders(remoteAddress, config.TRUST_X_FORWARDED_HEADERS)) {
         const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(headers['x-forwarded-host']);
         const proto = (forwardedProto || '').toLowerCase();
         const hostParts = parseUrlHostParts(forwardedHost);
-        if ((proto === 'http' || proto === 'https') && hostParts && !isLocalHostname(hostParts.hostname)) {
+        if ((proto === 'http' || proto === 'https') && hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
             return `${proto}://${hostParts.hostWithPort}`;
         }
     }
 
     const hostHeader = typeof headers.host === 'string' ? headers.host : '';
     const hostParts = parseUrlHostParts(hostHeader);
-    if (hostParts && !isLocalHostname(hostParts.hostname)) {
+    if (hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
         return `https://${hostParts.hostWithPort}`;
     }
 
@@ -404,14 +373,16 @@ function getShareBaseUrlForSocket(socket) {
 }
 
 function getSocketHandshakeIp(socket) {
-    if (shouldTrustForwardedHeaders(
-        socket?.request?.socket?.remoteAddress || socket?.conn?.remoteAddress || socket?.handshake?.address || ''
-    )) {
-        const cfConnectingIp = parseForwardedFirst(socket?.handshake?.headers?.['cf-connecting-ip']);
-        if (cfConnectingIp) return normalizeIp(cfConnectingIp);
-        const forwardedFor = parseForwardedFirst(socket?.handshake?.headers?.['x-forwarded-for']);
-        if (forwardedFor) return normalizeIp(forwardedFor);
-    }
+    const remoteAddress = socket?.request?.socket?.remoteAddress
+        || socket?.conn?.remoteAddress
+        || socket?.handshake?.address
+        || '';
+    const forwardedIp = getTrustedForwardedClientIp(
+        socket?.handshake?.headers || {},
+        remoteAddress,
+        config.TRUST_X_FORWARDED_HEADERS
+    );
+    if (forwardedIp) return forwardedIp;
 
     return normalizeIp(
         socket?.handshake?.address
@@ -566,12 +537,13 @@ const CONNECTION_WINDOW_MS = config.CONNECTION_WINDOW_MS;
 
 function getSocketClientIp(rawSocket) {
     const req = rawSocket.request;
-    if (shouldTrustForwardedHeaders(req?.socket?.remoteAddress || req?.connection?.remoteAddress || '')) {
-        const cfConnectingIp = parseForwardedFirst(req?.headers?.['cf-connecting-ip']);
-        if (cfConnectingIp) return normalizeIp(cfConnectingIp);
-        const forwardedFor = parseForwardedFirst(req?.headers?.['x-forwarded-for']);
-        if (forwardedFor) return normalizeIp(forwardedFor);
-    }
+    const remoteAddress = req?.socket?.remoteAddress || req?.connection?.remoteAddress || '';
+    const forwardedIp = getTrustedForwardedClientIp(
+        req?.headers || {},
+        remoteAddress,
+        config.TRUST_X_FORWARDED_HEADERS
+    );
+    if (forwardedIp) return forwardedIp;
 
     return normalizeIp(
         req?.socket?.remoteAddress
@@ -732,8 +704,6 @@ async function handleHttpsServerError(err) {
     worker = result.worker;
     console.log(`Mediasoup Worker PID: ${worker.pid}`);
 
-    startRoomCleanup();
-
     const io = new Server(httpsServer, {
         path: config.SOCKET_PATH,
         maxHttpBufferSize: config.SOCKET_MAX_HTTP_BUFFER_SIZE,
@@ -762,6 +732,10 @@ async function handleHttpsServerError(err) {
         },
     });
     ioServer = io;
+
+    startRoomCleanup({
+        onStaleRoom: (room) => destroyRoomWithReason(io, room.code, 'Room timed out', false),
+    });
 
     io.engine.on('connection', (rawSocket) => {
         const ip = getSocketClientIp(rawSocket);

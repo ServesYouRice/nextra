@@ -2,7 +2,12 @@ import React, { useState, useRef, useEffect, useCallback, useContext } from 'rea
 import { SocketContext } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 
-const CODEC_OPTIONS = { videoGoogleStartBitrate: 10_000 };
+const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 10_000 };
+const AUDIO_CODEC_OPTIONS = {
+    opusStereo: 1,
+    opusFec: 1,
+    opusDtx: 0,
+};
 
 const QUALITY_PROFILES = {
     '4k': {
@@ -401,6 +406,16 @@ export default function HostView() {
     }, [socket, maybeAutoTuneProfile]);
 
     useEffect(() => {
+        const onTransportFailed = ({ reason } = {}) => {
+            cleanup();
+            setError(reason || 'Host media connection failed. Please start sharing again.');
+        };
+
+        socket.on('transport-failed', onTransportFailed);
+        return () => socket.off('transport-failed', onTransportFailed);
+    }, [socket, cleanup]);
+
+    useEffect(() => {
         const onConnect = () => socket.emit('request-server-config');
         socket.on('connect', onConnect);
         return () => socket.off('connect', onConnect);
@@ -574,7 +589,7 @@ export default function HostView() {
             const videoProducer = await sendTransport.produce({
                 track: videoTrack,
                 encodings: getSimulcastEncodings(qualityProfile, frameRate),
-                codecOptions: CODEC_OPTIONS,
+                codecOptions: VIDEO_CODEC_OPTIONS,
             });
             videoProducerRef.current = videoProducer;
             try {
@@ -585,7 +600,10 @@ export default function HostView() {
 
             const audioTracks = stream.getAudioTracks();
             if (audioTracks.length > 0) {
-                await sendTransport.produce({ track: audioTracks[0] });
+                await sendTransport.produce({
+                    track: audioTracks[0],
+                    codecOptions: AUDIO_CODEC_OPTIONS,
+                });
             }
             setRelayViewerCount(0);
             setIsSharing(true);
