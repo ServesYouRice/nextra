@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSocket } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
+import { createFmp4RelayPlayer } from './lib/fmp4RelayPlayer';
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
@@ -55,6 +56,12 @@ export default function WatchView({ initialCode = '' }) {
     const [playbackMode, setPlaybackMode] = useState('');
     const [viewerLayerPreference, setViewerLayerPreference] = useState('high');
     const [hasTurnServer, setHasTurnServer] = useState(false);
+    const [ingestMode, setIngestMode] = useState('browser');
+    const [fallbackMode, setFallbackMode] = useState(false); // true when using fMP4 fallback
+    const [fallbackState, setFallbackState] = useState(null); // 'connecting'|'buffering'|'playing'|'error'|'stopped'
+    const [fallbackCodec, setFallbackCodec] = useState(null);
+    const [codecUnsupported, setCodecUnsupported] = useState(false);
+    const [whipReconnecting, setWhipReconnecting] = useState(false);
 
     const videoRef = useRef(null);
     const deviceRef = useRef(null);
@@ -70,11 +77,17 @@ export default function WatchView({ initialCode = '' }) {
     const relaySubscribedRef = useRef(false);
     const relayUnsupportedWarnedRef = useRef(false);
     const mediaStreamRef = useRef(null);
+    const fmp4PlayerRef = useRef(null);
     const consumedProducerIdsRef = useRef(new Set());
     const videoConsumerIdsRef = useRef(new Set());
     const producerToConsumerIdRef = useRef(new Map());
 
     const cleanupPlayback = useCallback(() => {
+        if (fmp4PlayerRef.current) {
+            fmp4PlayerRef.current.stop();
+            fmp4PlayerRef.current = null;
+        }
+
         if (relaySubscribedRef.current) {
             relaySubscribedRef.current = false;
             socket.emit('relay-consume-stop');
@@ -651,16 +664,26 @@ export default function WatchView({ initialCode = '' }) {
             console.log('Producer closed for consumer:', consumerId);
         };
 
+        const onWhipStatus = ({ reconnecting }) => setWhipReconnecting(!!reconnecting);
+        const onFallbackError = ({ message }) => {
+            console.error('[WatchView] Fallback worker failed:', message);
+            setFallbackState('error');
+        };
+
         socket.on('host-disconnected', onHostDisconnected);
         socket.on('host-reconnected', onHostReconnected);
         socket.on('new-producer', onNewProducer);
         socket.on('producer-closed', onProducerClosed);
+        socket.on('whip-status', onWhipStatus);
+        socket.on('fallback-error', onFallbackError);
 
         return () => {
             socket.off('host-disconnected', onHostDisconnected);
             socket.off('host-reconnected', onHostReconnected);
             socket.off('new-producer', onNewProducer);
             socket.off('producer-closed', onProducerClosed);
+            socket.off('whip-status', onWhipStatus);
+            socket.off('fallback-error', onFallbackError);
         };
     }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback]);
 
@@ -712,6 +735,19 @@ export default function WatchView({ initialCode = '' }) {
             setHasProducer(response.hasProducer || false);
             setAllowMediaControl(response.allowMediaControl !== false);
 
+            if (response.ingestMode) setIngestMode(response.ingestMode);
+            if (response.fallbackCodec) setFallbackCodec(response.fallbackCodec);
+
+            // AV1 compatibility check
+            if (response.fallbackCodec === 'av1') {
+                const av1Supported = typeof MediaSource !== 'undefined' &&
+                    MediaSource.isTypeSupported('video/mp4; codecs="av01.0.08M.08"');
+                if (!av1Supported) {
+                    console.warn('[WatchView] AV1 MSE playback not supported in this browser');
+                    setCodecUnsupported(true);
+                }
+            }
+
             const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
             const device = await getDevice();
             if (!device.loaded) {
@@ -722,6 +758,43 @@ export default function WatchView({ initialCode = '' }) {
             setError(err.message);
         }
     }, [socket, codeInput]);
+
+    const enterFallbackMode = useCallback(() => {
+        if (fmp4PlayerRef.current) return; // already in fallback
+
+        setFallbackMode(true);
+
+        // Signal demand
+        socket.emit('fallback-consume-start', {}, (response) => {
+            if (response?.error) {
+                console.error('[WatchView] Fallback start error:', response.error);
+                return;
+            }
+
+            // Create and start the fMP4 player
+            const roomCode = codeInput.trim().toUpperCase().replace(/-/g, '');
+            const player = createFmp4RelayPlayer({
+                videoElement: videoRef.current,
+                socket,
+                roomCode,
+                onStateChange: (state) => setFallbackState(state),
+                onError: (msg, err) => console.error('[WatchView] Fallback error:', msg, err),
+            });
+
+            fmp4PlayerRef.current = player;
+            player.start();
+        });
+    }, [socket, codeInput]);
+
+    const exitFallbackMode = useCallback(() => {
+        if (fmp4PlayerRef.current) {
+            fmp4PlayerRef.current.stop();
+            fmp4PlayerRef.current = null;
+        }
+        socket.emit('fallback-consume-stop');
+        setFallbackMode(false);
+        setFallbackState(null);
+    }, [socket]);
 
     const handleWatch = useCallback(async () => {
         setError('');
@@ -825,6 +898,12 @@ export default function WatchView({ initialCode = '' }) {
         setPlaybackMode('');
         setIsMuted(false);
         setViewerLayerPreference('auto');
+        setIngestMode('browser');
+        setFallbackMode(false);
+        setFallbackState(null);
+        setFallbackCodec(null);
+        setCodecUnsupported(false);
+        setWhipReconnecting(false);
     }, [cleanupPlayback, socket]);
 
     // Detect socket reconnection while viewer thinks they're in a room.
@@ -852,6 +931,10 @@ export default function WatchView({ initialCode = '' }) {
     }, [socket, joined, cleanupPlayback]);
 
     useEffect(() => () => {
+        if (fmp4PlayerRef.current) {
+            fmp4PlayerRef.current.stop();
+            fmp4PlayerRef.current = null;
+        }
         socket.emit('leave-room');
         cleanupPlayback();
         resetDevice();
@@ -934,6 +1017,45 @@ export default function WatchView({ initialCode = '' }) {
                             </div>
                         )}
                     </div>
+
+                    {whipReconnecting && (
+                        <div style={{ padding: '0.5rem 1rem', background: '#2a2a00', borderRadius: '4px', fontSize: '0.85rem', color: '#ffcc00', marginTop: '0.5rem' }}>
+                            OBS disconnected — waiting for reconnection...
+                        </div>
+                    )}
+
+                    {ingestMode === 'obs' && codecUnsupported && (
+                        <div style={{ padding: '0.75rem 1rem', background: '#3a1a1a', border: '1px solid #662222', borderRadius: '4px', fontSize: '0.85rem', color: '#ff8888', marginTop: '0.5rem' }}>
+                            Your browser does not support AV1 playback. The host is streaming in AV1. Fallback playback is not available in this browser.
+                        </div>
+                    )}
+
+                    {ingestMode === 'obs' && !fallbackMode && !codecUnsupported && (
+                        <button
+                            onClick={enterFallbackMode}
+                            style={{ padding: '0.5rem 1rem', marginTop: '0.5rem', cursor: 'pointer' }}
+                        >
+                            Switch to Fallback Mode
+                        </button>
+                    )}
+
+                    {fallbackMode && (
+                        <div style={{
+                            padding: '0.5rem 1rem',
+                            background: '#2a1a00',
+                            borderRadius: '4px',
+                            fontSize: '0.85rem',
+                            marginTop: '0.5rem'
+                        }}>
+                            Fallback Mode ({fallbackCodec || 'unknown'}) — {fallbackState || 'initializing'}
+                            <button
+                                onClick={exitFallbackMode}
+                                style={{ marginLeft: '1rem', cursor: 'pointer', fontSize: '0.8rem' }}
+                            >
+                                Exit Fallback
+                            </button>
+                        </div>
+                    )}
 
                     <div className="controls">
                         {watching && (

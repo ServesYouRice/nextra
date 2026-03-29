@@ -116,6 +116,11 @@ export default function HostView() {
     const [frameRate, setFrameRate] = useState(30);
     const [autoTuneQuality, setAutoTuneQuality] = useState(false);
     const [roomMetrics, setRoomMetrics] = useState(null);
+    const [ingestMode, setIngestMode] = useState('browser');
+    const [whipConnected, setWhipConnected] = useState(false);
+    const [fallbackViewerCount, setFallbackViewerCount] = useState(0);
+    const [fallbackCodec, setFallbackCodec] = useState(null);
+    const [fallbackAvailable, setFallbackAvailable] = useState(false);
 
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -368,6 +373,10 @@ export default function HostView() {
         setViewerCount(0);
         setRelayViewerCount(0);
         setRoomMetrics(null);
+        setWhipConnected(false);
+        setFallbackViewerCount(0);
+        setFallbackCodec(null);
+        setFallbackAvailable(false);
         setStatus('idle');
         resetDevice();
     }, [stopRelayRecorder]);
@@ -398,6 +407,10 @@ export default function HostView() {
             if (data) {
                 setRelayViewerCount(Math.max(0, Number(data.relayViewerCount) || 0));
                 maybeAutoTuneProfile(data.viewerCount, data.relayViewerCount);
+                if (data.whipConnected !== undefined) setWhipConnected(data.whipConnected);
+                if (data.fallbackViewerCount !== undefined) setFallbackViewerCount(data.fallbackViewerCount);
+                if (data.fallbackCodec) setFallbackCodec(data.fallbackCodec);
+                if (data.fallbackAvailable !== undefined) setFallbackAvailable(data.fallbackAvailable);
             }
         };
 
@@ -505,106 +518,111 @@ export default function HostView() {
         setStatus('connecting');
 
         try {
-            const userAgent = navigator.userAgent || '';
-            const isChromiumBrand = !!navigator.userAgentData?.brands?.some((b) => /Chrom/i.test(b.brand));
-            const isChromium = isChromiumBrand || /Chrome|Chromium|Edg\//i.test(userAgent);
+            if (ingestMode !== 'obs') {
+                const userAgent = navigator.userAgent || '';
+                const isChromiumBrand = !!navigator.userAgentData?.brands?.some((b) => /Chrom/i.test(b.brand));
+                const isChromium = isChromiumBrand || /Chrome|Chromium|Edg\//i.test(userAgent);
 
-            if (!isChromium) {
-                setError('System audio is best supported in Chrome or Edge.');
+                if (!isChromium) {
+                    setError('System audio is best supported in Chrome or Edge.');
+                }
+
+                const displayMediaOptions = {
+                    video: {
+                        width: selectedProfile.capture.width,
+                        height: selectedProfile.capture.height,
+                        frameRate: frameRate,
+                    },
+                    audio: isChromium ? { channelCount: 2 } : false,
+                };
+                if (isChromium) {
+                    displayMediaOptions.systemAudio = 'include';
+                }
+
+                const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+                streamRef.current = stream;
+
+                const videoTrack = stream.getVideoTracks()[0];
+                videoTrack.contentHint = contentMode;
+
+                if (videoRef.current) {
+                    videoRef.current.srcObject = stream;
+                }
+
+                videoTrack.addEventListener('ended', () => {
+                    socket.emit('host-stopped');
+                    cleanup();
+                });
             }
-
-            const displayMediaOptions = {
-                video: {
-                    width: selectedProfile.capture.width,
-                    height: selectedProfile.capture.height,
-                    frameRate: frameRate,
-                },
-                audio: isChromium ? { channelCount: 2 } : false,
-            };
-            if (isChromium) {
-                displayMediaOptions.systemAudio = 'include';
-            }
-
-            const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
-            streamRef.current = stream;
-
-            const videoTrack = stream.getVideoTracks()[0];
-            videoTrack.contentHint = contentMode;
-
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-            }
-
-            videoTrack.addEventListener('ended', () => {
-                socket.emit('host-stopped');
-                cleanup();
-            });
 
             // Best effort cleanup for stale socket room state before creating a fresh room.
             try {
                 await socketRequest(socket, 'leave-room', {}, { timeoutMs: 5000, maxAttempts: 1 });
             } catch { }
 
-            const { code, hostToken } = await socketRequest(socket, 'create-room', { allowMediaControl });
+            const { code, hostToken } = await socketRequest(socket, 'create-room', { allowMediaControl, ingestMode });
             setRoomCode(code);
             hostTokenRef.current = hostToken || null;
 
-            const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
-            const device = await getDevice();
-            if (!device.loaded) {
-                await device.load({ routerRtpCapabilities: rtpCapabilities });
-            }
-
-            const { params, iceServers } = await socketRequest(socket, 'create-send-transport');
-            const sendTransport = device.createSendTransport({
-                ...params,
-                iceServers,
-            });
-
-            sendTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
-                try {
-                    await socketRequest(socket, 'connect-transport', {
-                        transportId: sendTransport.id,
-                        dtlsParameters,
-                    });
-                    callback();
-                } catch (err) {
-                    errback(err);
+            if (ingestMode !== 'obs') {
+                const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
+                const device = await getDevice();
+                if (!device.loaded) {
+                    await device.load({ routerRtpCapabilities: rtpCapabilities });
                 }
-            });
 
-            sendTransport.on('produce', async ({ kind, rtpParameters, appData }, callback, errback) => {
-                try {
-                    const { producerId } = await socketRequest(socket, 'produce', {
-                        kind,
-                        rtpParameters,
-                        appData,
-                    });
-                    callback({ id: producerId });
-                } catch (err) {
-                    errback(err);
-                }
-            });
-
-            const videoProducer = await sendTransport.produce({
-                track: videoTrack,
-                encodings: getSimulcastEncodings(qualityProfile, frameRate),
-                codecOptions: VIDEO_CODEC_OPTIONS,
-            });
-            videoProducerRef.current = videoProducer;
-            try {
-                await videoProducer.setMaxSpatialLayer(selectedProfile.maxSpatialLayer);
-            } catch (err) {
-                console.warn('[Nextra-Host] Could not apply initial profile layer:', err.message);
-            }
-
-            const audioTracks = stream.getAudioTracks();
-            if (audioTracks.length > 0) {
-                await sendTransport.produce({
-                    track: audioTracks[0],
-                    codecOptions: AUDIO_CODEC_OPTIONS,
+                const { params, iceServers } = await socketRequest(socket, 'create-send-transport');
+                const sendTransport = device.createSendTransport({
+                    ...params,
+                    iceServers,
                 });
+
+                sendTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+                    try {
+                        await socketRequest(socket, 'connect-transport', {
+                            transportId: sendTransport.id,
+                            dtlsParameters,
+                        });
+                        callback();
+                    } catch (err) {
+                        errback(err);
+                    }
+                });
+
+                sendTransport.on('produce', async ({ kind, rtpParameters, appData }, callback, errback) => {
+                    try {
+                        const { producerId } = await socketRequest(socket, 'produce', {
+                            kind,
+                            rtpParameters,
+                            appData,
+                        });
+                        callback({ id: producerId });
+                    } catch (err) {
+                        errback(err);
+                    }
+                });
+
+                const videoProducer = await sendTransport.produce({
+                    track: streamRef.current.getVideoTracks()[0],
+                    encodings: getSimulcastEncodings(qualityProfile, frameRate),
+                    codecOptions: VIDEO_CODEC_OPTIONS,
+                });
+                videoProducerRef.current = videoProducer;
+                try {
+                    await videoProducer.setMaxSpatialLayer(selectedProfile.maxSpatialLayer);
+                } catch (err) {
+                    console.warn('[Nextra-Host] Could not apply initial profile layer:', err.message);
+                }
+
+                const audioTracks = streamRef.current.getAudioTracks();
+                if (audioTracks.length > 0) {
+                    await sendTransport.produce({
+                        track: audioTracks[0],
+                        codecOptions: AUDIO_CODEC_OPTIONS,
+                    });
+                }
             }
+
             setRelayViewerCount(0);
             setIsSharing(true);
             setStatus('streaming');
@@ -618,7 +636,7 @@ export default function HostView() {
             socket.emit('host-stopped');
             cleanup();
         }
-    }, [socket, allowMediaControl, cleanup, selectedProfile, qualityProfile, frameRate]);
+    }, [socket, allowMediaControl, ingestMode, cleanup, selectedProfile, qualityProfile, frameRate]);
 
     const applyServerConfig = useCallback((data = {}) => {
         if (typeof data.hostUploadMbps === 'number') {
@@ -807,6 +825,21 @@ export default function HostView() {
                                     </span>
                                 </label>
                             </div>
+                            <div style={{ marginBottom: '1rem' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={ingestMode === 'obs'}
+                                        onChange={(e) => setIngestMode(e.target.checked ? 'obs' : 'browser')}
+                                    />
+                                    Use OBS (WHIP ingest)
+                                </label>
+                                {ingestMode === 'obs' && (
+                                    <p style={{ fontSize: '0.85rem', color: '#888', marginTop: '0.25rem' }}>
+                                        OBS will provide the video feed via WHIP. AV1 encoding recommended.
+                                    </p>
+                                )}
+                            </div>
                         </div>
                     )}
 
@@ -863,6 +896,36 @@ export default function HostView() {
                             {roomMetrics && (
                                 <div className="copy-hint" style={{ marginTop: '0.75rem' }}>
                                     WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0)}
+                                </div>
+                            )}
+                            {ingestMode === 'obs' && (
+                                <div style={{ fontSize: '0.85rem', color: '#aaa' }}>
+                                    Fallback viewers: {fallbackViewerCount} |{' '}
+                                    Codec: {fallbackCodec || 'waiting'} |{' '}
+                                    {fallbackAvailable ? 'Fallback ready' : 'Fallback inactive'}
+                                </div>
+                            )}
+                            {ingestMode === 'obs' && roomCode && (
+                                <div style={{ background: '#1a1a2e', padding: '1rem', borderRadius: '8px', marginTop: '1rem' }}>
+                                    <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1rem' }}>OBS WHIP Setup</h3>
+                                    <div style={{ fontSize: '0.85rem', marginBottom: '0.5rem' }}>
+                                        <strong>WHIP URL:</strong>
+                                        <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
+                                            {`${window.location.origin}/whip/broadcast/${roomCode}`}
+                                        </code>
+                                    </div>
+                                    <div style={{ fontSize: '0.85rem', marginBottom: '0.5rem' }}>
+                                        <strong>Bearer Token:</strong>
+                                        <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
+                                            {hostTokenRef.current}
+                                        </code>
+                                    </div>
+                                    <div style={{ fontSize: '0.85rem', color: '#aaa' }}>
+                                        In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
+                                    </div>
+                                    <div style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
+                                        Status: {whipConnected ? '\uD83D\uDFE2 OBS Connected' : '\uD83D\uDD34 Waiting for OBS...'}
+                                    </div>
                                 </div>
                             )}
                         </div>
