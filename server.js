@@ -26,6 +26,8 @@ const {
     shouldTrustForwardedHeaders,
     getTrustedForwardedClientIp,
 } = require('./lib/network');
+const { createWhipRouter } = require('./lib/whipRoutes');
+const { execSync } = require('child_process');
 
 const app = express();
 let runtimeShareBaseUrl = '';
@@ -467,6 +469,7 @@ app.get('/api/config', (req, res) => {
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
         publicShareStatus,
         publicShareError,
+        whipEnabled: config.WHIP_ENABLED,
     });
 });
 
@@ -703,6 +706,21 @@ async function handleHttpsServerError(err) {
     const result = await createMediasoupWorker();
     worker = result.worker;
     console.log(`Mediasoup Worker PID: ${worker.pid}`);
+
+    // Check FFmpeg availability for OBS fallback
+    if (config.WHIP_ENABLED) {
+        try {
+            execSync(`${config.FFMPEG_PATH} -version`, { stdio: 'ignore' });
+            console.log('[Startup] FFmpeg found — OBS fallback available');
+        } catch {
+            console.warn('[Startup] FFmpeg not found — OBS fallback will not work');
+        }
+    }
+
+    // Mount WHIP routes
+    if (config.WHIP_ENABLED) {
+        app.use('/whip', createWhipRouter(result.router));
+    }
 
     const io = new Server(httpsServer, {
         path: config.SOCKET_PATH,

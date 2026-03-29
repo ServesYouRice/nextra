@@ -85,6 +85,15 @@ module.exports = {
             parameters: { 'packetization-mode': 1, 'profile-level-id': '42e01f', 'level-asymmetry-allowed': 1 },
         },
         {
+            kind: 'video', mimeType: 'video/H264', clockRate: 90000,
+            parameters: { 'packetization-mode': 1, 'profile-level-id': '4d0032', 'level-asymmetry-allowed': 1 },
+        },
+        {
+            kind: 'video', mimeType: 'video/H264', clockRate: 90000,
+            parameters: { 'packetization-mode': 1, 'profile-level-id': '640032', 'level-asymmetry-allowed': 1 },
+        },
+        { kind: 'video', mimeType: 'video/AV1', clockRate: 90000 },
+        {
             kind: 'audio',
             mimeType: 'audio/opus',
             clockRate: 48000,
@@ -179,4 +188,15 @@ module.exports = {
 
     // TLS certificate generation
     HTTPS_INCLUDE_LAN_IP_IN_CERT: parseBoolEnv(process.env.HTTPS_INCLUDE_LAN_IP_IN_CERT, false),
+
+    // ── OBS / WHIP ──
+    WHIP_ENABLED: parseBoolEnv(process.env.WHIP_ENABLED, true),
+    FFMPEG_PATH: (process.env.FFMPEG_PATH || 'ffmpeg').trim(),
+    FALLBACK_AUDIO_BITRATE: (process.env.FALLBACK_AUDIO_BITRATE || '192k').trim(),
+    FALLBACK_FRAGMENT_DURATION_MS: parseIntEnv(process.env.FALLBACK_FRAGMENT_DURATION_MS, 500),
+    MAX_FALLBACK_VIEWERS: parseIntEnv(process.env.MAX_FALLBACK_VIEWERS, 50),
+    MAX_FALLBACK_CHUNK_SIZE: parseIntEnv(process.env.MAX_FALLBACK_CHUNK_SIZE, 2 * 1024 * 1024),
+    FALLBACK_RESTART_CAP: parseIntEnv(process.env.FALLBACK_RESTART_CAP, 5),
+    WHIP_GRACE_TIMEOUT_MS: parseIntEnv(process.env.WHIP_GRACE_TIMEOUT_MS, 15000),
+    WHIP_HEARTBEAT_INTERVAL_MS: parseIntEnv(process.env.WHIP_HEARTBEAT_INTERVAL_MS, 5000),
 };
