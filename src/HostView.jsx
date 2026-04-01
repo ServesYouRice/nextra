@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useContext } from 'react';
 import { SocketContext } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
+import { configureObsStream, stopObsStream } from './lib/obsWebSocket';
 
 const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 10_000 };
 const AUDIO_CODEC_OPTIONS = {
@@ -15,18 +16,21 @@ const QUALITY_PROFILES = {
         maxSpatialLayer: 2,
         capture: { width: 3840, height: 2160 },
         relayBitsPerSecond: { 30: 24_000_000, 60: 36_000_000 },
+        obsBitrateKbps: { 30: 24_000, 60: 36_000 },
     },
     '1440p': {
         label: '1440p',
         maxSpatialLayer: 2,
         capture: { width: 2560, height: 1440 },
         relayBitsPerSecond: { 30: 14_000_000, 60: 21_000_000 },
+        obsBitrateKbps: { 30: 14_000, 60: 21_000 },
     },
     '1080p': {
         label: '1080p',
         maxSpatialLayer: 2,
         capture: { width: 1920, height: 1080 },
         relayBitsPerSecond: { 30: 8_000_000, 60: 12_000_000 },
+        obsBitrateKbps: { 30: 8_000, 60: 12_000 },
     },
 };
 
@@ -66,6 +70,61 @@ async function applyProducerBitrateProfile(videoProducer, profileKey, fps) {
 
     await sender.setParameters(params);
 }
+
+/**
+ * Detect host GPU and determine AV1 hardware encoding capability.
+ * Returns { gpu: string, av1HwEncode: boolean, recommendedEncoder: string }
+ */
+function detectGpuCapability() {
+    try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (!gl) return { gpu: 'unknown', av1HwEncode: false, recommendedEncoder: 'obs_x264' };
+
+        const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+        if (!debugInfo) return { gpu: 'unknown', av1HwEncode: false, recommendedEncoder: 'obs_x264' };
+
+        const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '';
+        canvas.remove();
+
+        // NVIDIA: RTX 40 series (Ada Lovelace) has AV1 encode
+        // RTX 30 series has NVENC H264/H265 but NOT AV1 encode
+        const nvidiaMatch = renderer.match(/RTX\s*(\d{4})/i);
+        if (nvidiaMatch) {
+            const model = parseInt(nvidiaMatch[1], 10);
+            if (model >= 4000) return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'jim_av1_nvenc' };
+            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'jim_nvenc' };
+        }
+        if (/GTX|NVIDIA|GeForce/i.test(renderer)) {
+            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'jim_nvenc' };
+        }
+
+        // AMD: RX 7000+ (RDNA 3) has AV1 encode
+        const amdRxMatch = renderer.match(/RX\s*(\d{4})/i);
+        if (amdRxMatch) {
+            const model = parseInt(amdRxMatch[1], 10);
+            if (model >= 7000) return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'amd_av1' };
+            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'h264_texture_amf' };
+        }
+        if (/AMD|Radeon/i.test(renderer)) {
+            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'h264_texture_amf' };
+        }
+
+        // Intel: Arc (Alchemist/Battlemage) has AV1 encode
+        if (/Arc.*[AB]\d{3,}/i.test(renderer) || /Battlemage|Alchemist/i.test(renderer)) {
+            return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'obs_qsv11_av1' };
+        }
+        if (/Intel/i.test(renderer)) {
+            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'obs_x264' };
+        }
+
+        return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'obs_x264' };
+    } catch {
+        return { gpu: 'unknown', av1HwEncode: false, recommendedEncoder: 'obs_x264' };
+    }
+}
+
+const gpuInfo = detectGpuCapability();
 
 function isLikelyLocalOrigin(origin) {
     try {
@@ -112,7 +171,12 @@ export default function HostView() {
     const [error, setError] = useState('');
     const [copied, setCopied] = useState(false);
     const [status, setStatus] = useState('idle');
-    const [qualityProfile, setQualityProfile] = useState('1080p');
+    const [qualityProfile, setQualityProfile] = useState(() => {
+        const h = window.screen.height * (window.devicePixelRatio || 1);
+        if (h >= 2160) return '4k';
+        if (h >= 1440) return '1440p';
+        return '1080p';
+    });
     const [frameRate, setFrameRate] = useState(30);
     const [autoTuneQuality, setAutoTuneQuality] = useState(false);
     const [roomMetrics, setRoomMetrics] = useState(null);
@@ -121,6 +185,12 @@ export default function HostView() {
     const [fallbackViewerCount, setFallbackViewerCount] = useState(0);
     const [fallbackCodec, setFallbackCodec] = useState(null);
     const [fallbackAvailable, setFallbackAvailable] = useState(false);
+    const [obsAutoStatus, setObsAutoStatus] = useState(''); // '' | 'configuring' | 'success' | 'error'
+    const [obsAutoMessage, setObsAutoMessage] = useState('');
+    const [obsPassword, setObsPassword] = useState('');
+    const [obsAutoStart, setObsAutoStart] = useState(true);
+    const [obsApplySettings, setObsApplySettings] = useState(true);
+    const [obsEncoder, setObsEncoder] = useState(gpuInfo.av1HwEncode ? 'av1' : 'h264');
 
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -626,6 +696,40 @@ export default function HostView() {
             setRelayViewerCount(0);
             setIsSharing(true);
             setStatus('streaming');
+
+            // Auto-configure OBS via WebSocket when in OBS mode
+            if (ingestMode === 'obs' && code && hostToken) {
+                const whipUrl = `http://${window.location.hostname}:3001/whip/broadcast/${code}`;
+                setObsAutoStatus('configuring');
+                setObsAutoMessage('Connecting to OBS...');
+                const obsOpts = {
+                    whipUrl,
+                    bearerToken: hostToken,
+                    password: obsPassword,
+                    autoStart: obsAutoStart,
+                };
+                if (obsApplySettings) {
+                    const profile = getQualityProfile(qualityProfile);
+                    const bitrateKbps = frameRate >= 60 ? profile.obsBitrateKbps[60] : profile.obsBitrateKbps[30];
+                    obsOpts.videoSettings = {
+                        outputWidth: profile.capture.width,
+                        outputHeight: profile.capture.height,
+                        fpsNumerator: frameRate,
+                        fpsDenominator: 1,
+                    };
+                    obsOpts.encoderSettings = {
+                        bitrateKbps,
+                        keyframeIntervalSec: 2,
+                        preset: obsEncoder.startsWith('av1') ? 'speed' : 'ultrafast',
+                        encoder: obsEncoder.startsWith('av1') ? 'av1' : 'h264',
+                        obsEncoderId: obsEncoder === 'av1' ? gpuInfo.recommendedEncoder : obsEncoder === 'av1-sw' ? 'obs_svt_av1' : (gpuInfo.recommendedEncoder.includes('nvenc') ? 'jim_nvenc' : gpuInfo.recommendedEncoder.includes('amf') ? 'h264_texture_amf' : 'obs_x264'),
+                    };
+                }
+                configureObsStream(obsOpts).then((result) => {
+                    setObsAutoStatus(result.success ? 'success' : 'error');
+                    setObsAutoMessage(result.message);
+                });
+            }
         } catch (err) {
             console.error('Start sharing failed:', err);
             if (err?.name === 'NotAllowedError') {
@@ -636,7 +740,7 @@ export default function HostView() {
             socket.emit('host-stopped');
             cleanup();
         }
-    }, [socket, allowMediaControl, ingestMode, cleanup, selectedProfile, qualityProfile, frameRate]);
+    }, [socket, allowMediaControl, ingestMode, cleanup, selectedProfile, qualityProfile, frameRate, obsPassword, obsAutoStart]);
 
     const applyServerConfig = useCallback((data = {}) => {
         if (typeof data.hostUploadMbps === 'number') {
@@ -679,9 +783,13 @@ export default function HostView() {
     }, [socket, applyServerConfig]);
 
     const handleStopSharing = useCallback(() => {
+        // Stop OBS streaming if in OBS mode
+        if (ingestMode === 'obs') {
+            stopObsStream({ password: obsPassword }).catch(() => {});
+        }
         socket.emit('host-stopped');
         cleanup();
-    }, [socket, cleanup]);
+    }, [socket, cleanup, ingestMode, obsPassword]);
 
     const handleCopyCode = useCallback(async (text) => {
         const toCopy = text || roomCode;
@@ -766,6 +874,7 @@ export default function HostView() {
 
                 <div className="host-side-panel">
                     {status === 'idle' && (
+                        <div className={`settings-wrapper${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
                         <div className="settings-panel">
                             <h3>Settings</h3>
                             <div className="setting-row">
@@ -825,21 +934,86 @@ export default function HostView() {
                                     </span>
                                 </label>
                             </div>
-                            <div style={{ marginBottom: '1rem' }}>
-                                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={ingestMode === 'obs'}
-                                        onChange={(e) => setIngestMode(e.target.checked ? 'obs' : 'browser')}
-                                    />
+                            <div className="setting-row">
+                                <input
+                                    type="checkbox"
+                                    id="obsMode"
+                                    checked={ingestMode === 'obs'}
+                                    onChange={(e) => setIngestMode(e.target.checked ? 'obs' : 'browser')}
+                                />
+                                <label htmlFor="obsMode">
                                     Use OBS (WHIP ingest)
+                                    <span className="setting-hint">
+                                        Stream via OBS instead of browser screen capture
+                                    </span>
                                 </label>
-                                {ingestMode === 'obs' && (
-                                    <p style={{ fontSize: '0.85rem', color: '#888', marginTop: '0.25rem' }}>
-                                        OBS will provide the video feed via WHIP. AV1 encoding recommended.
-                                    </p>
-                                )}
                             </div>
+                        </div>
+                            {ingestMode === 'obs' && (
+                                <div className="settings-panel">
+                                    <h3>OBS Configuration</h3>
+                                    <div className="setting-row">
+                                        <input
+                                            type="checkbox"
+                                            id="obsApplySettings"
+                                            checked={obsApplySettings}
+                                            onChange={(e) => setObsApplySettings(e.target.checked)}
+                                        />
+                                        <label htmlFor="obsApplySettings">
+                                            Apply recommended output settings
+                                            <span className="setting-hint">
+                                                {selectedProfile.capture.width}x{selectedProfile.capture.height} @ {frameRate}fps, low-latency tuning
+                                            </span>
+                                        </label>
+                                    </div>
+                                    {obsApplySettings && (
+                                        <div className="setting-row" style={{ alignItems: 'center' }}>
+                                            <label htmlFor="obsEncoder" style={{ minWidth: '90px', flexShrink: 0 }}>
+                                                Encoder
+                                            </label>
+                                            <select
+                                                id="obsEncoder"
+                                                value={obsEncoder}
+                                                onChange={(e) => setObsEncoder(e.target.value)}
+                                                className="select-input"
+                                            >
+                                                <option value="h264">H.264{gpuInfo.recommendedEncoder.includes('nvenc') ? ' (NVENC)' : gpuInfo.recommendedEncoder.includes('amf') ? ' (AMF)' : ' (x264)'}</option>
+                                                {gpuInfo.av1HwEncode && (
+                                                    <option value="av1">AV1 (HW — {gpuInfo.gpu.match(/RTX \d{4}|RX \d{4}|Arc [AB]\d+/i)?.[0] || 'GPU'})</option>
+                                                )}
+                                                <option value="av1-sw">AV1 (SVT — software, slow)</option>
+                                            </select>
+                                        </div>
+                                    )}
+                                    <div className="setting-row">
+                                        <input
+                                            type="checkbox"
+                                            id="obsAutoStart"
+                                            checked={obsAutoStart}
+                                            onChange={(e) => setObsAutoStart(e.target.checked)}
+                                        />
+                                        <label htmlFor="obsAutoStart">
+                                            Auto-start streaming in OBS
+                                            <span className="setting-hint">
+                                                Begin streaming immediately after configuration
+                                            </span>
+                                        </label>
+                                    </div>
+                                    <div className="setting-row" style={{ alignItems: 'center' }}>
+                                        <label htmlFor="obsPassword" style={{ minWidth: '90px', flexShrink: 0 }}>
+                                            WS password
+                                        </label>
+                                        <input
+                                            id="obsPassword"
+                                            type="password"
+                                            value={obsPassword}
+                                            onChange={(e) => setObsPassword(e.target.value)}
+                                            placeholder="(leave empty if no auth)"
+                                            className="select-input"
+                                        />
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     )}
 
@@ -899,30 +1073,95 @@ export default function HostView() {
                                 </div>
                             )}
                             {ingestMode === 'obs' && (
-                                <div style={{ fontSize: '0.85rem', color: '#aaa' }}>
+                                <div className="copy-hint" style={{ marginTop: '0.25rem' }}>
                                     Fallback viewers: {fallbackViewerCount} |{' '}
                                     Codec: {fallbackCodec || 'waiting'} |{' '}
-                                    {fallbackAvailable ? 'Fallback ready' : 'Fallback inactive'}
+                                    {fallbackAvailable ? 'Fallback active' : 'Fallback inactive'}
                                 </div>
                             )}
                             {ingestMode === 'obs' && roomCode && (
                                 <div style={{ background: '#1a1a2e', padding: '1rem', borderRadius: '8px', marginTop: '1rem' }}>
                                     <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1rem' }}>OBS WHIP Setup</h3>
-                                    <div style={{ fontSize: '0.85rem', marginBottom: '0.5rem' }}>
-                                        <strong>WHIP URL:</strong>
-                                        <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
-                                            {`${window.location.origin}/whip/broadcast/${roomCode}`}
-                                        </code>
-                                    </div>
-                                    <div style={{ fontSize: '0.85rem', marginBottom: '0.5rem' }}>
-                                        <strong>Bearer Token:</strong>
-                                        <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
-                                            {hostTokenRef.current}
-                                        </code>
-                                    </div>
-                                    <div style={{ fontSize: '0.85rem', color: '#aaa' }}>
-                                        In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
-                                    </div>
+
+                                    {obsAutoStatus === 'configuring' && (
+                                        <div style={{ fontSize: '0.85rem', color: '#5b8def', marginBottom: '0.5rem' }}>
+                                            {obsAutoMessage}
+                                        </div>
+                                    )}
+                                    {obsAutoStatus === 'success' && (
+                                        <div style={{ fontSize: '0.85rem', color: '#3ccb7f', marginBottom: '0.5rem' }}>
+                                            {obsAutoMessage}
+                                        </div>
+                                    )}
+                                    {obsAutoStatus === 'error' && (
+                                        <div style={{ fontSize: '0.85rem', color: '#e5a84b', marginBottom: '0.5rem' }}>
+                                            {obsAutoMessage}
+                                        </div>
+                                    )}
+
+                                    {obsAutoStatus === 'error' && (
+                                        <div style={{ fontSize: '0.85rem', marginBottom: '0.75rem' }}>
+                                            <button
+                                                onClick={() => {
+                                                    const whipUrl = `http://${window.location.hostname}:3001/whip/broadcast/${roomCode}`;
+                                                    setObsAutoStatus('configuring');
+                                                    setObsAutoMessage('Connecting to OBS...');
+                                                    const retryOpts = {
+                                                        whipUrl,
+                                                        bearerToken: hostTokenRef.current,
+                                                        password: obsPassword,
+                                                        autoStart: obsAutoStart,
+                                                    };
+                                                    if (obsApplySettings) {
+                                                        const profile = getQualityProfile(qualityProfile);
+                                                        const bitrateKbps = frameRate >= 60 ? profile.obsBitrateKbps[60] : profile.obsBitrateKbps[30];
+                                                        retryOpts.videoSettings = {
+                                                            outputWidth: profile.capture.width,
+                                                            outputHeight: profile.capture.height,
+                                                            fpsNumerator: frameRate,
+                                                            fpsDenominator: 1,
+                                                        };
+                                                        retryOpts.encoderSettings = {
+                                                            bitrateKbps,
+                                                            keyframeIntervalSec: 2,
+                                                            preset: obsEncoder === 'av1' ? 'speed' : 'ultrafast',
+                                                            encoder: obsEncoder,
+                                                            obsEncoderId: obsEncoder === 'av1' ? gpuInfo.recommendedEncoder : (gpuInfo.recommendedEncoder.includes('nvenc') ? 'jim_nvenc' : gpuInfo.recommendedEncoder.includes('amf') ? 'h264_texture_amf' : 'obs_x264'),
+                                                        };
+                                                    }
+                                                    configureObsStream(retryOpts).then((result) => {
+                                                        setObsAutoStatus(result.success ? 'success' : 'error');
+                                                        setObsAutoMessage(result.message);
+                                                    });
+                                                }}
+                                                style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', cursor: 'pointer', borderRadius: '4px', border: '1px solid #555', background: '#2a2a3e', color: '#fff' }}
+                                            >
+                                                Retry Auto-Configure OBS
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    <details style={{ fontSize: '0.85rem', marginBottom: '0.5rem' }}>
+                                        <summary style={{ cursor: 'pointer', color: '#aaa' }}>Manual setup (if auto-config fails)</summary>
+                                        <div style={{ marginTop: '0.5rem' }}>
+                                            <div style={{ marginBottom: '0.5rem' }}>
+                                                <strong>WHIP URL:</strong>
+                                                <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
+                                                    {`http://${window.location.hostname}:3001/whip/broadcast/${roomCode}`}
+                                                </code>
+                                            </div>
+                                            <div style={{ marginBottom: '0.5rem' }}>
+                                                <strong>Bearer Token:</strong>
+                                                <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
+                                                    {hostTokenRef.current}
+                                                </code>
+                                            </div>
+                                            <div style={{ color: '#aaa' }}>
+                                                In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
+                                            </div>
+                                        </div>
+                                    </details>
+
                                     <div style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
                                         Status: {whipConnected ? '\uD83D\uDFE2 OBS Connected' : '\uD83D\uDD34 Waiting for OBS...'}
                                     </div>

@@ -1,5 +1,6 @@
 // server.js - Entry point: Express + Socket.io + Mediasoup (HTTPS)
 const express = require('express');
+const http = require('http');
 const https = require('https');
 const path = require('path');
 const crypto = require('crypto');
@@ -717,9 +718,13 @@ async function handleHttpsServerError(err) {
         }
     }
 
-    // Mount WHIP routes
+    // Mount WHIP routes on main app (HTTPS) and a separate HTTP server
+    // OBS cannot connect to self-signed HTTPS, so we expose WHIP over HTTP.
+    // Media is still encrypted via DTLS/WebRTC.
+    let whipRouter = null;
     if (config.WHIP_ENABLED) {
-        app.use('/whip', createWhipRouter(result.router));
+        whipRouter = createWhipRouter(result.router);
+        app.use('/whip', whipRouter);
     }
 
     const io = new Server(httpsServer, {
@@ -810,7 +815,28 @@ async function handleHttpsServerError(err) {
         } else {
             console.log('   Public:  configured via SHARE_BASE_URL only');
         }
-        console.log(`   UDP:     ${config.RTC_MIN_PORT}-${config.RTC_MAX_PORT}\n`);
+        console.log(`   UDP:     ${config.RTC_MIN_PORT}-${config.RTC_MAX_PORT}`);
+
+        // Start HTTP server for WHIP (OBS rejects self-signed HTTPS certs)
+        if (whipRouter) {
+            const whipApp = express();
+            whipApp.use((req, res, next) => {
+                console.log(`[WHIP-HTTP] ${req.method} ${req.url} from ${req.ip}`);
+                next();
+            });
+            whipApp.use('/whip', whipRouter);
+            const whipHttpServer = http.createServer(whipApp);
+            const whipPort = config.WHIP_HTTP_PORT;
+            whipHttpServer.listen(whipPort, config.BIND_HOST, () => {
+                console.log(`   WHIP:    http://localhost:${whipPort}/whip/broadcast/<roomCode>`);
+                console.log('');
+            });
+            whipHttpServer.on('error', (err) => {
+                console.warn(`WHIP HTTP server failed: ${err.message} — OBS must use HTTPS`);
+            });
+        } else {
+            console.log('');
+        }
 
         void maybeStartPublicTunnel();
     });

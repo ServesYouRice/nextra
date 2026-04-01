@@ -30,6 +30,9 @@ export function createFmp4RelayPlayer(opts) {
     let cleanupFns = [];
     let consecutiveDrops = 0;
     const MAX_CONSECUTIVE_DROPS = 15;
+    let liveSeekTimer = null;
+    let lastPlayTime = -1;
+    let stallCount = 0;
 
     function setState(newState) {
         if (state === newState) return;
@@ -99,14 +102,77 @@ export function createFmp4RelayPlayer(opts) {
         }
     }
 
+    // ── Live-edge seeking & stall detection ──
+
+    function seekToLiveEdge() {
+        if (!videoElement || !sourceBuffer) return;
+        try {
+            const buffered = sourceBuffer.buffered;
+            if (buffered.length === 0) return;
+            const liveEdge = buffered.end(buffered.length - 1);
+            // Seek to near the live edge (leave a small margin for smooth playback)
+            const target = Math.max(0, liveEdge - 0.5);
+            if (videoElement.currentTime < target - 1) {
+                videoElement.currentTime = target;
+            }
+        } catch (e) {
+            // Ignore seek errors
+        }
+    }
+
+    function startLiveSeekTimer() {
+        if (liveSeekTimer) return;
+        liveSeekTimer = setInterval(() => {
+            if (state !== 'playing' && state !== 'buffering') return;
+
+            // Stall detection: if currentTime hasn't changed, the video is stuck
+            if (videoElement.currentTime === lastPlayTime && lastPlayTime >= 0) {
+                stallCount++;
+                if (stallCount >= 3) {
+                    console.warn('[fmp4-player] Stall detected, seeking to live edge');
+                    seekToLiveEdge();
+                    // Re-attempt play (might have been blocked by autoplay policy)
+                    videoElement.muted = true;
+                    videoElement.play().catch(() => {});
+                    stallCount = 0;
+                }
+            } else {
+                stallCount = 0;
+            }
+            lastPlayTime = videoElement.currentTime;
+
+            // Periodic live-edge catch-up
+            seekToLiveEdge();
+        }, 2000);
+    }
+
+    function stopLiveSeekTimer() {
+        if (liveSeekTimer) {
+            clearInterval(liveSeekTimer);
+            liveSeekTimer = null;
+        }
+        lastPlayTime = -1;
+        stallCount = 0;
+    }
+
     // ── Event handlers ──
 
     function handleMediaInit(data) {
         // data: { format, mimeType, codec, audioCodec, generation, tier, initSegment }
+        if (!data.initSegment) {
+            console.log('[fmp4-player] media-init without initSegment, requesting...');
+            socket.emit('get-media-init', { roomCode, format: 'fmp4' }, (response) => {
+                if (response && response.success && response.initSegment) {
+                    handleMediaInit({
+                        ...response.init,
+                        initSegment: response.initSegment,
+                    });
+                }
+            });
+            return;
+        }
+
         if (data.generation !== currentGeneration) {
-            // Use full cleanup so mediaSource is also torn down before setupMediaSource recreates it.
-            // This avoids the double-endOfStream that occurs when setupMediaSource calls
-            // cleanupMediaSource() on a mediaSource whose sourceBuffer was already removed.
             cleanupMediaSource();
             currentGeneration = data.generation;
         }
@@ -171,7 +237,11 @@ export function createFmp4RelayPlayer(opts) {
 
                     if (state === 'buffering' && sourceBuffer.buffered.length > 0) {
                         setState('playing');
+                        // Mute first to guarantee autoplay works (browser policy)
+                        videoElement.muted = true;
+                        seekToLiveEdge();
                         videoElement.play().catch(() => {});
+                        startLiveSeekTimer();
                     }
                 });
 
@@ -182,9 +252,17 @@ export function createFmp4RelayPlayer(opts) {
 
                 // Append init segment first
                 setState('buffering');
-                const initBuffer = initSegment instanceof ArrayBuffer
-                    ? new Uint8Array(initSegment)
-                    : new Uint8Array(initSegment.buffer || initSegment);
+                let initBuffer;
+                if (initSegment instanceof ArrayBuffer) {
+                    initBuffer = new Uint8Array(initSegment);
+                } else if (initSegment instanceof Uint8Array) {
+                    initBuffer = initSegment;
+                } else if (initSegment && initSegment.buffer) {
+                    initBuffer = new Uint8Array(initSegment.buffer);
+                } else {
+                    // Socket.IO may deliver as a plain ArrayBuffer-like or Buffer
+                    initBuffer = new Uint8Array(initSegment);
+                }
                 appendQueue.unshift(initBuffer);
                 queueBytes += initBuffer.byteLength;
                 processQueue();
@@ -201,6 +279,7 @@ export function createFmp4RelayPlayer(opts) {
     }
 
     function cleanupMediaSource() {
+        stopLiveSeekTimer();
         appendQueue = [];
         queueBytes = 0;
         isAppending = false;
@@ -271,6 +350,7 @@ export function createFmp4RelayPlayer(opts) {
 
     function stop() {
         setState('stopped');
+        stopLiveSeekTimer();
         cleanupFns.forEach(fn => { try { fn(); } catch (e) { } });
         cleanupFns = [];
         cleanupMediaSource();
