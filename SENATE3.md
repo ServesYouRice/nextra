@@ -28,7 +28,6 @@ V1 explicitly does not include:
 - host self-preview in OBS mode
 - relay fallback for OBS rooms (planned for V2 via FFmpeg remux — see Relay Strategy section)
 - simulcast from OBS
-- AV1 codec support (planned for V2 — see Codec Strategy section)
 - non-local WHIP ingest
 
 That deliberate scope reduction is part of the design. It removes certificate friction and avoids solving multiple transport problems at once.
@@ -43,7 +42,7 @@ Browser `getDisplayMedia` is good enough for lightweight screen sharing, but not
 - browser WebRTC throttles bitrate and quality aggressively
 - it does not give the host proper scene composition or encoder control
 
-OBS gives scene control, application-audio capture, and hardware-accelerated H.264 encoding while still feeding the same mediasoup-based viewer pipeline.
+OBS gives scene control, application-audio capture, and hardware-accelerated encoding (AV1 on modern GPUs, H.264 as fallback) while still feeding the same mediasoup-based viewer pipeline.
 
 ---
 
@@ -75,7 +74,7 @@ Important clarifications:
 | 8 | Relay in OBS rooms | Disabled in V1. OBS rooms are direct-WebRTC-only for viewers. |
 | 9 | Live preview | Skipped in V1. OBS already provides preview. |
 | 10 | Browser mode | Existing browser-host capture path remains supported and unchanged in principle. |
-| 11 | H.264 | Keep VP8 for browser mode. Keep the existing H.264 baseline capability and add Main + High profile support for OBS. |
+| 11 | Codecs | AV1 is the primary OBS codec. H.264 (Baseline + Main + High) is accepted as fallback for hosts without AV1 hardware encoding. VP8 remains for browser mode. |
 | 12 | Remote media control | Disable or hide remote media control in OBS rooms. |
 
 ---
@@ -342,18 +341,20 @@ express.text({ type: 'application/sdp', limit: '16kb' })
 
 Scope it to the WHIP routes only.
 
-### H.264
+### Router codecs
 
-Current code already has one H.264 router codec entry. V1 must expand support so OBS offers from common hardware encoders succeed.
+AV1 is the primary OBS codec. H.264 is accepted as fallback.
 
 Minimum router capability target:
 
-- existing baseline profile support remains
-- add Main profile support
-- add High profile support
-- keep `packetization-mode=1`
+- add AV1 codec entry (primary for OBS mode)
+- existing H.264 baseline profile support remains
+- add H.264 Main profile support
+- add H.264 High profile support
+- keep H.264 `packetization-mode=1`
+- VP8 remains for browser-host mode
 
-VP8 remains in router codecs for browser-host mode.
+When OBS offers AV1, the router matches AV1. When OBS offers H.264 (older GPU or user choice), the router matches H.264. The pipeline is codec-agnostic — PlainTransport, FFmpeg remux, fMP4 muxer, and MSE all handle both identically.
 
 ### Transport factory
 
@@ -405,7 +406,7 @@ These must come from the server. The host UI should not infer OBS state indirect
 
 ## Implementation Order
 
-1. Update config, body parsing, and H.264 router codec support.
+1. Update config, body parsing, and router codec support (AV1 primary + H.264 fallback).
 2. Extend room state and room destruction to include WHIP fields and cleanup.
 3. Extract shared producer lifecycle helpers.
 4. Implement `lib/whip.js` for SDP parsing and answer generation.
@@ -453,12 +454,12 @@ In browser mode, the host's MediaRecorder generates WebM chunks that get relayed
 ### Chosen solution: server-side FFmpeg remux
 
 ```
-OBS → mediasoup (RTP) → PlainTransport → FFmpeg → fragmented WebM → existing Socket.IO relay → tunnel viewers
+OBS → mediasoup (RTP) → PlainTransport → FFmpeg → fMP4/CMAF → Socket.IO relay → tunnel viewers
 ```
 
 1. mediasoup opens a `PlainTransport` that forwards raw RTP to a local UDP port.
-2. FFmpeg listens on that port, receives the raw H.264/Opus RTP.
-3. FFmpeg **remuxes** (repackages, not re-encodes) into fragmented WebM chunks. This is nearly free CPU-wise.
+2. FFmpeg listens on that port, receives the raw AV1/H.264 + Opus RTP.
+3. FFmpeg **remuxes** (repackages, not re-encodes) into fMP4 chunks. This is nearly free CPU-wise.
 4. Chunks feed into the existing relay path (`media-init` + `media-chunk` over Socket.IO).
 5. Tunnel viewers use the same SourceBuffer/MSE playback they already have.
 
@@ -523,15 +524,21 @@ This is a post-V1 addition. V1 ships without OBS relay. The relay work slots in 
 
 ## Codec Strategy
 
-### H.264 (V1)
+### AV1 (primary)
 
-The universal baseline. Every browser, device, and GPU decodes it. V1 ships with H.264 Baseline + Main + High profiles.
+~50% better quality per bit than H.264. OBS supports hardware AV1 encoding on RTX 40+, RX 7000+, Intel Arc. mediasoup supports AV1. All modern browsers on Chrome, Edge, and Firefox decode it.
 
-### AV1 (future)
+AV1 is the recommended and primary OBS codec. The host UI should default to AV1 and display a disclaimer: AV1 requires a recent GPU (NVIDIA RTX 4000+, AMD RX 7000+, Intel Arc) and viewers on Safari may not be able to watch.
 
-~50% better quality per bit than H.264. OBS supports hardware AV1 encoding on recent GPUs (NVIDIA RTX 40+, AMD RX 7000+, Intel Arc). mediasoup supports AV1. All modern browsers decode it.
+### H.264 (accepted fallback)
 
-Worth adding AV1 as an optional codec in the mediasoup router alongside H.264. If OBS offers AV1, accept it. If not, fall back to H.264. Zero cost to support both — just add the router codec entry.
+H.264 Baseline + Main + High profiles are accepted for hosts whose GPUs lack hardware AV1 encoding. The pipeline handles H.264 identically to AV1 — only the MIME type string changes. No separate code path needed.
+
+The host UI should show H.264 as a fallback option with a note that AV1 delivers significantly better quality at the same bitrate.
+
+### VP8 (browser mode only)
+
+VP8 remains in the router for browser-host mode. Unchanged.
 
 ### Not pursued
 

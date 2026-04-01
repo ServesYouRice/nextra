@@ -191,6 +191,7 @@ module.exports = {
 
     // ── OBS / WHIP ──
     WHIP_ENABLED: parseBoolEnv(process.env.WHIP_ENABLED, true),
+    WHIP_HTTP_PORT: parseIntEnv(process.env.WHIP_HTTP_PORT, 3001),
     FFMPEG_PATH: (process.env.FFMPEG_PATH || 'ffmpeg').trim(),
     FALLBACK_AUDIO_BITRATE: (process.env.FALLBACK_AUDIO_BITRATE || '192k').trim(),
     FALLBACK_FRAGMENT_DURATION_MS: parseIntEnv(process.env.FALLBACK_FRAGMENT_DURATION_MS, 500),

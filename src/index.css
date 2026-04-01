@@ -276,6 +276,32 @@ body {
   margin-top: 0.15rem;
 }
 
+.settings-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 0.75rem 0;
+}
+
+.settings-wrapper {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.settings-wrapper .settings-panel {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-wrapper:not(.settings-expanded) {
+  display: block;
+}
+
+.settings-wrapper:not(.settings-expanded) .settings-panel {
+  max-width: 500px;
+  margin: 0 auto;
+}
+
 /* ========== MODE TOGGLE ========== */
 .mode-toggle {
   display: inline-flex;
@@ -678,7 +704,7 @@ body {
 /* ========== HOST LAYOUT ========== */
 .host-layout {
   display: flex;
-  gap: 3rem;
+  gap: 1.5rem;
   align-items: flex-start;
   justify-content: center;
   margin-top: 1rem;
@@ -696,6 +722,12 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+  transition: max-width 0.25s ease;
+}
+
+.host-side-panel:has(.settings-expanded) {
+  max-width: 900px;
+  flex: 1.8;
 }
 
 .host-side-panel .settings-panel,

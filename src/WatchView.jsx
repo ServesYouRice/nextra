@@ -786,6 +786,13 @@ export default function WatchView({ initialCode = '' }) {
         });
     }, [socket, codeInput]);
 
+    // Auto-enter fallback mode for OBS ingest rooms (WebRTC won't work through tunnel)
+    useEffect(() => {
+        if (joined && ingestMode === 'obs' && !fallbackMode && !fmp4PlayerRef.current) {
+            enterFallbackMode();
+        }
+    }, [joined, ingestMode, fallbackMode, enterFallbackMode]);
+
     const exitFallbackMode = useCallback(() => {
         if (fmp4PlayerRef.current) {
             fmp4PlayerRef.current.stop();
@@ -987,7 +994,7 @@ export default function WatchView({ initialCode = '' }) {
                             onVolumeChange={(evt) => setIsMuted(evt.target.muted)}
                         />
 
-                        {!watching && !hostDisconnected && (
+                        {!watching && !hostDisconnected && !fallbackMode && (
                             <div className="video-overlay">
                                 {hasProducer ? (
                                     <button
@@ -1035,30 +1042,14 @@ export default function WatchView({ initialCode = '' }) {
                             onClick={enterFallbackMode}
                             style={{ padding: '0.5rem 1rem', marginTop: '0.5rem', cursor: 'pointer' }}
                         >
-                            Switch to Fallback Mode
+                            Switch to Relay Mode
                         </button>
                     )}
 
-                    {fallbackMode && (
-                        <div style={{
-                            padding: '0.5rem 1rem',
-                            background: '#2a1a00',
-                            borderRadius: '4px',
-                            fontSize: '0.85rem',
-                            marginTop: '0.5rem'
-                        }}>
-                            Fallback Mode ({fallbackCodec || 'unknown'}) — {fallbackState || 'initializing'}
-                            <button
-                                onClick={exitFallbackMode}
-                                style={{ marginLeft: '1rem', cursor: 'pointer', fontSize: '0.8rem' }}
-                            >
-                                Exit Fallback
-                            </button>
-                        </div>
-                    )}
+
 
                     <div className="controls">
-                        {watching && (
+                        {(watching || fallbackMode) && (
                             <button
                                 className={`btn ${isMuted ? 'btn-primary' : 'btn-secondary'}`}
                                 onClick={() => {
@@ -1076,7 +1067,7 @@ export default function WatchView({ initialCode = '' }) {
                             </button>
                         )}
 
-                        {watching && (
+                        {(watching || fallbackMode) && (
                             <button
                                 className="btn btn-primary"
                                 title="Fullscreen"
@@ -1110,6 +1101,27 @@ export default function WatchView({ initialCode = '' }) {
                         <button className="btn btn-outline" onClick={handleLeave}>
                             Leave Room
                         </button>
+                        
+                        {fallbackMode && (
+                            <div style={{
+                                padding: '0.4rem 0.8rem',
+                                background: '#1a1a2e',
+                                borderRadius: '4px',
+                                fontSize: '0.85rem',
+                                marginLeft: '0.5rem',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.8rem'
+                            }}>
+                                <span>Relay Mode ({fallbackCodec || 'unknown'}) — {fallbackState || 'initializing'}</span>
+                                <button
+                                    onClick={exitFallbackMode}
+                                    style={{ cursor: 'pointer', fontSize: '0.8rem', background: '#2a2a3e', border: '1px solid #444', color: '#ccc', padding: '0.2rem 0.5rem', borderRadius: '3px' }}
+                                >
+                                    Try WebRTC
+                                </button>
+                            </div>
+                        )}
                     </div>
 
                     {watching && playbackMode === 'relay' && (
