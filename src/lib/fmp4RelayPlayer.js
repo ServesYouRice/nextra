@@ -4,6 +4,10 @@
 
 const MAX_QUEUE_SIZE = 120;
 const MAX_QUEUE_BYTES = 16 * 1024 * 1024; // 16MB
+const BACK_BUFFER_SECONDS = 2;
+const LIVE_EDGE_MARGIN_SECONDS = 1.0;
+const LIVE_EDGE_SEEK_THRESHOLD_SECONDS = 1.4;
+const READY_STATE_CURRENT_DATA = 2;
 
 /**
  * Create an fMP4 relay player that manages MSE playback from Socket.IO media events.
@@ -33,6 +37,7 @@ export function createFmp4RelayPlayer(opts) {
     let liveSeekTimer = null;
     let lastPlayTime = -1;
     let stallCount = 0;
+    let lastSequence = 0;
 
     function setState(newState) {
         if (state === newState) return;
@@ -44,6 +49,19 @@ export function createFmp4RelayPlayer(opts) {
         console.error(`[fmp4-player] ${msg}`, err || '');
         onError?.(msg, err);
         setState('error');
+    }
+
+    function toUint8Array(value) {
+        if (value instanceof Uint8Array) {
+            return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+        }
+        if (ArrayBuffer.isView(value)) {
+            return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+        }
+        if (value instanceof ArrayBuffer) {
+            return new Uint8Array(value);
+        }
+        return new Uint8Array(value);
     }
 
     // ── Append queue ──
@@ -78,7 +96,12 @@ export function createFmp4RelayPlayer(opts) {
         socket.emit('get-media-init', { roomCode, format: 'fmp4' }, (response) => {
             if (response && response.success && response.initSegment) {
                 handleMediaInit(response.init
-                    ? { ...response.init, initSegment: response.initSegment }
+                    ? {
+                        ...response.init,
+                        initSegment: response.initSegment,
+                        bootstrapFragment: response.bootstrapFragment,
+                        bootstrapSequence: response.bootstrapSequence,
+                    }
                     : response
                 );
             } else {
@@ -92,14 +115,12 @@ export function createFmp4RelayPlayer(opts) {
         try {
             const buffered = sourceBuffer.buffered;
             if (buffered.length > 0 && videoElement.currentTime > 0) {
-                const removeEnd = videoElement.currentTime - 5;
+                const removeEnd = videoElement.currentTime - BACK_BUFFER_SECONDS;
                 if (removeEnd > buffered.start(0)) {
                     sourceBuffer.remove(buffered.start(0), removeEnd);
                 }
             }
-        } catch (e) {
-            // Ignore trim errors
-        }
+        } catch { }
     }
 
     // ── Live-edge seeking & stall detection ──
@@ -110,14 +131,26 @@ export function createFmp4RelayPlayer(opts) {
             const buffered = sourceBuffer.buffered;
             if (buffered.length === 0) return;
             const liveEdge = buffered.end(buffered.length - 1);
-            // Seek to near the live edge (leave a small margin for smooth playback)
-            const target = Math.max(0, liveEdge - 0.5);
-            if (videoElement.currentTime < target - 1) {
+            const target = Math.max(0, liveEdge - LIVE_EDGE_MARGIN_SECONDS);
+            if ((liveEdge - videoElement.currentTime) > LIVE_EDGE_SEEK_THRESHOLD_SECONDS) {
                 videoElement.currentTime = target;
             }
-        } catch (e) {
+        } catch {
             // Ignore seek errors
         }
+    }
+
+    function evictOldBuffer() {
+        if (!sourceBuffer || sourceBuffer.updating) return;
+        try {
+            const buffered = sourceBuffer.buffered;
+            if (buffered.length > 0 && videoElement.currentTime > 0) {
+                const removeEnd = videoElement.currentTime - BACK_BUFFER_SECONDS;
+                if (removeEnd > buffered.start(0)) {
+                    sourceBuffer.remove(buffered.start(0), removeEnd);
+                }
+            }
+        } catch { }
     }
 
     function startLiveSeekTimer() {
@@ -128,10 +161,9 @@ export function createFmp4RelayPlayer(opts) {
             // Stall detection: if currentTime hasn't changed, the video is stuck
             if (videoElement.currentTime === lastPlayTime && lastPlayTime >= 0) {
                 stallCount++;
-                if (stallCount >= 3) {
+                if (stallCount >= 2) {
                     console.warn('[fmp4-player] Stall detected, seeking to live edge');
                     seekToLiveEdge();
-                    // Re-attempt play (might have been blocked by autoplay policy)
                     videoElement.muted = true;
                     videoElement.play().catch(() => {});
                     stallCount = 0;
@@ -141,9 +173,10 @@ export function createFmp4RelayPlayer(opts) {
             }
             lastPlayTime = videoElement.currentTime;
 
-            // Periodic live-edge catch-up
+            // Periodic live-edge catch-up + buffer eviction
             seekToLiveEdge();
-        }, 2000);
+            evictOldBuffer();
+        }, 1000);
     }
 
     function stopLiveSeekTimer() {
@@ -166,6 +199,8 @@ export function createFmp4RelayPlayer(opts) {
                     handleMediaInit({
                         ...response.init,
                         initSegment: response.initSegment,
+                        bootstrapFragment: response.bootstrapFragment,
+                        bootstrapSequence: response.bootstrapSequence,
                     });
                 }
             });
@@ -175,6 +210,7 @@ export function createFmp4RelayPlayer(opts) {
         if (data.generation !== currentGeneration) {
             cleanupMediaSource();
             currentGeneration = data.generation;
+            lastSequence = 0;
         }
 
         mimeType = data.mimeType;
@@ -184,12 +220,20 @@ export function createFmp4RelayPlayer(opts) {
             return;
         }
 
-        setupMediaSource(data.initSegment);
+        if (typeof data.bootstrapSequence === 'number' && data.bootstrapSequence > 0) {
+            lastSequence = data.bootstrapSequence;
+        }
+
+        setupMediaSource(data.initSegment, data.bootstrapFragment || null);
     }
 
     function handleMediaChunk(data) {
         // data: { format, generation, tier, sequence, keyframeStart, chunk }
         if (data.generation !== currentGeneration) return;
+        if (typeof data.sequence === 'number' && data.sequence <= lastSequence) return;
+        if (typeof data.sequence === 'number') {
+            lastSequence = data.sequence;
+        }
 
         if (appendQueue.length >= MAX_QUEUE_SIZE || queueBytes >= MAX_QUEUE_BYTES) {
             consecutiveDrops++;
@@ -202,22 +246,21 @@ export function createFmp4RelayPlayer(opts) {
         }
         consecutiveDrops = 0;
 
-        const buffer = data.chunk instanceof ArrayBuffer
-            ? new Uint8Array(data.chunk)
-            : new Uint8Array(data.chunk.buffer || data.chunk);
+        const buffer = toUint8Array(data.chunk);
+        if (buffer.byteLength === 0) return;
 
         appendQueue.push(buffer);
         queueBytes += buffer.byteLength;
         processQueue();
 
-        if (data.sequence % 30 === 0) {
+        if (data.sequence % 15 === 0) {
             trimBuffer();
         }
     }
 
     // ── MediaSource setup ──
 
-    function setupMediaSource(initSegment) {
+    function setupMediaSource(initSegment, bootstrapFragment = null) {
         if (mediaSource) {
             cleanupMediaSource();
         }
@@ -228,43 +271,59 @@ export function createFmp4RelayPlayer(opts) {
 
         const onSourceOpen = () => {
             try {
-                sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-                sourceBuffer.mode = 'segments';
+                const currentSourceBuffer = mediaSource.addSourceBuffer(mimeType);
+                sourceBuffer = currentSourceBuffer;
+                currentSourceBuffer.mode = 'segments';
 
-                sourceBuffer.addEventListener('updateend', () => {
+                const onUpdateEnd = () => {
+                    if (sourceBuffer !== currentSourceBuffer) return;
                     isAppending = false;
                     processQueue();
 
-                    if (state === 'buffering' && sourceBuffer.buffered.length > 0) {
-                        setState('playing');
+                    if (state === 'buffering' && currentSourceBuffer.buffered.length > 0) {
                         // Mute first to guarantee autoplay works (browser policy)
                         videoElement.muted = true;
                         seekToLiveEdge();
                         videoElement.play().catch(() => {});
+                        if (videoElement.readyState >= READY_STATE_CURRENT_DATA) {
+                            setState('playing');
+                        }
                         startLiveSeekTimer();
                     }
-                });
+                };
 
-                sourceBuffer.addEventListener('error', () => {
+                const onSourceBufferError = () => {
+                    if (sourceBuffer !== currentSourceBuffer) return;
                     console.error('[fmp4-player] SourceBuffer error, attempting recovery');
                     resetAndRequestInit();
+                };
+
+                currentSourceBuffer.addEventListener('updateend', onUpdateEnd);
+                currentSourceBuffer.addEventListener('error', onSourceBufferError);
+                const onPlaybackReady = () => {
+                    if (state === 'buffering') {
+                        setState('playing');
+                    }
+                };
+                videoElement.addEventListener('loadeddata', onPlaybackReady);
+                videoElement.addEventListener('playing', onPlaybackReady);
+                cleanupFns.push(() => {
+                    try { currentSourceBuffer.removeEventListener('updateend', onUpdateEnd); } catch { }
+                    try { currentSourceBuffer.removeEventListener('error', onSourceBufferError); } catch { }
+                    try { videoElement.removeEventListener('loadeddata', onPlaybackReady); } catch { }
+                    try { videoElement.removeEventListener('playing', onPlaybackReady); } catch { }
                 });
 
                 // Append init segment first
                 setState('buffering');
-                let initBuffer;
-                if (initSegment instanceof ArrayBuffer) {
-                    initBuffer = new Uint8Array(initSegment);
-                } else if (initSegment instanceof Uint8Array) {
-                    initBuffer = initSegment;
-                } else if (initSegment && initSegment.buffer) {
-                    initBuffer = new Uint8Array(initSegment.buffer);
-                } else {
-                    // Socket.IO may deliver as a plain ArrayBuffer-like or Buffer
-                    initBuffer = new Uint8Array(initSegment);
-                }
+                const initBuffer = toUint8Array(initSegment);
                 appendQueue.unshift(initBuffer);
                 queueBytes += initBuffer.byteLength;
+                if (bootstrapFragment) {
+                    const bootstrapBuffer = toUint8Array(bootstrapFragment);
+                    appendQueue.push(bootstrapBuffer);
+                    queueBytes += bootstrapBuffer.byteLength;
+                }
                 processQueue();
             } catch (err) {
                 handleError('Failed to create SourceBuffer', err);
@@ -291,7 +350,7 @@ export function createFmp4RelayPlayer(opts) {
                     if (sourceBuffer.updating) sourceBuffer.abort();
                     mediaSource.removeSourceBuffer(sourceBuffer);
                 }
-            } catch (e) { }
+            } catch { }
             sourceBuffer = null;
         }
 
@@ -301,7 +360,7 @@ export function createFmp4RelayPlayer(opts) {
                 if (mediaSource.readyState === 'open' && (!sourceBuffer || !sourceBuffer.updating)) {
                     mediaSource.endOfStream();
                 }
-            } catch (e) { }
+            } catch { }
             mediaSource = null;
         }
     }
@@ -317,7 +376,7 @@ export function createFmp4RelayPlayer(opts) {
             try {
                 if (sourceBuffer.updating) sourceBuffer.abort();
                 mediaSource.removeSourceBuffer(sourceBuffer);
-            } catch (e) { }
+            } catch { }
         }
         sourceBuffer = null;
     }
@@ -339,7 +398,12 @@ export function createFmp4RelayPlayer(opts) {
         socket.emit('get-media-init', { roomCode, format: 'fmp4' }, (response) => {
             if (response && response.success && response.initSegment) {
                 handleMediaInit(response.init
-                    ? { ...response.init, initSegment: response.initSegment }
+                    ? {
+                        ...response.init,
+                        initSegment: response.initSegment,
+                        bootstrapFragment: response.bootstrapFragment,
+                        bootstrapSequence: response.bootstrapSequence,
+                    }
                     : response
                 );
             } else {
@@ -351,10 +415,11 @@ export function createFmp4RelayPlayer(opts) {
     function stop() {
         setState('stopped');
         stopLiveSeekTimer();
-        cleanupFns.forEach(fn => { try { fn(); } catch (e) { } });
+        cleanupFns.forEach(fn => { try { fn(); } catch { } });
         cleanupFns = [];
         cleanupMediaSource();
         currentGeneration = -1;
+        lastSequence = 0;
         videoElement.src = '';
         videoElement.load();
     }

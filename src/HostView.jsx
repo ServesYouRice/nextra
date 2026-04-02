@@ -92,19 +92,21 @@ function detectGpuCapability() {
         const nvidiaMatch = renderer.match(/RTX\s*(\d{4})/i);
         if (nvidiaMatch) {
             const model = parseInt(nvidiaMatch[1], 10);
-            if (model >= 4000) return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'jim_av1_nvenc' };
-            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'jim_nvenc' };
+            // TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
+            // if (model >= 4000) return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'obs_nvenc_av1_tex' };
+            return { gpu: renderer, av1HwEncode: model >= 4000, recommendedEncoder: 'obs_nvenc_h264_tex' };
         }
         if (/GTX|NVIDIA|GeForce/i.test(renderer)) {
-            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'jim_nvenc' };
+            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'obs_nvenc_h264_tex' };
         }
 
         // AMD: RX 7000+ (RDNA 3) has AV1 encode
         const amdRxMatch = renderer.match(/RX\s*(\d{4})/i);
         if (amdRxMatch) {
             const model = parseInt(amdRxMatch[1], 10);
-            if (model >= 7000) return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'amd_av1' };
-            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'h264_texture_amf' };
+            // TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
+            // if (model >= 7000) return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'amd_av1' };
+            return { gpu: renderer, av1HwEncode: model >= 7000, recommendedEncoder: 'h264_texture_amf' };
         }
         if (/AMD|Radeon/i.test(renderer)) {
             return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'h264_texture_amf' };
@@ -112,7 +114,9 @@ function detectGpuCapability() {
 
         // Intel: Arc (Alchemist/Battlemage) has AV1 encode
         if (/Arc.*[AB]\d{3,}/i.test(renderer) || /Battlemage|Alchemist/i.test(renderer)) {
-            return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'obs_qsv11_av1' };
+            // TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
+            // return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'obs_qsv11_av1' };
+            return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'obs_x264' };
         }
         if (/Intel/i.test(renderer)) {
             return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'obs_x264' };
@@ -178,7 +182,6 @@ export default function HostView() {
         return '1080p';
     });
     const [frameRate, setFrameRate] = useState(30);
-    const [autoTuneQuality, setAutoTuneQuality] = useState(false);
     const [roomMetrics, setRoomMetrics] = useState(null);
     const [ingestMode, setIngestMode] = useState('browser');
     const [whipConnected, setWhipConnected] = useState(false);
@@ -190,7 +193,6 @@ export default function HostView() {
     const [obsPassword, setObsPassword] = useState('');
     const [obsAutoStart, setObsAutoStart] = useState(true);
     const [obsApplySettings, setObsApplySettings] = useState(true);
-    const [obsEncoder, setObsEncoder] = useState(gpuInfo.av1HwEncode ? 'av1' : 'h264');
 
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -225,23 +227,6 @@ export default function HostView() {
     const hasRemoteShareLink = !!shareBaseUrl && !isLikelyLocalOrigin(shareBaseUrl);
     const shouldPrewarmRelay = hasRemoteShareLink && !hasTurnServer;
 
-    const maybeAutoTuneProfile = useCallback((nextViewerCount, nextRelayViewerCount) => {
-        if (!isSharing || !autoTuneQuality) return;
-
-        const viewers = Math.max(0, Number(nextViewerCount) || 0);
-        const relayCount = Math.max(0, Number(nextRelayViewerCount) || 0);
-        const perViewer = viewers > 0 ? (hostUploadMbps / viewers) : hostUploadMbps;
-
-        let recommended = qualityProfile;
-        const currentIndex = ['1080p', '1440p', '4k'].indexOf(qualityProfile);
-        if (relayCount >= 2 || perViewer < 5 || viewers >= 8) {
-            recommended = '1080p';
-        } else if (relayCount >= 1 || perViewer < 8 || viewers >= 4) {
-            recommended = currentIndex > 1 ? '1440p' : qualityProfile;
-        }
-
-        setQualityProfile((current) => (current === recommended ? current : recommended));
-    }, [isSharing, autoTuneQuality, hostUploadMbps, qualityProfile]);
 
     useEffect(() => {
         if (!roomCode) return undefined;
@@ -260,11 +245,10 @@ export default function HostView() {
         const onViewerCount = ({ count }) => {
             const nextCount = Math.max(0, Number(count) || 0);
             setViewerCount(nextCount);
-            maybeAutoTuneProfile(nextCount, relayViewerCount);
         };
         socket.on('viewer-count', onViewerCount);
         return () => socket.off('viewer-count', onViewerCount);
-    }, [socket, maybeAutoTuneProfile, relayViewerCount]);
+    }, [socket]);
 
     const stopRelayRecorder = useCallback(() => {
         if (safetyFlushIntervalRef.current) {
@@ -476,7 +460,6 @@ export default function HostView() {
             setRoomMetrics(data || null);
             if (data) {
                 setRelayViewerCount(Math.max(0, Number(data.relayViewerCount) || 0));
-                maybeAutoTuneProfile(data.viewerCount, data.relayViewerCount);
                 if (data.whipConnected !== undefined) setWhipConnected(data.whipConnected);
                 if (data.fallbackViewerCount !== undefined) setFallbackViewerCount(data.fallbackViewerCount);
                 if (data.fallbackCodec) setFallbackCodec(data.fallbackCodec);
@@ -486,7 +469,7 @@ export default function HostView() {
 
         socket.on('room-metrics', onRoomMetrics);
         return () => socket.off('room-metrics', onRoomMetrics);
-    }, [socket, maybeAutoTuneProfile]);
+    }, [socket]);
 
     useEffect(() => {
         const onTransportFailed = ({ reason } = {}) => {
@@ -522,12 +505,11 @@ export default function HostView() {
         const onRelayDemandChanged = ({ count } = {}) => {
             const nextCount = Math.max(0, Number(count) || 0);
             setRelayViewerCount(nextCount);
-            maybeAutoTuneProfile(viewerCount, nextCount);
         };
 
         socket.on('relay-demand-changed', onRelayDemandChanged);
         return () => socket.off('relay-demand-changed', onRelayDemandChanged);
-    }, [socket, isSharing, viewerCount, maybeAutoTuneProfile]);
+    }, [socket, isSharing]);
 
     const applyQualityProfileToLiveStream = useCallback(async (profileKey, fps) => {
         const profile = getQualityProfile(profileKey);
@@ -720,9 +702,12 @@ export default function HostView() {
                     obsOpts.encoderSettings = {
                         bitrateKbps,
                         keyframeIntervalSec: 2,
-                        preset: obsEncoder.startsWith('av1') ? 'speed' : 'ultrafast',
-                        encoder: obsEncoder.startsWith('av1') ? 'av1' : 'h264',
-                        obsEncoderId: obsEncoder === 'av1' ? gpuInfo.recommendedEncoder : obsEncoder === 'av1-sw' ? 'obs_svt_av1' : (gpuInfo.recommendedEncoder.includes('nvenc') ? 'jim_nvenc' : gpuInfo.recommendedEncoder.includes('amf') ? 'h264_texture_amf' : 'obs_x264'),
+                        // TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
+                        // preset: obsEncoder.startsWith('av1') ? 'speed' : 'ultrafast',
+                        // encoder: obsEncoder.startsWith('av1') ? 'av1' : 'h264',
+                        // obsEncoderId: obsEncoder === 'av1' ? gpuInfo.recommendedEncoder : obsEncoder === 'av1-sw' ? 'obs_svt_av1' : gpuInfo.recommendedEncoder,
+                        preset: 'ultrafast',
+                        obsEncoderId: gpuInfo.recommendedEncoder,
                     };
                 }
                 configureObsStream(obsOpts).then((result) => {
@@ -830,6 +815,16 @@ export default function HostView() {
                                 <p>No screen shared yet</p>
                             </div>
                         )}
+                        {isSharing && ingestMode === 'obs' && (
+                            <div className="video-overlay">
+                                <p>Streaming via OBS</p>
+                                <p style={{ fontSize: '0.8rem', color: 'var(--text-3)', marginTop: '0.25rem' }}>
+                                    {whipConnected ? 'OBS connected' : 'Waiting for OBS...'}
+                                    {fallbackCodec ? ` \u00B7 ${fallbackCodec.toUpperCase()}` : ''}
+                                    {viewerCount > 0 ? ` \u00B7 ${viewerCount} viewer${viewerCount !== 1 ? 's' : ''}` : ''}
+                                </p>
+                            </div>
+                        )}
                     </div>
 
                     <div className="controls">
@@ -877,7 +872,7 @@ export default function HostView() {
                         <div className={`settings-wrapper${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
                         <div className="settings-panel">
                             <h3>Settings</h3>
-                            <div className="setting-row">
+                            <div className="setting-row setting-row-toggle">
                                 <input
                                     type="checkbox"
                                     id="allowMediaControl"
@@ -891,8 +886,8 @@ export default function HostView() {
                                     </span>
                                 </label>
                             </div>
-                            <div className="setting-row" style={{ alignItems: 'center' }}>
-                                <label htmlFor="qualityProfile" style={{ minWidth: '140px' }}>
+                            <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
+                                <label htmlFor="qualityProfile" className="setting-row-label" style={{ minWidth: '140px' }}>
                                     Resolution
                                 </label>
                                 <select
@@ -906,8 +901,8 @@ export default function HostView() {
                                     ))}
                                 </select>
                             </div>
-                            <div className="setting-row" style={{ alignItems: 'center' }}>
-                                <label htmlFor="frameRate" style={{ minWidth: '140px' }}>
+                            <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
+                                <label htmlFor="frameRate" className="setting-row-label" style={{ minWidth: '140px' }}>
                                     Frame rate
                                 </label>
                                 <select
@@ -920,21 +915,7 @@ export default function HostView() {
                                     <option value={30}>30 fps</option>
                                 </select>
                             </div>
-                            <div className="setting-row">
-                                <input
-                                    type="checkbox"
-                                    id="autoTuneQuality"
-                                    checked={autoTuneQuality}
-                                    onChange={(evt) => setAutoTuneQuality(evt.target.checked)}
-                                />
-                                <label htmlFor="autoTuneQuality">
-                                    Auto-tune quality from live room metrics
-                                    <span className="setting-hint">
-                                        Uses viewer count, relay usage, and host upload estimate
-                                    </span>
-                                </label>
-                            </div>
-                            <div className="setting-row">
+                            <div className="setting-row setting-row-toggle">
                                 <input
                                     type="checkbox"
                                     id="obsMode"
@@ -952,7 +933,7 @@ export default function HostView() {
                             {ingestMode === 'obs' && (
                                 <div className="settings-panel">
                                     <h3>OBS Configuration</h3>
-                                    <div className="setting-row">
+                                    <div className="setting-row setting-row-toggle">
                                         <input
                                             type="checkbox"
                                             id="obsApplySettings"
@@ -967,25 +948,27 @@ export default function HostView() {
                                         </label>
                                     </div>
                                     {obsApplySettings && (
-                                        <div className="setting-row" style={{ alignItems: 'center' }}>
-                                            <label htmlFor="obsEncoder" style={{ minWidth: '90px', flexShrink: 0 }}>
+                                        <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
+                                            <label htmlFor="obsEncoder" className="setting-row-label" style={{ minWidth: '90px', flexShrink: 0 }}>
                                                 Encoder
                                             </label>
                                             <select
                                                 id="obsEncoder"
-                                                value={obsEncoder}
-                                                onChange={(e) => setObsEncoder(e.target.value)}
+                                                value="h264"
+                                                disabled
                                                 className="select-input"
                                             >
                                                 <option value="h264">H.264{gpuInfo.recommendedEncoder.includes('nvenc') ? ' (NVENC)' : gpuInfo.recommendedEncoder.includes('amf') ? ' (AMF)' : ' (x264)'}</option>
+                                                {/* TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
                                                 {gpuInfo.av1HwEncode && (
                                                     <option value="av1">AV1 (HW — {gpuInfo.gpu.match(/RTX \d{4}|RX \d{4}|Arc [AB]\d+/i)?.[0] || 'GPU'})</option>
                                                 )}
                                                 <option value="av1-sw">AV1 (SVT — software, slow)</option>
+                                                */}
                                             </select>
                                         </div>
                                     )}
-                                    <div className="setting-row">
+                                    <div className="setting-row setting-row-toggle">
                                         <input
                                             type="checkbox"
                                             id="obsAutoStart"
@@ -999,8 +982,8 @@ export default function HostView() {
                                             </span>
                                         </label>
                                     </div>
-                                    <div className="setting-row" style={{ alignItems: 'center' }}>
-                                        <label htmlFor="obsPassword" style={{ minWidth: '90px', flexShrink: 0 }}>
+                                    <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
+                                        <label htmlFor="obsPassword" className="setting-row-label" style={{ minWidth: '90px', flexShrink: 0 }}>
                                             WS password
                                         </label>
                                         <input
@@ -1021,6 +1004,7 @@ export default function HostView() {
                     {bandwidthWarning && <div className="alert alert-warning">{bandwidthWarning}</div>}
 
                     {roomCode && (
+                        <div className={ingestMode === 'obs' ? 'streaming-info-row' : ''}>
                         <div className="room-info">
                             <div className="room-code-display">
                                 <span className="room-code-label">Room Code</span>
@@ -1079,9 +1063,10 @@ export default function HostView() {
                                     {fallbackAvailable ? 'Fallback active' : 'Fallback inactive'}
                                 </div>
                             )}
-                            {ingestMode === 'obs' && roomCode && (
-                                <div style={{ background: '#1a1a2e', padding: '1rem', borderRadius: '8px', marginTop: '1rem' }}>
-                                    <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1rem' }}>OBS WHIP Setup</h3>
+                        </div>
+                    {ingestMode === 'obs' && (
+                        <div className="obs-whip-setup-panel room-info">
+                            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1rem' }}>OBS WHIP Setup</h3>
 
                                     {obsAutoStatus === 'configuring' && (
                                         <div style={{ fontSize: '0.85rem', color: '#5b8def', marginBottom: '0.5rem' }}>
@@ -1124,9 +1109,8 @@ export default function HostView() {
                                                         retryOpts.encoderSettings = {
                                                             bitrateKbps,
                                                             keyframeIntervalSec: 2,
-                                                            preset: obsEncoder === 'av1' ? 'speed' : 'ultrafast',
-                                                            encoder: obsEncoder,
-                                                            obsEncoderId: obsEncoder === 'av1' ? gpuInfo.recommendedEncoder : (gpuInfo.recommendedEncoder.includes('nvenc') ? 'jim_nvenc' : gpuInfo.recommendedEncoder.includes('amf') ? 'h264_texture_amf' : 'obs_x264'),
+                                                            preset: 'ultrafast',
+                                                            obsEncoderId: gpuInfo.recommendedEncoder,
                                                         };
                                                     }
                                                     configureObsStream(retryOpts).then((result) => {
@@ -1165,8 +1149,8 @@ export default function HostView() {
                                     <div style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
                                         Status: {whipConnected ? '\uD83D\uDFE2 OBS Connected' : '\uD83D\uDD34 Waiting for OBS...'}
                                     </div>
-                                </div>
-                            )}
+                        </div>
+                    )}
                         </div>
                     )}
                 </div>

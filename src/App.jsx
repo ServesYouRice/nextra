@@ -42,7 +42,7 @@ function Router() {
                 </nav>
             </header>
             <main className="main-content">
-                <Suspense fallback={<div className="view-container">Loading...</div>}>
+                <Suspense fallback={<div className="view-container" style={{ textAlign: 'center' }}>Loading...</div>}>
                     {view}
                 </Suspense>
             </main>
@@ -56,7 +56,6 @@ function Landing() {
             <div className="landing-content">
                 <div className="logo-section">
                     <h1 className="app-title">Nextra</h1>
-                    <p className="app-tagline">Low-latency screen sharing · 1080p60 · zero viewer installs</p>
                 </div>
 
                 <div className="card-grid">
