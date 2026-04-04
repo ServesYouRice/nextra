@@ -27,7 +27,8 @@ const {
     shouldTrustForwardedHeaders,
     getTrustedForwardedClientIp,
 } = require('./lib/network');
-const { createWhipRouter } = require('./lib/whipRoutes');
+const { createWhipRouter, setIo: setWhipIo } = require('./lib/whipRoutes');
+const { createWhepRouter } = require('./lib/whepRoutes');
 const { execSync } = require('child_process');
 
 const app = express();
@@ -465,12 +466,14 @@ app.get('/api/config', (req, res) => {
         shareBaseUrl: getShareBaseUrl(req),
         lanUrl: shouldExposeLanUrl(req) ? getLocalBaseUrl() : '',
         hasTurnServer: getHasTurnServer(),
+        iceServers: config.getIceServers(),
         mediaMaxChunkSize: config.MEDIA_MAX_CHUNK_SIZE,
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
         publicShareStatus,
         publicShareError,
         whipEnabled: config.WHIP_ENABLED,
+        whepEnabled: config.WHEP_ENABLED,
     });
 });
 
@@ -494,6 +497,7 @@ app.get('/api/metrics', (req, res) => {
         : rooms.map(({ code: _code, hostSocketId: _hostSocketId, ...room }) => room);
     const totalViewers = rooms.reduce((sum, room) => sum + room.viewerCount, 0);
     const totalRelayViewers = rooms.reduce((sum, room) => sum + room.relayViewerCount, 0);
+    const totalWhepViewers = rooms.reduce((sum, room) => sum + (room.whepViewerCount || 0), 0);
     const totalConsumers = rooms.reduce((sum, room) => sum + room.mediasoupConsumerCount, 0);
 
     res.json({
@@ -503,6 +507,7 @@ app.get('/api/metrics', (req, res) => {
             active: rooms.length,
             totalViewers,
             totalRelayViewers,
+            totalWhepViewers,
             totalMediasoupConsumers: totalConsumers,
             list: roomList,
             sensitiveFieldsIncluded: includeSensitiveRoomFields,
@@ -727,6 +732,13 @@ async function handleHttpsServerError(err) {
         app.use('/whip', whipRouter);
     }
 
+    // Mount WHEP routes on HTTPS only (browser viewers)
+    if (config.WHEP_ENABLED) {
+        const whepRouter = createWhepRouter(result.router);
+        app.use('/whep', whepRouter);
+        console.log('   WHEP:    /whep/watch/<roomCode>');
+    }
+
     const io = new Server(httpsServer, {
         path: config.SOCKET_PATH,
         maxHttpBufferSize: config.SOCKET_MAX_HTTP_BUFFER_SIZE,
@@ -755,6 +767,7 @@ async function handleHttpsServerError(err) {
         },
     });
     ioServer = io;
+    setWhipIo(io);
 
     startRoomCleanup({
         onStaleRoom: (room) => destroyRoomWithReason(io, room.code, 'Room timed out', false),

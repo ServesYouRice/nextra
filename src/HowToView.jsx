@@ -108,9 +108,8 @@ export default function HowToView() {
                 <strong>2. Choose encoder settings</strong>
                 <ul>
                     <li><strong>Apply recommended output settings</strong> — auto-configures OBS encoder, bitrate, keyframe interval, and low-latency tuning over WebSocket.</li>
-                    {/* TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support */}
-                    {/* <li><strong>Encoder</strong> — H.264 (NVENC, AMF, or x264) or AV1 (hardware or SVT software). Nextra detects your GPU and recommends the best option.</li> */}
-                    <li><strong>Encoder</strong> — H.264 (NVENC, AMF, or x264). Nextra detects your GPU and picks the best hardware encoder.</li>
+                    <li><strong>Encoder</strong> — H.264 (NVENC, AMF, QSV, or x264). Nextra detects your GPU and recommends the best fit for the stable relay path.</li>
+                    <li><strong>Tuning</strong> — Balanced aims for the quality plateau, Crisp adds a modest bump, and Max pushes harder when the host has headroom.</li>
                     <li><strong>Auto-start streaming in OBS</strong> — begins the stream immediately after configuration.</li>
                     <li><strong>WS password</strong> — enter your OBS WebSocket password, or leave empty if you disabled authentication in OBS.</li>
                 </ul>
@@ -128,11 +127,13 @@ export default function HowToView() {
             <div style={{ backgroundColor: 'var(--surface-3)', padding: '1rem', marginTop: '0.5rem', borderRadius: '4px', fontSize: '0.9rem', borderLeft: '3px solid var(--accent-1)' }}>
                 <strong>OBS settings applied automatically:</strong>
                 <ul style={{ margin: '0.5rem 0 0 1rem', padding: 0 }}>
-                    <li>Output mode: Simple</li>
+                    <li>Output mode: Advanced</li>
                     <li>Keyframe interval: 2 seconds</li>
                     <li>Rate control: CBR</li>
+                    <li>Tuning: Balanced, Crisp, or Max</li>
                     <li>H.264 profile: High, tune: zerolatency, 0 B-frames</li>
-                    <li>Audio: 192 kbps, 48 kHz</li>
+                    <li>NVENC: tuning-driven p5/p6 preset with full-resolution multipass</li>
+                    <li>Audio: 256 kbps, 48 kHz</li>
                     <li>Color: BT.709, Full range</li>
                     <li>Resolution, FPS, and bitrate match your selected quality profile</li>
                 </ul>

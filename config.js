@@ -92,7 +92,6 @@ module.exports = {
             kind: 'video', mimeType: 'video/H264', clockRate: 90000,
             parameters: { 'packetization-mode': 1, 'profile-level-id': '640032', 'level-asymmetry-allowed': 1 },
         },
-        { kind: 'video', mimeType: 'video/AV1', clockRate: 90000 },
         {
             kind: 'audio',
             mimeType: 'audio/opus',
@@ -111,7 +110,7 @@ module.exports = {
         { rid: 'r1', maxBitrate: 14_400_000, scaleResolutionDownBy: 2 },
         { rid: 'r2', maxBitrate: 36_000_000 },
     ],
-    CODEC_OPTIONS: { videoGoogleStartBitrate: 10_000 },
+    CODEC_OPTIONS: { videoGoogleStartBitrate: 5_000 },
 
     // ICE / TURN / STUN
     TURN_URL: process.env.TURN_URL || '',
@@ -177,7 +176,7 @@ module.exports = {
     SOCKET_MAX_HTTP_BUFFER_SIZE: parseIntEnv(process.env.SOCKET_MAX_HTTP_BUFFER_SIZE, 8 * 1024 * 1024),
     MEDIA_MAX_CHUNK_SIZE: parseIntEnv(process.env.MEDIA_MAX_CHUNK_SIZE, 4 * 1024 * 1024),
     RELAY_FLUSH_INTERVAL_MS: parseIntEnv(process.env.RELAY_FLUSH_INTERVAL_MS, 300),
-    RELAY_VIDEO_BITS_PER_SECOND: parseIntEnv(process.env.RELAY_VIDEO_BITS_PER_SECOND, 36000000),
+    RELAY_VIDEO_BITS_PER_SECOND: parseIntEnv(process.env.RELAY_VIDEO_BITS_PER_SECOND, 45000000),
     HOST_RECONNECT_GRACE_MS: parseIntEnv(process.env.HOST_RECONNECT_GRACE_MS, 300000),
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     ALLOW_REMOTE_METRICS: parseBoolEnv(process.env.ALLOW_REMOTE_METRICS, false),
@@ -199,5 +198,10 @@ module.exports = {
     MAX_FALLBACK_CHUNK_SIZE: parseIntEnv(process.env.MAX_FALLBACK_CHUNK_SIZE, 2 * 1024 * 1024),
     FALLBACK_RESTART_CAP: parseIntEnv(process.env.FALLBACK_RESTART_CAP, 5),
     WHIP_GRACE_TIMEOUT_MS: parseIntEnv(process.env.WHIP_GRACE_TIMEOUT_MS, 15000),
+    // ── WHEP ──
+    WHEP_ENABLED: parseBoolEnv(process.env.WHEP_ENABLED, false),
+    WHEP_RATE_LIMIT_MAX: parseIntEnv(process.env.WHEP_RATE_LIMIT_MAX, 5),
+    WHEP_RATE_LIMIT_WINDOW_MS: parseIntEnv(process.env.WHEP_RATE_LIMIT_WINDOW_MS, 60000),
+    WHEP_MAX_GLOBAL_SESSIONS: parseIntEnv(process.env.WHEP_MAX_GLOBAL_SESSIONS, 30),
     WHIP_HEARTBEAT_INTERVAL_MS: parseIntEnv(process.env.WHIP_HEARTBEAT_INTERVAL_MS, 5000),
 };

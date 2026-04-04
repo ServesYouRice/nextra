@@ -364,6 +364,20 @@ body {
   align-self: center;
 }
 
+.setting-row input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.setting-row input[type="checkbox"]:disabled + label {
+  cursor: not-allowed;
+  color: rgba(205, 212, 240, 0.58);
+}
+
+.setting-row input[type="checkbox"]:disabled + label .setting-hint {
+  color: rgba(164, 169, 194, 0.5);
+}
+
 .setting-row label {
   font-size: 0.9rem;
   color: #cdd4f0;
@@ -678,6 +692,26 @@ body {
   justify-content: center;
   flex-wrap: wrap;
   margin-bottom: 1rem;
+}
+
+.relay-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  padding: 0.55rem 0.8rem;
+  background:
+    radial-gradient(circle at top right, rgba(91, 141, 239, 0.08), transparent 52%),
+    linear-gradient(180deg, rgba(28, 28, 33, 0.98), rgba(21, 21, 24, 0.98));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-size: 0.85rem;
+}
+
+.relay-mode-pill .btn {
+  flex: 0 0 auto;
 }
 
 /* ========== ROOM INFO ========== */
