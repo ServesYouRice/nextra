@@ -25,9 +25,10 @@ function waitForSocketConnect(socket, timeoutMs = 10000) {
     if (socket.connected) return Promise.resolve();
 
     return new Promise((resolve, reject) => {
+        let lastConnectError = null;
         const timer = setTimeout(() => {
             cleanup();
-            reject(new Error('Socket is not connected'));
+            reject(lastConnectError || new Error('Socket is not connected'));
         }, timeoutMs);
 
         const onConnect = () => {
@@ -36,8 +37,7 @@ function waitForSocketConnect(socket, timeoutMs = 10000) {
         };
 
         const onConnectError = (err) => {
-            cleanup();
-            reject(new Error(`Socket connect failed: ${err?.message || 'unknown error'}`));
+            lastConnectError = new Error(`Socket connect failed: ${err?.message || 'unknown error'}`);
         };
 
         const cleanup = () => {

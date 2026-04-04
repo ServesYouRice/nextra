@@ -3,11 +3,35 @@ import { SocketContext } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { configureObsStream, stopObsStream } from './lib/obsWebSocket';
 
-const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 10_000 };
+const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 5_000 };
+const OBS_MAX_BITRATE_KBPS = 45_000;
 const AUDIO_CODEC_OPTIONS = {
     opusStereo: 1,
     opusFec: 1,
     opusDtx: 0,
+};
+const OBS_TUNING_PROFILES = {
+    balanced: {
+        label: 'Balanced',
+        bitrateMultiplier: 1,
+        x264Preset: 'veryfast',
+        nvencPreset: 'p5',
+        nvencMultipass: 'fullres',
+    },
+    crisp: {
+        label: 'Crisp',
+        bitrateMultiplier: 1.15,
+        x264Preset: 'faster',
+        nvencPreset: 'p6',
+        nvencMultipass: 'fullres',
+    },
+    max: {
+        label: 'Max',
+        bitrateMultiplier: 1.3,
+        x264Preset: 'fast',
+        nvencPreset: 'p6',
+        nvencMultipass: 'fullres',
+    },
 };
 
 const QUALITY_PROFILES = {
@@ -15,22 +39,22 @@ const QUALITY_PROFILES = {
         label: '4K',
         maxSpatialLayer: 2,
         capture: { width: 3840, height: 2160 },
-        relayBitsPerSecond: { 30: 24_000_000, 60: 36_000_000 },
-        obsBitrateKbps: { 30: 24_000, 60: 36_000 },
+        relayBitsPerSecond: { 30: 26_000_000, 60: 36_000_000 },
+        obsBitrateKbps: { 30: 30_000, 60: 40_000 },
     },
     '1440p': {
         label: '1440p',
         maxSpatialLayer: 2,
         capture: { width: 2560, height: 1440 },
         relayBitsPerSecond: { 30: 14_000_000, 60: 21_000_000 },
-        obsBitrateKbps: { 30: 14_000, 60: 21_000 },
+        obsBitrateKbps: { 30: 18_000, 60: 24_000 },
     },
     '1080p': {
         label: '1080p',
         maxSpatialLayer: 2,
         capture: { width: 1920, height: 1080 },
         relayBitsPerSecond: { 30: 8_000_000, 60: 12_000_000 },
-        obsBitrateKbps: { 30: 8_000, 60: 12_000 },
+        obsBitrateKbps: { 30: 12_000, 60: 15_000 },
     },
 };
 
@@ -71,64 +95,110 @@ async function applyProducerBitrateProfile(videoProducer, profileKey, fps) {
     await sender.setParameters(params);
 }
 
+function createGpuCapability(overrides = {}) {
+    return {
+        gpu: 'unknown',
+        h264EncoderIds: ['obs_x264'],
+        h264Label: 'x264',
+        av1Supported: false,
+        ...overrides,
+    };
+}
+
 /**
- * Detect host GPU and determine AV1 hardware encoding capability.
- * Returns { gpu: string, av1HwEncode: boolean, recommendedEncoder: string }
+ * Detect host GPU and determine the preferred OBS encoder families.
  */
+function detectAv1Support(renderer) {
+    const normalized = String(renderer || '').toUpperCase();
+    if (!normalized) return false;
+
+    if (/NVIDIA|GEFORCE|RTX/.test(normalized)) {
+        return /\bRTX\s*40\d{2}\b|\bRTX\s*50\d{2}\b|\bRTX\s*(4000|4500|5000|6000)\s*ADA\b|\bADA\b|\bL4\b|\bL40\b/.test(normalized);
+    }
+
+    if (/AMD|RADEON/.test(normalized)) {
+        return /\bRX\s*7\d{3}\b|\bRADEON\s*7\d{3}\b|\b780M\b|\b880M\b|\b890M\b/.test(normalized);
+    }
+
+    if (/INTEL/.test(normalized)) {
+        return /\bARC\b|\bULTRA\b/.test(normalized);
+    }
+
+    return false;
+}
+
 function detectGpuCapability() {
     try {
         const canvas = document.createElement('canvas');
         const gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-        if (!gl) return { gpu: 'unknown', av1HwEncode: false, recommendedEncoder: 'obs_x264' };
+        if (!gl) return createGpuCapability();
 
         const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
-        if (!debugInfo) return { gpu: 'unknown', av1HwEncode: false, recommendedEncoder: 'obs_x264' };
+        if (!debugInfo) return createGpuCapability();
 
         const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '';
         canvas.remove();
+        const av1Supported = detectAv1Support(renderer);
 
-        // NVIDIA: RTX 40 series (Ada Lovelace) has AV1 encode
-        // RTX 30 series has NVENC H264/H265 but NOT AV1 encode
-        const nvidiaMatch = renderer.match(/RTX\s*(\d{4})/i);
-        if (nvidiaMatch) {
-            const model = parseInt(nvidiaMatch[1], 10);
-            // TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
-            // if (model >= 4000) return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'obs_nvenc_av1_tex' };
-            return { gpu: renderer, av1HwEncode: model >= 4000, recommendedEncoder: 'obs_nvenc_h264_tex' };
-        }
         if (/GTX|NVIDIA|GeForce/i.test(renderer)) {
-            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'obs_nvenc_h264_tex' };
+            return createGpuCapability({
+                gpu: renderer,
+                h264EncoderIds: ['obs_nvenc_h264_tex', 'jim_nvenc', 'obs_x264'],
+                h264Label: 'NVENC',
+                av1Supported,
+            });
         }
 
-        // AMD: RX 7000+ (RDNA 3) has AV1 encode
-        const amdRxMatch = renderer.match(/RX\s*(\d{4})/i);
-        if (amdRxMatch) {
-            const model = parseInt(amdRxMatch[1], 10);
-            // TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
-            // if (model >= 7000) return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'amd_av1' };
-            return { gpu: renderer, av1HwEncode: model >= 7000, recommendedEncoder: 'h264_texture_amf' };
-        }
         if (/AMD|Radeon/i.test(renderer)) {
-            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'h264_texture_amf' };
+            return createGpuCapability({
+                gpu: renderer,
+                h264EncoderIds: ['h264_texture_amf', 'obs_amf_h264', 'obs_x264'],
+                h264Label: 'AMF',
+                av1Supported,
+            });
         }
 
-        // Intel: Arc (Alchemist/Battlemage) has AV1 encode
-        if (/Arc.*[AB]\d{3,}/i.test(renderer) || /Battlemage|Alchemist/i.test(renderer)) {
-            // TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
-            // return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'obs_qsv11_av1' };
-            return { gpu: renderer, av1HwEncode: true, recommendedEncoder: 'obs_x264' };
-        }
         if (/Intel/i.test(renderer)) {
-            return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'obs_x264' };
+            return createGpuCapability({
+                gpu: renderer,
+                h264EncoderIds: ['obs_qsv11', 'obs_x264'],
+                h264Label: 'QSV',
+                av1Supported,
+            });
         }
 
-        return { gpu: renderer, av1HwEncode: false, recommendedEncoder: 'obs_x264' };
+        return createGpuCapability({ gpu: renderer, av1Supported });
     } catch {
-        return { gpu: 'unknown', av1HwEncode: false, recommendedEncoder: 'obs_x264' };
+        return createGpuCapability();
     }
 }
 
 const gpuInfo = detectGpuCapability();
+
+function getObsEncoderSelectionConfig(gpuCapability) {
+    return {
+        encoder: 'h264',
+        preset: 'veryfast',
+        obsEncoderIds: gpuCapability.h264EncoderIds,
+    };
+}
+
+function getObsBitrateKbps(profile, fps) {
+    const fpsKey = fps >= 60 ? 60 : 30;
+    return profile.obsBitrateKbps[fpsKey];
+}
+
+function getObsTuningProfile(profileKey) {
+    return OBS_TUNING_PROFILES[profileKey] || OBS_TUNING_PROFILES.balanced;
+}
+
+function scaleObsBitrateKbps(bitrateKbps, profileKey) {
+    const tuning = getObsTuningProfile(profileKey);
+    return Math.min(
+        OBS_MAX_BITRATE_KBPS,
+        Math.max(1000, Math.round((bitrateKbps * tuning.bitrateMultiplier) / 500) * 500),
+    );
+}
 
 function isLikelyLocalOrigin(origin) {
     try {
@@ -169,7 +239,7 @@ export default function HostView() {
     const [publicShareError, setPublicShareError] = useState('');
     const [hasTurnServer, setHasTurnServer] = useState(false);
     const [relayFlushIntervalMs, setRelayFlushIntervalMs] = useState(300);
-    const [relayVideoBitsPerSecond, setRelayVideoBitsPerSecond] = useState(36_000_000);
+    const [relayVideoBitsPerSecond, setRelayVideoBitsPerSecond] = useState(45_000_000);
     const [relayMaxChunkSize, setRelayMaxChunkSize] = useState(4 * 1024 * 1024);
     const [relayViewerCount, setRelayViewerCount] = useState(0);
     const [error, setError] = useState('');
@@ -188,11 +258,15 @@ export default function HostView() {
     const [fallbackViewerCount, setFallbackViewerCount] = useState(0);
     const [fallbackCodec, setFallbackCodec] = useState(null);
     const [fallbackAvailable, setFallbackAvailable] = useState(false);
+    const [whepViewerCount, setWhepViewerCount] = useState(0);
     const [obsAutoStatus, setObsAutoStatus] = useState(''); // '' | 'configuring' | 'success' | 'error'
     const [obsAutoMessage, setObsAutoMessage] = useState('');
     const [obsPassword, setObsPassword] = useState('');
     const [obsAutoStart, setObsAutoStart] = useState(true);
     const [obsApplySettings, setObsApplySettings] = useState(true);
+    const [obsTryAv1, setObsTryAv1] = useState(false);
+    const [obsTuningProfile, setObsTuningProfile] = useState('balanced');
+    const [hostToken, setHostToken] = useState('');
 
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -226,6 +300,46 @@ export default function HostView() {
     );
     const hasRemoteShareLink = !!shareBaseUrl && !isLikelyLocalOrigin(shareBaseUrl);
     const shouldPrewarmRelay = hasRemoteShareLink && !hasTurnServer;
+
+    const buildObsAutoConfig = useCallback((whipUrl, bearerToken) => {
+        const obsOpts = {
+            whipUrl,
+            bearerToken,
+            password: obsPassword,
+            autoStart: obsAutoStart,
+        };
+
+        if (!obsApplySettings) {
+            return obsOpts;
+        }
+
+        const profile = getQualityProfile(qualityProfile);
+        const encoderConfig = getObsEncoderSelectionConfig(gpuInfo);
+        const tuningProfile = getObsTuningProfile(obsTuningProfile);
+        const bitrateKbps = scaleObsBitrateKbps(
+            getObsBitrateKbps(profile, frameRate),
+            obsTuningProfile,
+        );
+
+        obsOpts.videoSettings = {
+            outputWidth: profile.capture.width,
+            outputHeight: profile.capture.height,
+            fpsNumerator: frameRate,
+            fpsDenominator: 1,
+        };
+        obsOpts.encoderSettings = {
+            bitrateKbps,
+            keyframeIntervalSec: 2,
+            preset: encoderConfig.encoder === 'h264' ? tuningProfile.x264Preset : encoderConfig.preset,
+            encoder: encoderConfig.encoder,
+            obsEncoderIds: encoderConfig.obsEncoderIds,
+            nvencPreset: tuningProfile.nvencPreset,
+            nvencMultipass: tuningProfile.nvencMultipass,
+            tuningLabel: tuningProfile.label,
+        };
+
+        return obsOpts;
+    }, [frameRate, obsApplySettings, obsAutoStart, obsPassword, qualityProfile, obsTuningProfile]);
 
 
     useEffect(() => {
@@ -422,9 +536,11 @@ export default function HostView() {
 
         setIsSharing(false);
         setRoomCode(null);
+        setHostToken('');
         hostTokenRef.current = null;
         videoProducerRef.current = null;
         setViewerCount(0);
+        setWhepViewerCount(0);
         setRelayViewerCount(0);
         setRoomMetrics(null);
         setWhipConnected(false);
@@ -460,6 +576,7 @@ export default function HostView() {
             setRoomMetrics(data || null);
             if (data) {
                 setRelayViewerCount(Math.max(0, Number(data.relayViewerCount) || 0));
+                setWhepViewerCount(Math.max(0, Number(data.whepViewerCount) || 0));
                 if (data.whipConnected !== undefined) setWhipConnected(data.whipConnected);
                 if (data.fallbackViewerCount !== undefined) setFallbackViewerCount(data.fallbackViewerCount);
                 if (data.fallbackCodec) setFallbackCodec(data.fallbackCodec);
@@ -494,6 +611,7 @@ export default function HostView() {
                 setRoomMetrics(metrics || null);
                 if (metrics) {
                     setRelayViewerCount(Math.max(0, Number(metrics.relayViewerCount) || 0));
+                    setWhepViewerCount(Math.max(0, Number(metrics.whepViewerCount) || 0));
                 }
             })
             .catch(() => { });
@@ -614,6 +732,7 @@ export default function HostView() {
 
             const { code, hostToken } = await socketRequest(socket, 'create-room', { allowMediaControl, ingestMode });
             setRoomCode(code);
+            setHostToken(hostToken || '');
             hostTokenRef.current = hostToken || null;
 
             if (ingestMode !== 'obs') {
@@ -684,33 +803,7 @@ export default function HostView() {
                 const whipUrl = `http://${window.location.hostname}:3001/whip/broadcast/${code}`;
                 setObsAutoStatus('configuring');
                 setObsAutoMessage('Connecting to OBS...');
-                const obsOpts = {
-                    whipUrl,
-                    bearerToken: hostToken,
-                    password: obsPassword,
-                    autoStart: obsAutoStart,
-                };
-                if (obsApplySettings) {
-                    const profile = getQualityProfile(qualityProfile);
-                    const bitrateKbps = frameRate >= 60 ? profile.obsBitrateKbps[60] : profile.obsBitrateKbps[30];
-                    obsOpts.videoSettings = {
-                        outputWidth: profile.capture.width,
-                        outputHeight: profile.capture.height,
-                        fpsNumerator: frameRate,
-                        fpsDenominator: 1,
-                    };
-                    obsOpts.encoderSettings = {
-                        bitrateKbps,
-                        keyframeIntervalSec: 2,
-                        // TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
-                        // preset: obsEncoder.startsWith('av1') ? 'speed' : 'ultrafast',
-                        // encoder: obsEncoder.startsWith('av1') ? 'av1' : 'h264',
-                        // obsEncoderId: obsEncoder === 'av1' ? gpuInfo.recommendedEncoder : obsEncoder === 'av1-sw' ? 'obs_svt_av1' : gpuInfo.recommendedEncoder,
-                        preset: 'ultrafast',
-                        obsEncoderId: gpuInfo.recommendedEncoder,
-                    };
-                }
-                configureObsStream(obsOpts).then((result) => {
+                configureObsStream(buildObsAutoConfig(whipUrl, hostToken)).then((result) => {
                     setObsAutoStatus(result.success ? 'success' : 'error');
                     setObsAutoMessage(result.message);
                 });
@@ -725,7 +818,7 @@ export default function HostView() {
             socket.emit('host-stopped');
             cleanup();
         }
-    }, [socket, allowMediaControl, ingestMode, cleanup, selectedProfile, qualityProfile, frameRate, obsPassword, obsAutoStart]);
+    }, [socket, allowMediaControl, ingestMode, cleanup, selectedProfile, qualityProfile, frameRate, buildObsAutoConfig]);
 
     const applyServerConfig = useCallback((data = {}) => {
         if (typeof data.hostUploadMbps === 'number') {
@@ -821,7 +914,7 @@ export default function HostView() {
                                 <p style={{ fontSize: '0.8rem', color: 'var(--text-3)', marginTop: '0.25rem' }}>
                                     {whipConnected ? 'OBS connected' : 'Waiting for OBS...'}
                                     {fallbackCodec ? ` \u00B7 ${fallbackCodec.toUpperCase()}` : ''}
-                                    {viewerCount > 0 ? ` \u00B7 ${viewerCount} viewer${viewerCount !== 1 ? 's' : ''}` : ''}
+                                    {(viewerCount + whepViewerCount) > 0 ? ` \u00B7 ${viewerCount + whepViewerCount} viewer${(viewerCount + whepViewerCount) !== 1 ? 's' : ''}` : ''}
                                 </p>
                             </div>
                         )}
@@ -829,13 +922,30 @@ export default function HostView() {
 
                     <div className="controls">
                         {!isSharing ? (
-                            <button
-                                className="btn btn-primary btn-large"
-                                onClick={handleStartSharing}
-                                disabled={status === 'connecting'}
-                            >
-                                {status === 'connecting' ? 'Connecting...' : 'Start Sharing'}
-                            </button>
+                            <>
+                                <button
+                                    className="btn btn-primary btn-large"
+                                    onClick={handleStartSharing}
+                                    disabled={status === 'connecting'}
+                                >
+                                    {status === 'connecting' ? 'Connecting...' : 'Start Sharing'}
+                                </button>
+                                {ingestMode === 'obs' && obsApplySettings && (
+                                    <div className="mode-toggle" role="group" aria-label="OBS tuning profile">
+                                        {Object.entries(OBS_TUNING_PROFILES).map(([key, tuning]) => (
+                                            <button
+                                                key={key}
+                                                type="button"
+                                                className={obsTuningProfile === key ? 'active' : ''}
+                                                aria-pressed={obsTuningProfile === key}
+                                                onClick={() => setObsTuningProfile(key)}
+                                            >
+                                                {tuning.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </>
                         ) : (
                             <>
                                 <button className="btn btn-danger" onClick={handleStopSharing}>
@@ -947,27 +1057,24 @@ export default function HostView() {
                                             </span>
                                         </label>
                                     </div>
-                                    {obsApplySettings && (
-                                        <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
-                                            <label htmlFor="obsEncoder" className="setting-row-label" style={{ minWidth: '90px', flexShrink: 0 }}>
-                                                Encoder
-                                            </label>
-                                            <select
-                                                id="obsEncoder"
-                                                value="h264"
-                                                disabled
-                                                className="select-input"
-                                            >
-                                                <option value="h264">H.264{gpuInfo.recommendedEncoder.includes('nvenc') ? ' (NVENC)' : gpuInfo.recommendedEncoder.includes('amf') ? ' (AMF)' : ' (x264)'}</option>
-                                                {/* TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
-                                                {gpuInfo.av1HwEncode && (
-                                                    <option value="av1">AV1 (HW — {gpuInfo.gpu.match(/RTX \d{4}|RX \d{4}|Arc [AB]\d+/i)?.[0] || 'GPU'})</option>
-                                                )}
-                                                <option value="av1-sw">AV1 (SVT — software, slow)</option>
-                                                */}
-                                            </select>
-                                        </div>
-                                    )}
+                                    <div className="setting-row setting-row-toggle">
+                                        <input
+                                            type="checkbox"
+                                            id="obsTryAv1"
+                                            checked={obsTryAv1}
+                                            disabled={!gpuInfo.av1Supported}
+                                            onChange={(e) => setObsTryAv1(e.target.checked)}
+                                        />
+                                        <label htmlFor="obsTryAv1">
+                                            Use BYOK TURN (AV1)
+                                            <span className="setting-hint">Improve quality by bringing your own key from a remote TURN server</span>
+                                            {!gpuInfo.av1Supported && (
+                                                <span className="setting-hint">
+                                                    Disabled: AV1 encode was not detected on this host GPU.
+                                                </span>
+                                            )}
+                                        </label>
+                                    </div>
                                     <div className="setting-row setting-row-toggle">
                                         <input
                                             type="checkbox"
@@ -1049,7 +1156,12 @@ export default function HostView() {
                             </div>
                             <div className="viewer-count">
                                 <span className="viewer-icon" style={{ fontSize: '1.2rem', marginRight: '0.2rem' }}>&bull;</span>
-                                <span>{viewerCount} viewer{viewerCount !== 1 ? 's' : ''}</span>
+                                <span>{viewerCount + whepViewerCount} viewer{(viewerCount + whepViewerCount) !== 1 ? 's' : ''}</span>
+                                {whepViewerCount > 0 && (
+                                    <span className="copy-hint" style={{ marginLeft: '0.5rem', fontSize: '0.8rem' }}>
+                                        ({viewerCount} WebRTC · {whepViewerCount} WHEP)
+                                    </span>
+                                )}
                             </div>
                             {roomMetrics && (
                                 <div className="copy-hint" style={{ marginTop: '0.75rem' }}>
@@ -1092,27 +1204,8 @@ export default function HostView() {
                                                     setObsAutoStatus('configuring');
                                                     setObsAutoMessage('Connecting to OBS...');
                                                     const retryOpts = {
-                                                        whipUrl,
-                                                        bearerToken: hostTokenRef.current,
-                                                        password: obsPassword,
-                                                        autoStart: obsAutoStart,
+                                                        ...buildObsAutoConfig(whipUrl, hostTokenRef.current),
                                                     };
-                                                    if (obsApplySettings) {
-                                                        const profile = getQualityProfile(qualityProfile);
-                                                        const bitrateKbps = frameRate >= 60 ? profile.obsBitrateKbps[60] : profile.obsBitrateKbps[30];
-                                                        retryOpts.videoSettings = {
-                                                            outputWidth: profile.capture.width,
-                                                            outputHeight: profile.capture.height,
-                                                            fpsNumerator: frameRate,
-                                                            fpsDenominator: 1,
-                                                        };
-                                                        retryOpts.encoderSettings = {
-                                                            bitrateKbps,
-                                                            keyframeIntervalSec: 2,
-                                                            preset: 'ultrafast',
-                                                            obsEncoderId: gpuInfo.recommendedEncoder,
-                                                        };
-                                                    }
                                                     configureObsStream(retryOpts).then((result) => {
                                                         setObsAutoStatus(result.success ? 'success' : 'error');
                                                         setObsAutoMessage(result.message);
@@ -1137,7 +1230,7 @@ export default function HostView() {
                                             <div style={{ marginBottom: '0.5rem' }}>
                                                 <strong>Bearer Token:</strong>
                                                 <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
-                                                    {hostTokenRef.current}
+                                                    {hostToken}
                                                 </code>
                                             </div>
                                             <div style={{ color: '#aaa' }}>

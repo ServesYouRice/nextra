@@ -43,5 +43,6 @@ cloudflared
 
 # Documentation files
 *.md
+!WHEP_PLAN.md
 !README.md
 !SENATE3.md

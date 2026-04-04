@@ -17,15 +17,16 @@ function createRelay(videoCodec) {
     });
 }
 
-test('FFmpeg relay uses larger probe window for H.264 than AV1', () => {
+test('FFmpeg relay uses the hardened H.264 probe window', () => {
     const h264Relay = createRelay('h264');
-    const av1Relay = createRelay('av1');
-
     const h264Args = h264Relay._buildArgs('test.sdp');
-    const av1Args = av1Relay._buildArgs('test.sdp');
 
-    assert.equal(h264Args[h264Args.indexOf('-probesize') + 1], '5000000');
-    assert.equal(h264Args[h264Args.indexOf('-analyzeduration') + 1], '5000000');
-    assert.equal(av1Args[av1Args.indexOf('-probesize') + 1], '1000000');
-    assert.equal(av1Args[av1Args.indexOf('-analyzeduration') + 1], '1000000');
+    assert.equal(h264Args[h264Args.indexOf('-probesize') + 1], '8000000');
+    assert.equal(h264Args[h264Args.indexOf('-analyzeduration') + 1], '8000000');
+    assert.equal(h264Args[h264Args.indexOf('-muxpreload') + 1], '0');
+    assert.equal(h264Args[h264Args.indexOf('-muxdelay') + 1], '0');
+});
+
+test('FFmpeg relay rejects non-H.264 input', () => {
+    assert.throws(() => createRelay('av1'), /H\.264 input/i);
 });

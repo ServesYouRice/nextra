@@ -78,15 +78,30 @@ export default function WatchView({ initialCode = '' }) {
     const relayUnsupportedWarnedRef = useRef(false);
     const mediaStreamRef = useRef(null);
     const fmp4PlayerRef = useRef(null);
+    const whepPcRef = useRef(null);
+    const whepSessionUrlRef = useRef(null);
     const consumedProducerIdsRef = useRef(new Set());
     const videoConsumerIdsRef = useRef(new Set());
     const producerToConsumerIdRef = useRef(new Map());
+
+    const cleanupWhep = useCallback(() => {
+        if (whepPcRef.current) {
+            try { whepPcRef.current.close(); } catch { }
+            whepPcRef.current = null;
+        }
+        if (whepSessionUrlRef.current) {
+            fetch(whepSessionUrlRef.current, { method: 'DELETE' }).catch(() => {});
+            whepSessionUrlRef.current = null;
+        }
+    }, []);
 
     const cleanupPlayback = useCallback(() => {
         if (fmp4PlayerRef.current) {
             fmp4PlayerRef.current.stop();
             fmp4PlayerRef.current = null;
         }
+
+        cleanupWhep();
 
         if (relaySubscribedRef.current) {
             relaySubscribedRef.current = false;
@@ -762,6 +777,10 @@ export default function WatchView({ initialCode = '' }) {
     const enterFallbackMode = useCallback(() => {
         if (fmp4PlayerRef.current) return; // already in fallback
 
+        cleanupPlayback(); // Tear down any active WebRTC/WHEP connections
+        setPlaybackMode('');
+        setWatching(false);
+
         setFallbackMode(true);
 
         // Signal demand
@@ -784,24 +803,96 @@ export default function WatchView({ initialCode = '' }) {
             fmp4PlayerRef.current = player;
             player.start();
         });
-    }, [socket, codeInput]);
+    }, [socket, codeInput, cleanupPlayback]);
 
-    // Auto-enter fallback mode for OBS ingest rooms (WebRTC won't work through tunnel)
+    // Auto-enter fallback mode for OBS rooms only when behind a tunnel without TURN
     useEffect(() => {
-        if (joined && ingestMode === 'obs' && !fallbackMode && !fmp4PlayerRef.current) {
+        if (joined && ingestMode === 'obs' && !fallbackMode && !fmp4PlayerRef.current
+            && preferRelayFirst && !watching && !watchLoading) {
             enterFallbackMode();
         }
-    }, [joined, ingestMode, fallbackMode, enterFallbackMode]);
+    }, [joined, ingestMode, fallbackMode, enterFallbackMode, preferRelayFirst, watching, watchLoading]);
 
     const exitFallbackMode = useCallback(() => {
         if (fmp4PlayerRef.current) {
             fmp4PlayerRef.current.stop();
             fmp4PlayerRef.current = null;
         }
+        cleanupPlayback(); // Ensure everything from relay is gone before returning
         socket.emit('fallback-consume-stop');
         setFallbackMode(false);
         setFallbackState(null);
-    }, [socket]);
+    }, [socket, cleanupPlayback]);
+
+    const startWhepPlayback = useCallback(async () => {
+        const roomCode = codeInput.trim().toUpperCase().replace(/-/g, '');
+
+        const pc = new RTCPeerConnection({
+            iceServers: hasTurnServer ? undefined : [] // For WHEP we rely on the server's ICE response mostly
+        });
+        whepPcRef.current = pc;
+
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+
+        pc.ontrack = (event) => {
+            if (event.track.kind === 'video') {
+                const stream = new MediaStream([event.track]);
+                playVideoElement(stream).catch(console.warn);
+            } else if (event.track.kind === 'audio') {
+                if (mediaStreamRef.current) {
+                    mediaStreamRef.current.addTrack(event.track);
+                } else {
+                    mediaStreamRef.current = new MediaStream([event.track]);
+                }
+            }
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const response = await fetch(`/whep/watch/${roomCode}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/sdp' },
+            body: offer.sdp
+        });
+
+        if (!response.ok) {
+            throw new Error(`WHEP connection failed: ${response.statusText}`);
+        }
+
+        const answerSdp = await response.text();
+        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+
+        whepSessionUrlRef.current = response.headers.get('Location');
+        
+        setPlaybackMode('whep');
+        setWatching(true);
+        setHostDisconnected(false);
+        setHasProducer(true);
+    }, [codeInput, playVideoElement, hasTurnServer]);
+
+    const handleTryWhep = useCallback(async () => {
+        setError('');
+        setWatchLoading(true);
+        
+        // Use standard WebRTC teardown path
+        exitFallbackMode();
+
+        try {
+            await startWhepPlayback();
+        } catch (err) {
+            console.warn('[Nextra] WHEP fallback failed:', err.message);
+            setError(err.message || 'WHEP connection failed.');
+            cleanupWhep();
+            setWatching(false);
+            
+            // Allow retry of relay mode on error
+            setFallbackMode(true);
+        } finally {
+            setWatchLoading(false);
+        }
+    }, [startWhepPlayback, cleanupWhep, exitFallbackMode]);
 
     const handleWatch = useCallback(async () => {
         setError('');
@@ -1103,24 +1194,19 @@ export default function WatchView({ initialCode = '' }) {
                         </button>
                         
                         {fallbackMode && (
-                            <div style={{
-                                padding: '0.4rem 0.8rem',
-                                background: '#1a1a2e',
-                                borderRadius: '4px',
-                                fontSize: '0.85rem',
-                                marginLeft: '0.5rem',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '0.8rem'
-                            }}>
+                            <div className="relay-mode-pill">
                                 <span>Relay Mode ({fallbackCodec || 'unknown'}) — {fallbackState || 'initializing'}</span>
-                                <button
-                                    onClick={exitFallbackMode}
-                                    style={{ cursor: 'pointer', fontSize: '0.8rem', background: '#2a2a3e', border: '1px solid #444', color: '#ccc', padding: '0.2rem 0.5rem', borderRadius: '3px' }}
-                                >
+                                <button className="btn btn-primary" onClick={exitFallbackMode}>
                                     Try WebRTC
                                 </button>
+                                <button className="btn btn-secondary" onClick={handleTryWhep} disabled={watchLoading}>
+                                    Try WHEP
+                                </button>
                             </div>
+                        )}
+
+                        {watching && playbackMode === 'whep' && (
+                            <div className="media-status">WHEP mode active (standards-based WebRTC).</div>
                         )}
                     </div>
 

@@ -115,19 +115,10 @@ function withObsConnection(password, callback) {
 
 function formatEncoderLabel(encoderId) {
     const labels = {
-        obs_nvenc_av1_tex: 'AV1 NVENC',
-        jim_av1_nvenc: 'AV1 NVENC (legacy)',
         obs_nvenc_h264_tex: 'H.264 NVENC',
         jim_nvenc: 'H.264 NVENC (legacy)',
-        obs_amf_av1: 'AV1 AMF',
-        amd_av1: 'AV1 AMF',
         obs_amf_h264: 'H.264 AMF',
         h264_texture_amf: 'H.264 AMF',
-        obs_qsv_av1: 'AV1 QSV',
-        obs_qsv11_av1: 'AV1 QSV',
-        ffmpeg_svt_av1: 'SVT-AV1',
-        obs_svt_av1: 'SVT-AV1',
-        ffmpeg_aom_av1: 'AOM-AV1',
         obs_x264: 'x264',
     };
 
@@ -146,12 +137,196 @@ function getEncoderKind(encoderId) {
     const normalized = String(encoderId || '').toLowerCase();
 
     if (normalized.includes('x264')) return 'x264';
-    if (normalized.includes('svt')) return 'svt';
-    if (normalized.includes('aom')) return 'aom';
     if (normalized.includes('nvenc') || normalized.startsWith('jim_')) return 'nvenc';
     if (normalized.includes('amf') || normalized.startsWith('amd_')) return 'amf';
     if (normalized.includes('qsv')) return 'qsv';
     return 'other';
+}
+
+function normalizeProfileValue(value) {
+    return value == null ? null : String(value);
+}
+
+function normalizeOutputValue(value) {
+    if (value == null) return null;
+    if (typeof value === 'boolean' || typeof value === 'number') return value;
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    const maybeNumber = Number(value);
+    if (!Number.isNaN(maybeNumber) && String(maybeNumber) === String(value)) {
+        return maybeNumber;
+    }
+    return String(value);
+}
+
+async function getProfileValue(sendRequest, category, name) {
+    const response = await sendRequest('GetProfileParameter', {
+        parameterCategory: category,
+        parameterName: name,
+    });
+
+    if (response.requestStatus?.result !== true) {
+        return null;
+    }
+
+    return normalizeProfileValue(response.responseData?.parameterValue);
+}
+
+async function trySetProfile(sendRequest, category, name, value) {
+    const response = await sendRequest('SetProfileParameter', {
+        parameterCategory: category,
+        parameterName: name,
+        parameterValue: String(value),
+    });
+    return response.requestStatus?.result === true;
+}
+
+async function setAndVerifyProfile(sendRequest, category, name, value) {
+    const wrote = await trySetProfile(sendRequest, category, name, value);
+    if (!wrote) {
+        return { wrote: false, verified: false, actual: null };
+    }
+
+    const actual = await getProfileValue(sendRequest, category, name);
+    const expected = normalizeProfileValue(value);
+    return {
+        wrote: true,
+        verified: actual === expected,
+        actual,
+    };
+}
+
+async function setOneOf(sendRequest, categories, name, value) {
+    for (const category of [...new Set(categories.filter(Boolean))]) {
+        if (await trySetProfile(sendRequest, category, name, value)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function getStreamOutputName(outputs = []) {
+    const outputList = Array.isArray(outputs) ? outputs : [];
+    const serviceOutputs = outputList.filter((output) => output?.outputFlags?.OBS_OUTPUT_SERVICE);
+    return (
+        serviceOutputs.find((output) => output.outputName === 'adv_stream')?.outputName ||
+        serviceOutputs.find((output) => output.outputName === 'simple_stream')?.outputName ||
+        serviceOutputs.find((output) => /stream/i.test(output.outputName || ''))?.outputName ||
+        serviceOutputs[0]?.outputName ||
+        null
+    );
+}
+
+async function getOutputSettings(sendRequest, outputName) {
+    const response = await sendRequest('GetOutputSettings', { outputName });
+    if (response.requestStatus?.result !== true) {
+        return null;
+    }
+    return response.responseData?.outputSettings || {};
+}
+
+const STREAM_OUTPUT_ENCODER_KEYS = new Set([
+    'bitrate',
+    'rate_control',
+    'keyint_sec',
+    'lookahead',
+    'multipass',
+    'preset2',
+    'tune',
+    'profile',
+    'preset',
+    'x264opts',
+]);
+
+async function setAndVerifyOutputSettings(sendRequest, outputName, patch) {
+    const currentSettings = await getOutputSettings(sendRequest, outputName);
+    if (!currentSettings) {
+        return { wrote: false, verified: false, actual: null };
+    }
+
+    const retainedSettings = Object.fromEntries(
+        Object.entries(currentSettings).filter(([key]) => !STREAM_OUTPUT_ENCODER_KEYS.has(key)),
+    );
+    const targetSettings = { ...retainedSettings, ...patch };
+    const setResponse = await sendRequest('SetOutputSettings', {
+        outputName,
+        outputSettings: targetSettings,
+    });
+
+    if (setResponse.requestStatus?.result !== true) {
+        return { wrote: false, verified: false, actual: null };
+    }
+
+    const actual = await getOutputSettings(sendRequest, outputName);
+    if (!actual) {
+        return { wrote: true, verified: false, actual: null };
+    }
+
+    const verified = Object.entries(patch).every(([key, expected]) => (
+        normalizeOutputValue(actual[key]) === normalizeOutputValue(expected)
+    ));
+
+    return { wrote: true, verified, actual };
+}
+
+function buildLiveOutputPatch({ encoderKind, bitrateKbps, keyframeIntervalSec, preset, nvencPreset, nvencMultipass }) {
+    const common = {
+        bitrate: bitrateKbps,
+        rate_control: 'CBR',
+        keyint_sec: keyframeIntervalSec,
+    };
+
+    if (encoderKind === 'nvenc') {
+        return {
+            ...common,
+            lookahead: false,
+            multipass: nvencMultipass,
+            preset2: nvencPreset,
+            tune: 'll',
+            profile: 'high',
+        };
+    }
+
+    if (encoderKind === 'x264') {
+        return {
+            ...common,
+            preset,
+            profile: 'high',
+            tune: 'zerolatency',
+            x264opts: 'bframes=0',
+        };
+    }
+
+    if (encoderKind === 'amf' || encoderKind === 'qsv') {
+        return {
+            ...common,
+            profile: 'high',
+        };
+    }
+
+    return common;
+}
+
+function getSimpleOutputEncoderId(selectedEncoderId, encoderKind) {
+    const explicitMap = {
+        obs_nvenc_h264_tex: 'nvenc',
+        jim_nvenc: 'nvenc',
+        obs_x264: 'x264',
+        obs_amf_h264: 'amd',
+        h264_texture_amf: 'amd',
+        obs_qsv: 'qsv',
+        obs_qsv11: 'qsv',
+    };
+
+    if (explicitMap[selectedEncoderId]) {
+        return explicitMap[selectedEncoderId];
+    }
+
+    if (encoderKind === 'nvenc') return 'nvenc';
+    if (encoderKind === 'x264') return 'x264';
+    if (encoderKind === 'amf') return 'amd';
+    if (encoderKind === 'qsv') return 'qsv';
+    return null;
 }
 
 /**
@@ -169,15 +344,6 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
     return withObsConnection(password, async (sendRequest, done) => {
         const applied = [];
         const warnings = [];
-
-        async function setProfile(category, name, value) {
-            const response = await sendRequest('SetProfileParameter', {
-                parameterCategory: category,
-                parameterName: name,
-                parameterValue: String(value),
-            });
-            return response.requestStatus?.result === true;
-        }
 
         const setResult = await sendRequest('SetStreamServiceSettings', {
             streamServiceType: 'whip_custom',
@@ -206,30 +372,45 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             const {
                 bitrateKbps,
                 keyframeIntervalSec = 2,
-                preset = 'ultrafast',
-                // TODO: OBS WHIP doesn't support AV1 SDP negotiation yet — re-enable when OBS adds support
-                // encoder = 'h264',
+                preset = 'veryfast',
+                encoder = 'h264',
                 obsEncoderIds = [],
                 obsEncoderId,
+                nvencPreset = 'p6',
+                nvencMultipass = 'fullres',
+                tuningLabel = '',
             } = encoderSettings;
-            // const isAv1 = encoder === 'av1';
+            if (encoder !== 'h264') {
+                done({
+                    success: false,
+                    message: `Only H.264 OBS output is supported in this build (received ${encoder}).`,
+                });
+                return;
+            }
             const encoderCandidates = [...new Set([
                 ...obsEncoderIds,
                 ...(obsEncoderId ? [obsEncoderId] : []),
-                // TODO: re-enable AV1 software fallbacks when WHIP supports AV1
-                // ...(isAv1 ? ['ffmpeg_svt_av1', 'obs_svt_av1', 'ffmpeg_aom_av1'] : ['obs_x264']),
                 'obs_x264',
             ].filter(Boolean))];
 
-            if (await setProfile('Output', 'Mode', 'Advanced')) {
+            if ((await setAndVerifyProfile(sendRequest, 'Output', 'Mode', 'Advanced')).verified) {
                 applied.push('Advanced mode');
+            } else {
+                warnings.push('could not verify Advanced output mode');
             }
 
-            const selectedEncoderId = encoderCandidates[0];
+            let selectedEncoderId = null;
+            for (const candidate of encoderCandidates) {
+                const result = await setAndVerifyProfile(sendRequest, 'AdvOut', 'Encoder', candidate);
+                if (result.verified) {
+                    selectedEncoderId = candidate;
+                    break;
+                }
+            }
             const encoderLabel = formatEncoderLabel(selectedEncoderId);
             const encoderKind = getEncoderKind(selectedEncoderId);
 
-            if (!selectedEncoderId || !(await setProfile('AdvOut', 'Encoder', selectedEncoderId))) {
+            if (!selectedEncoderId) {
                 done({
                     success: false,
                     message: `Failed to set OBS stream encoder. Tried: ${encoderCandidates.map(formatEncoderLabel).join(', ')}`,
@@ -238,55 +419,95 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             }
 
             applied.push(encoderLabel);
+            if (tuningLabel) applied.push(`tuning: ${tuningLabel}`);
 
-            await setProfile('AdvOut', 'AudioEncoder', 'ffmpeg_aac');
-            await setProfile('AdvOut', 'AudioBitrate', '192');
-            await setProfile('Audio', 'SampleRate', '48000');
+            await setAndVerifyProfile(sendRequest, 'AdvOut', 'AudioEncoder', 'ffmpeg_aac');
+            await setAndVerifyProfile(sendRequest, 'AdvOut', 'AudioBitrate', '256');
+            await setAndVerifyProfile(sendRequest, 'Audio', 'SampleRate', '48000');
+            await setAndVerifyProfile(sendRequest, 'Stream1', 'IgnoreRecommended', 'true');
+
+            const outputsResponse = await sendRequest('GetOutputList');
+            const streamOutputName = getStreamOutputName(outputsResponse.responseData?.outputs);
+            if (!streamOutputName) {
+                warnings.push('could not find OBS stream output for live encoder settings');
+            }
+
+            const liveOutputPatch = buildLiveOutputPatch({
+                encoderKind,
+                bitrateKbps,
+                keyframeIntervalSec,
+                preset,
+                nvencPreset,
+                nvencMultipass,
+            });
+            if (streamOutputName) {
+                const liveOutputResult = await setAndVerifyOutputSettings(sendRequest, streamOutputName, liveOutputPatch);
+                if (liveOutputResult.verified) {
+                    applied.push(`live output: ${bitrateKbps} kbps`);
+                } else if (liveOutputResult.wrote) {
+                    warnings.push(`OBS kept different live output settings on ${streamOutputName}`);
+                } else {
+                    warnings.push(`failed to update live output settings on ${streamOutputName}`);
+                }
+            }
+
+            const simpleOutputEncoderId = getSimpleOutputEncoderId(selectedEncoderId, encoderKind);
+            await setAndVerifyProfile(sendRequest, 'SimpleOutput', 'VBitrate', bitrateKbps);
+            await setAndVerifyProfile(sendRequest, 'SimpleOutput', 'ABitrate', '256');
+            if (encoderKind === 'nvenc') {
+                await setAndVerifyProfile(sendRequest, 'SimpleOutput', 'NVENCPreset2', nvencPreset);
+                await setAndVerifyProfile(sendRequest, 'SimpleOutput', 'NVENCLookahead', 'false');
+            }
+            if (simpleOutputEncoderId) {
+                const simpleResult = await setAndVerifyProfile(sendRequest, 'SimpleOutput', 'StreamEncoder', simpleOutputEncoderId);
+                if (!simpleResult.verified) {
+                    warnings.push(`could not mirror ${encoderLabel} into OBS Simple output page`);
+                }
+            }
 
             if (encoderKind === 'nvenc') {
                 const section = selectedEncoderId;
-                await setProfile(section, 'bitrate', bitrateKbps);
-                await setProfile(section, 'rate_control', 'CBR');
-                await setProfile(section, 'keyint_sec', keyframeIntervalSec);
-                await setProfile(section, 'lookahead', 'false');
-                await setProfile(section, 'multipass', 'disabled');
-                await setProfile(section, 'preset2', 'p4');
-                await setProfile(section, 'tune', 'll');
-                // TODO: when AV1 WHIP is supported, skip profile for AV1
-                // if (!isAv1) await setProfile(section, 'profile', 'high');
-                await setProfile(section, 'profile', 'high');
+                await setAndVerifyProfile(sendRequest, section, 'bitrate', bitrateKbps);
+                await setAndVerifyProfile(sendRequest, section, 'rate_control', 'CBR');
+                await setAndVerifyProfile(sendRequest, section, 'keyint_sec', keyframeIntervalSec);
+                await setAndVerifyProfile(sendRequest, section, 'lookahead', 'false');
+                await setAndVerifyProfile(sendRequest, section, 'multipass', nvencMultipass);
+                await setAndVerifyProfile(sendRequest, section, 'preset2', nvencPreset);
+                await setAndVerifyProfile(sendRequest, section, 'tune', 'll');
+                await setAndVerifyProfile(sendRequest, section, 'profile', 'high');
                 applied.push(`${bitrateKbps} kbps`);
+                applied.push(`NVENC preset: ${nvencPreset} + ${nvencMultipass} multipass`);
             } else if (encoderKind === 'amf') {
-                // TODO: when AV1 WHIP is supported, use: const section = isAv1 ? 'amd_av1' : 'h264_texture_amf';
-                const section = 'h264_texture_amf';
-                await setProfile(section, 'bitrate', bitrateKbps);
-                await setProfile(section, 'rate_control', 'CBR');
-                await setProfile(section, 'keyint_sec', keyframeIntervalSec);
-                await setProfile(section, 'profile', 'high');
+                const sections = [selectedEncoderId, 'h264_texture_amf', 'obs_amf_h264'];
+                await setOneOf(sendRequest, sections, 'bitrate', bitrateKbps);
+                await setOneOf(sendRequest, sections, 'rate_control', 'CBR');
+                await setOneOf(sendRequest, sections, 'keyint_sec', keyframeIntervalSec);
+                await setOneOf(sendRequest, sections, 'profile', 'high');
                 applied.push(`${bitrateKbps} kbps`);
             } else if (encoderKind === 'qsv') {
-                // TODO: when AV1 WHIP is supported, use: const section = isAv1 ? 'obs_qsv11_av1' : 'obs_qsv11';
-                const section = 'obs_qsv11';
-                await setProfile(section, 'bitrate', bitrateKbps);
-                await setProfile(section, 'rate_control', 'CBR');
-                await setProfile(section, 'keyint_sec', keyframeIntervalSec);
+                const sections = [selectedEncoderId, 'obs_qsv11', 'obs_qsv'];
+                await setOneOf(sendRequest, sections, 'bitrate', bitrateKbps);
+                await setOneOf(sendRequest, sections, 'rate_control', 'CBR');
+                await setOneOf(sendRequest, sections, 'keyint_sec', keyframeIntervalSec);
+                await setOneOf(sendRequest, sections, 'profile', 'high');
                 applied.push(`${bitrateKbps} kbps`);
             } else if (encoderKind === 'x264') {
-                await setProfile('obs_x264', 'bitrate', bitrateKbps);
-                await setProfile('obs_x264', 'rate_control', 'CBR');
-                await setProfile('obs_x264', 'keyint_sec', keyframeIntervalSec);
-                await setProfile('obs_x264', 'preset', preset);
-                await setProfile('obs_x264', 'profile', 'high');
-                await setProfile('obs_x264', 'tune', 'zerolatency');
-                await setProfile('obs_x264', 'x264opts', 'bframes=0');
+                await setAndVerifyProfile(sendRequest, 'obs_x264', 'bitrate', bitrateKbps);
+                await setAndVerifyProfile(sendRequest, 'obs_x264', 'rate_control', 'CBR');
+                await setAndVerifyProfile(sendRequest, 'obs_x264', 'keyint_sec', keyframeIntervalSec);
+                await setAndVerifyProfile(sendRequest, 'obs_x264', 'preset', preset);
+                await setAndVerifyProfile(sendRequest, 'obs_x264', 'profile', 'high');
+                await setAndVerifyProfile(sendRequest, 'obs_x264', 'tune', 'zerolatency');
+                await setAndVerifyProfile(sendRequest, 'obs_x264', 'x264opts', 'bframes=0');
                 applied.push(`${bitrateKbps} kbps`);
+                applied.push(`x264 preset: ${preset}`);
             }
 
             applied.push(`keyframe: ${keyframeIntervalSec}s`);
             applied.push('low-latency tuning');
 
-            await setProfile('Video', 'ColorSpace', '709');
-            await setProfile('Video', 'ColorRange', 'Full');
+            await setAndVerifyProfile(sendRequest, 'Video', 'ColorSpace', '709');
+            await setAndVerifyProfile(sendRequest, 'Video', 'ColorRange', 'Full');
             applied.push('color: 709/Full');
         }
 

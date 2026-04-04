@@ -18,7 +18,7 @@ You can find the exe file in github releases on the right; just run that (potent
 - **WebRTC + Relay playback** — viewers get a direct WebRTC stream when possible, or an fMP4 relay when behind strict NAT / tunnels
 - **Public sharing** — built-in Cloudflare quick tunnel for internet viewers (no port forwarding)
 - **Remote media control** — viewers can pause/play media on the host machine (toggle per room)
-- **GPU-aware encoder selection** — detects NVIDIA, AMD, and Intel GPUs for hardware-accelerated H.264 and AV1 encoding in OBS
+- **GPU-aware encoder selection** — detects NVIDIA, AMD, and Intel GPUs for hardware-accelerated H.264 encoding in OBS
 - **No accounts or sign-ups** — room-code based access
 
 ---
@@ -68,7 +68,8 @@ Use OBS Studio instead of browser screen capture for higher quality, custom scen
 2. Choose your settings:
    - **Resolution / Frame rate** — determines the quality profile and recommended OBS output settings
    - **Apply recommended output settings** — auto-configures OBS encoder, bitrate, keyframe interval, and low-latency tuning via WebSocket
-   - **Encoder** — H.264 (NVENC/AMF/x264) or AV1 (hardware or SVT software), auto-detected from your GPU
+   - **Encoder** — H.264 (NVENC/AMF/QSV/x264), auto-detected from your GPU
+   - **Tuning** — `Balanced`, `Crisp`, or `Max`, which scale bitrate and encoder effort
    - **Auto-start streaming in OBS** — begins streaming immediately after configuration
    - **WS password** — your OBS WebSocket password (leave empty if authentication is disabled in OBS)
 3. Click **Start Sharing**. Nextra connects to OBS over WebSocket, configures everything, and starts the stream.
@@ -93,14 +94,15 @@ When **Apply recommended output settings** is checked, Nextra sends these settin
 
 | Setting | Value |
 |---|---|
-| Output mode | Simple |
-| Video encoder | Based on GPU (NVENC / AMF / x264 / AV1 HW / SVT-AV1) |
-| Video bitrate | Based on quality profile and frame rate |
+| Output mode | Advanced |
+| Video encoder | H.264 via the best available GPU encoder (NVENC / AMF / QSV / x264 fallback) |
+| Video bitrate | Based on selected quality profile, frame rate, and tuning |
 | Keyframe interval | 2 seconds |
-| CPU preset | `ultrafast` (x264) or `speed` (AV1) |
+| Software preset | Based on tuning for x264 |
+| NVENC quality preset | Based on tuning (`p5`/`p6`) with full-resolution multipass |
 | Output resolution | Matches quality profile (1080p / 1440p / 4K) |
 | FPS | 30 or 60 |
-| Audio bitrate | 192 kbps |
+| Audio bitrate | 256 kbps |
 | Audio sample rate | 48 kHz |
 | Rate control | CBR |
 | H.264 profile | High |
@@ -145,13 +147,16 @@ For source/dev:
 
 ## Quality Profiles
 
-| Profile | Resolution | Bitrate (30fps) | Bitrate (60fps) |
+Recommended OBS bitrate targets below are for the stable H.264 relay path. The table shows the `Balanced` baseline; `Crisp` adds about 15% and `Max` adds about 30%, with tuned OBS output capped at 45 Mbps.
+
+| Profile | Resolution | H.264 30fps | H.264 60fps |
 |---|---|---|---|
-| 1080p | 1920x1080 | 8 Mbps | 12 Mbps |
-| 1440p | 2560x1440 | 14 Mbps | 21 Mbps |
-| 4K | 3840x2160 | 24 Mbps | 36 Mbps |
+| 1080p | 1920x1080 | 12 Mbps | 15 Mbps |
+| 1440p | 2560x1440 | 18 Mbps | 24 Mbps |
+| 4K | 3840x2160 | 30 Mbps | 40 Mbps |
 
 - The default profile is auto-detected from the host's screen resolution.
+- Browser/WebRTC profile caps are 1080p `8 / 12 Mbps`, 1440p `14 / 21 Mbps`, and 4K `26 / 36 Mbps`.
 ---
 
 ## Configuration
@@ -191,7 +196,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 |---|---|---|
 | `MAX_VIEWERS_PER_ROOM` | `20` | Max WebRTC viewers per room |
 | `HOST_UPLOAD_MBPS` | `36` | Assumed host upload bandwidth |
-| `RELAY_VIDEO_BITS_PER_SECOND` | `36000000` | Max relay video bitrate |
+| `RELAY_VIDEO_BITS_PER_SECOND` | `45000000` | Max relay video bitrate ceiling |
 | `MAX_CONNECTIONS_PER_IP` | `60` | Rate limit: connections per IP |
 
 See `.env.example` for the full list.
