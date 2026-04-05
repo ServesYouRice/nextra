@@ -426,8 +426,12 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             await setAndVerifyProfile(sendRequest, 'Audio', 'SampleRate', '48000');
             await setAndVerifyProfile(sendRequest, 'Stream1', 'IgnoreRecommended', 'true');
 
-            const outputsResponse = await sendRequest('GetOutputList');
-            const streamOutputName = getStreamOutputName(outputsResponse.responseData?.outputs);
+            let streamOutputName = null;
+            if (await getOutputSettings(sendRequest, 'adv_stream') !== null) {
+                streamOutputName = 'adv_stream';
+            } else if (await getOutputSettings(sendRequest, 'simple_stream') !== null) {
+                streamOutputName = 'simple_stream';
+            }
             if (!streamOutputName) {
                 warnings.push('could not find OBS stream output for live encoder settings');
             }
