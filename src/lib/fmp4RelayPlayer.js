@@ -15,6 +15,7 @@ const BUFFERING_DETECTION_GRACE_MS = 350;
 const READY_STATE_CURRENT_DATA = 2;
 const INIT_RETRY_INTERVAL_MS = 2000;
 const INIT_WAIT_TIMEOUT_MS = 15000;
+const MAX_INIT_TIMEOUT_RETRIES = 3;
 
 /**
  * Create an fMP4 relay player that manages MSE playback from Socket.IO media events.
@@ -48,6 +49,7 @@ export function createFmp4RelayPlayer(opts) {
     let initRetryTimer = null;
     let initTimeoutTimer = null;
     let bufferingTimer = null;
+    let initTimeoutRetries = 0;
 
     function setState(newState) {
         if (newState !== 'buffering') {
@@ -349,6 +351,19 @@ export function createFmp4RelayPlayer(opts) {
         initTimeoutTimer = setTimeout(() => {
             initTimeoutTimer = null;
             if (currentGeneration >= 0 || state === 'stopped') return;
+            if (initTimeoutRetries < MAX_INIT_TIMEOUT_RETRIES) {
+                initTimeoutRetries += 1;
+                console.warn(`[fmp4-player] Relay init segment did not arrive in time; retrying bootstrap (${initTimeoutRetries}/${MAX_INIT_TIMEOUT_RETRIES})`);
+                setState('buffering');
+                armInitTimeout();
+                socket.emit('fallback-consume-start', {}, (response) => {
+                    if (response?.error) {
+                        console.warn('[fmp4-player] fallback-consume-start retry failed:', response.error);
+                    }
+                    requestCurrentInit({ silentUnavailable: true, retryOnUnavailable: true });
+                });
+                return;
+            }
             handleError('Relay init segment did not arrive in time');
         }, INIT_WAIT_TIMEOUT_MS);
     }
@@ -397,6 +412,7 @@ export function createFmp4RelayPlayer(opts) {
         }
 
         clearInitWaiters();
+        initTimeoutRetries = 0;
 
         if (data.generation !== currentGeneration) {
             cleanupMediaSource();
@@ -579,6 +595,7 @@ export function createFmp4RelayPlayer(opts) {
     // ── Public API ──
 
     function start() {
+        initTimeoutRetries = 0;
         setState('connecting');
 
         socket.on('media-init', handleMediaInit);
@@ -597,6 +614,7 @@ export function createFmp4RelayPlayer(opts) {
     function stop() {
         setState('stopped');
         clearInitWaiters();
+        initTimeoutRetries = 0;
         stopLiveSeekTimer();
         cleanupFns.forEach(fn => { try { fn(); } catch { } });
         cleanupFns = [];

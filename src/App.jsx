@@ -21,7 +21,7 @@ function Router() {
     else if (route.startsWith('#watch')) {
         const parts = route.split('/');
         const initialCode = parts[1] || '';
-        view = <WatchView initialCode={initialCode} />;
+        view = <WatchView key={route || '#watch'} initialCode={initialCode} />;
     } else {
         view = <Landing />;
     }
