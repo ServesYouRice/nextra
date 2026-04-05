@@ -5,6 +5,8 @@ import './index.css';
 const HostView = lazy(() => import('./HostView'));
 const WatchView = lazy(() => import('./WatchView'));
 const HowToView = lazy(() => import('./HowToView'));
+const PrivacyView = lazy(() => import('./PrivacyView'));
+const CopyrightView = lazy(() => import('./CopyrightView'));
 
 function Router() {
     const [route, setRoute] = useState(window.location.hash || '');
@@ -18,6 +20,8 @@ function Router() {
     let view;
     if (route === '#host') view = <HostView />;
     else if (route === '#how-to') view = <HowToView />;
+    else if (route === '#privacy') view = <PrivacyView />;
+    else if (route === '#copyright') view = <CopyrightView />;
     else if (route.startsWith('#watch')) {
         const parts = route.split('/');
         const initialCode = parts[1] || '';
@@ -46,6 +50,17 @@ function Router() {
                     {view}
                 </Suspense>
             </main>
+            <footer className="site-footer">
+                <div className="site-footer-inner">
+                    <p className="footer-note">
+                        Self-hosted streaming software. Hosts are responsible for the content they share.
+                    </p>
+                    <nav className="footer-links" aria-label="Legal">
+                        <a href="#privacy" className={route === '#privacy' ? 'active' : ''}>Privacy</a>
+                        <a href="#copyright" className={route === '#copyright' ? 'active' : ''}>Copyright / Contact</a>
+                    </nav>
+                </div>
+            </footer>
         </div>
     );
 }
