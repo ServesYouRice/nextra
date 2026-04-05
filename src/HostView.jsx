@@ -1040,8 +1040,10 @@ export default function HostView() {
                                 </label>
                             </div>
                         </div>
-                            {ingestMode === 'obs' && (
-                                <div className="settings-panel">
+                            <div
+                                className="settings-panel obs-config-panel"
+                                aria-hidden={ingestMode !== 'obs'}
+                            >
                                     <h3>OBS Configuration</h3>
                                     <div className="setting-row setting-row-toggle">
                                         <input
@@ -1103,7 +1105,6 @@ export default function HostView() {
                                         />
                                     </div>
                                 </div>
-                            )}
                         </div>
                     )}
 
