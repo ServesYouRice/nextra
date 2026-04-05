@@ -516,7 +516,8 @@ app.get('/api/metrics', (req, res) => {
     });
 });
 
-const indexHtmlPath = path.join(__dirname, 'dist', 'index.html');
+const distDir = path.join(__dirname, 'dist');
+const indexHtmlPath = path.join(distDir, 'index.html');
 let indexHtmlTemplate = null;
 
 function getIndexHtml(nonce) {
@@ -530,9 +531,21 @@ function getIndexHtml(nonce) {
     return indexHtmlTemplate.replace(/<script/g, `<script nonce="${nonce}"`);
 }
 
-app.use(express.static(path.join(__dirname, 'dist')));
+app.use(express.static(distDir, {
+    index: false,
+    setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.html')) {
+            res.set('Cache-Control', 'no-store, max-age=0');
+            res.set('Pragma', 'no-cache');
+            res.set('Expires', '0');
+        }
+    },
+}));
 app.get('/{*splat}', (req, res) => {
     const html = getIndexHtml(res.locals.cspNonce);
+    res.set('Cache-Control', 'no-store, max-age=0');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
     if (html) {
         res.type('html').send(html);
     } else {

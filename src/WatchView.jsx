@@ -6,20 +6,6 @@ import { createFmp4RelayPlayer } from './lib/fmp4RelayPlayer';
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
 
-
-function getSpatialLayerForPreference(preference) {
-    switch (preference) {
-        case 'low':
-            return 0;
-        case 'balanced':
-            return 1;
-        case 'high':
-        case 'auto':
-        default:
-            return 2;
-    }
-}
-
 function toUint8ArraySync(data) {
     if (!data) return null;
     if (data instanceof ArrayBuffer) return new Uint8Array(data);
@@ -54,7 +40,6 @@ export default function WatchView({ initialCode = '' }) {
     const [isMuted, setIsMuted] = useState(false);
     const [watchLoading, setWatchLoading] = useState(false);
     const [playbackMode, setPlaybackMode] = useState('');
-    const [viewerLayerPreference, setViewerLayerPreference] = useState('high');
     const [hasTurnServer, setHasTurnServer] = useState(false);
     const [ingestMode, setIngestMode] = useState('browser');
     const [fallbackMode, setFallbackMode] = useState(false); // true when using fMP4 fallback
@@ -78,30 +63,16 @@ export default function WatchView({ initialCode = '' }) {
     const relayUnsupportedWarnedRef = useRef(false);
     const mediaStreamRef = useRef(null);
     const fmp4PlayerRef = useRef(null);
-    const whepPcRef = useRef(null);
-    const whepSessionUrlRef = useRef(null);
-    const consumedProducerIdsRef = useRef(new Set());
-    const videoConsumerIdsRef = useRef(new Set());
-    const producerToConsumerIdRef = useRef(new Map());
-
-    const cleanupWhep = useCallback(() => {
-        if (whepPcRef.current) {
-            try { whepPcRef.current.close(); } catch { }
-            whepPcRef.current = null;
-        }
-        if (whepSessionUrlRef.current) {
-            fetch(whepSessionUrlRef.current, { method: 'DELETE' }).catch(() => {});
-            whepSessionUrlRef.current = null;
-        }
-    }, []);
+    const isEnteringFallbackRef = useRef(false);
+    const activePlaybackAttemptRef = useRef(0);
 
     const cleanupPlayback = useCallback(() => {
+        activePlaybackAttemptRef.current += 1;
+
         if (fmp4PlayerRef.current) {
             fmp4PlayerRef.current.stop();
             fmp4PlayerRef.current = null;
         }
-
-        cleanupWhep();
 
         if (relaySubscribedRef.current) {
             relaySubscribedRef.current = false;
@@ -117,11 +88,12 @@ export default function WatchView({ initialCode = '' }) {
             try { consumer.close(); } catch { }
         });
         consumersRef.current = [];
-        consumedProducerIdsRef.current.clear();
-        videoConsumerIdsRef.current.clear();
-        producerToConsumerIdRef.current.clear();
 
         if (recvTransportRef.current) {
+            const transportId = recvTransportRef.current.id;
+            try {
+                socket.emit('close-viewer-transport', { transportId });
+            } catch { }
             try { recvTransportRef.current.close(); } catch { }
             recvTransportRef.current = null;
         }
@@ -186,78 +158,44 @@ export default function WatchView({ initialCode = '' }) {
         }
     }, [syncMutedState]);
 
-    const applyLayerPreference = useCallback(async (consumerId, preference = viewerLayerPreference) => {
-        if (!consumerId) return;
-        const spatialLayer = getSpatialLayerForPreference(preference);
-        await socketRequest(socket, 'set-consumer-layers', { consumerId, spatialLayer }, { timeoutMs: 8000, maxAttempts: 1 });
-    }, [socket, viewerLayerPreference]);
-
-    const consumeProducer = useCallback(async (producerId) => {
-        if (!producerId) return;
-        if (consumedProducerIdsRef.current.has(producerId)) return;
-
+    const consumeProducer = useCallback(async (producerId, attemptId) => {
         const device = deviceRef.current;
-        const recvTransport = recvTransportRef.current;
-        if (!device || !device.loaded || !recvTransport) {
-            throw new Error('Receive transport not ready.');
-        }
+        if (!device || !device.loaded || !recvTransportRef.current) return;
 
-        const { params } = await socketRequest(socket, 'consume', {
+        console.log(`[Nextra] Consuming remote producer ${producerId}...`);
+        const response = await socketRequest(socket, 'consume', {
+            transportId: recvTransportRef.current.id,
             producerId,
             rtpCapabilities: device.rtpCapabilities,
         });
+        const consumerParams = response.params || response;
 
-        const consumer = await recvTransport.consume({
-            id: params.id,
-            producerId: params.producerId,
-            kind: params.kind,
-            rtpParameters: params.rtpParameters,
+        if (activePlaybackAttemptRef.current !== attemptId) return;
+
+        const consumer = await recvTransportRef.current.consume({
+            id: consumerParams.id,
+            producerId: consumerParams.producerId,
+            kind: consumerParams.kind,
+            rtpParameters: consumerParams.rtpParameters,
         });
 
+        if (activePlaybackAttemptRef.current !== attemptId) return;
+
         consumersRef.current.push(consumer);
-        producerToConsumerIdRef.current.set(producerId, consumer.id);
-        if (consumer.kind === 'video') {
-            videoConsumerIdsRef.current.add(consumer.id);
-        }
 
         const existingTracks = mediaStreamRef.current ? mediaStreamRef.current.getTracks() : [];
         const newStream = new MediaStream([...existingTracks, consumer.track]);
         mediaStreamRef.current = newStream;
 
-        consumer.on('transportclose', () => {
-            consumedProducerIdsRef.current.delete(producerId);
-            producerToConsumerIdRef.current.delete(producerId);
-            videoConsumerIdsRef.current.delete(consumer.id);
-        });
-        consumer.on('producerclose', () => {
-            consumedProducerIdsRef.current.delete(producerId);
-            producerToConsumerIdRef.current.delete(producerId);
-            videoConsumerIdsRef.current.delete(consumer.id);
-        });
-
         try {
             await socketRequest(socket, 'consumer-resume', { consumerId: consumer.id });
         } catch (err) {
-            // Cleanup partial state so a retry can re-attempt this producer.
-            producerToConsumerIdRef.current.delete(producerId);
-            videoConsumerIdsRef.current.delete(consumer.id);
             try { consumer.close(); } catch { }
             consumersRef.current = consumersRef.current.filter((c) => c.id !== consumer.id);
             throw err;
         }
-
-        // Only mark consumed AFTER the full chain succeeds.
-        consumedProducerIdsRef.current.add(producerId);
-
-        if (consumer.kind === 'video') {
-            try {
-                await applyLayerPreference(consumer.id);
-            } catch (err) {
-                console.warn('[Nextra] Failed to apply viewer layer preference:', err.message);
-            }
-        }
         await playVideoElement(newStream);
-    }, [socket, playVideoElement, applyLayerPreference]);
+    }, [socket, playVideoElement]);
 
     const isTunnelOrigin = /\.trycloudflare\.com$/i.test(window.location.hostname)
         || /\.cloudflare/i.test(window.location.hostname);
@@ -275,7 +213,8 @@ export default function WatchView({ initialCode = '' }) {
         return () => socket.off('server-config', onServerConfig);
     }, [socket]);
 
-    const startMediasoupPlayback = useCallback(async () => {
+    const startMediasoupPlayback = useCallback(async ({ forceProbe = false } = {}) => {
+        const attemptId = ++activePlaybackAttemptRef.current;
         const device = deviceRef.current;
         if (!device || !device.loaded) {
             throw new Error('Viewer is not ready yet. Rejoin room and try again.');
@@ -305,23 +244,26 @@ export default function WatchView({ initialCode = '' }) {
             throw new Error('Host stream is not ready yet. Try again in a moment.');
         }
 
+        if (activePlaybackAttemptRef.current !== attemptId) return;
+
         for (const producer of producers) {
-            await consumeProducer(producer.producerId);
+            await consumeProducer(producer.producerId, attemptId);
         }
 
         // Wait for the ICE/DTLS connection to actually establish, with a timeout.
         // Tunnel viewers get a very short timeout (2s) — mediasoup WebRTC cannot
         // work through a Cloudflare tunnel (no UDP), so fail fast and fall back
         // to relay playback instead of wasting time on unreachable candidates.
-        const iceTimeoutMs = isTunnelOrigin ? 2000 : 8000;
+        const shouldFailFastForTunnel = isTunnelOrigin && !hasTurnServer && !forceProbe;
+        const iceTimeoutMs = shouldFailFastForTunnel ? 2000 : 8000;
         const connectionState = recvTransport.connectionState;
         if (connectionState !== 'connected') {
             await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     cleanup();
                     reject(new Error(
-                        isTunnelOrigin
-                            ? 'WebRTC could not connect through tunnel (no TURN server configured).'
+                        shouldFailFastForTunnel
+                            ? 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required, or use Relay mode instead.'
                             : 'WebRTC connection timed out (ICE could not connect). Try refreshing or check firewall settings.'
                     ));
                 }, iceTimeoutMs);
@@ -346,13 +288,16 @@ export default function WatchView({ initialCode = '' }) {
             });
         }
 
+        if (activePlaybackAttemptRef.current !== attemptId) return;
+
         setPlaybackMode('mediasoup');
         setWatching(true);
         setHostDisconnected(false);
         setHasProducer(true);
-    }, [socket, consumeProducer, isTunnelOrigin]);
+    }, [socket, consumeProducer, isTunnelOrigin, hasTurnServer]);
 
     const startRelayPlayback = useCallback(async () => {
+        const attemptId = ++activePlaybackAttemptRef.current;
         if (!videoRef.current) throw new Error('Video element not found');
 
         console.log('[Nextra] relay-consume-start…');
@@ -611,13 +556,17 @@ export default function WatchView({ initialCode = '' }) {
 
             console.log('[Nextra] MediaSource ready, waiting for first buffered media…');
             processQueue();
-            await playVideoElement(null);
+            // Do not await here: with MSE the play() promise can stay pending
+            // until enough media is buffered, which races the outer watch timeout.
+            void playVideoElement(null);
             await Promise.race([
                 firstBufferedPromise,
                 new Promise((_, reject) => {
                     setTimeout(() => reject(new Error('Relay connected but no playable media buffered.')), 18000);
                 }),
             ]);
+
+            if (activePlaybackAttemptRef.current !== attemptId) return;
 
             setPlaybackMode('relay');
             setWatching(true);
@@ -663,11 +612,11 @@ export default function WatchView({ initialCode = '' }) {
 
             try {
                 if (producerId) {
-                    await consumeProducer(producerId);
+                    await consumeProducer(producerId, activePlaybackAttemptRef.current);
                 } else {
                     const { producers = [] } = await socketRequest(socket, 'get-producers');
                     for (const producer of producers) {
-                        await consumeProducer(producer.producerId);
+                        await consumeProducer(producer.producerId, activePlaybackAttemptRef.current);
                     }
                 }
             } catch (err) {
@@ -713,7 +662,12 @@ export default function WatchView({ initialCode = '' }) {
             setHostReconnectingReason('');
             setPlaybackMode('');
             setIsMuted(false);
-            setViewerLayerPreference('auto');
+            setIngestMode('browser');
+            setFallbackMode(false);
+            setFallbackState(null);
+            setFallbackCodec(null);
+            setCodecUnsupported(false);
+            setWhipReconnecting(false);
             setError(reason || 'Stream connection failed. Please rejoin the room.');
         };
 
@@ -721,22 +675,16 @@ export default function WatchView({ initialCode = '' }) {
         return () => socket.off('transport-failed', onTransportFailed);
     }, [socket, cleanupPlayback]);
 
-    useEffect(() => {
-        if (!watching || playbackMode !== 'mediasoup') return;
-        if (!videoConsumerIdsRef.current.size) return;
-
-        const consumerIds = Array.from(videoConsumerIdsRef.current);
-        consumerIds.forEach((consumerId) => {
-            applyLayerPreference(consumerId, viewerLayerPreference).catch((err) => {
-                console.warn('[Nextra] Could not update layer preference:', err.message);
-            });
-        });
-    }, [watching, playbackMode, viewerLayerPreference, applyLayerPreference]);
-
     const handleJoin = useCallback(async () => {
         setError('');
         setHostDisconnected(false);
         setHostReconnectingReason('');
+        setIngestMode('browser');
+        setFallbackMode(false);
+        setFallbackState(null);
+        setFallbackCodec(null);
+        setCodecUnsupported(false);
+        setWhipReconnecting(false);
 
         const code = codeInput.trim().toUpperCase().replace(/-/g, '');
         if (!code) {
@@ -775,22 +723,34 @@ export default function WatchView({ initialCode = '' }) {
     }, [socket, codeInput]);
 
     const enterFallbackMode = useCallback(() => {
-        if (fmp4PlayerRef.current) return; // already in fallback
-
-        cleanupPlayback(); // Tear down any active WebRTC/WHEP connections
-        setPlaybackMode('');
-        setWatching(false);
-
+        if (fmp4PlayerRef.current || isEnteringFallbackRef.current) return;
+        isEnteringFallbackRef.current = true;
+        setError('');
         setFallbackMode(true);
+        setFallbackState('connecting');
 
-        // Signal demand
         socket.emit('fallback-consume-start', {}, (response) => {
+            isEnteringFallbackRef.current = false;
+
             if (response?.error) {
                 console.error('[WatchView] Fallback start error:', response.error);
+                setFallbackMode(false);
+                setFallbackState(null);
+                setError(response.error);
                 return;
             }
 
-            // Create and start the fMP4 player
+            cleanupPlayback(); // Tear down WebRTC only after the server knows this viewer is switching
+            setPlaybackMode('');
+            setWatching(false);
+
+            // Provide closure state validity
+            if (!videoRef.current) {
+                setFallbackMode(false);
+                setFallbackState(null);
+                return;
+            }
+
             const roomCode = codeInput.trim().toUpperCase().replace(/-/g, '');
             const player = createFmp4RelayPlayer({
                 videoElement: videoRef.current,
@@ -805,94 +765,45 @@ export default function WatchView({ initialCode = '' }) {
         });
     }, [socket, codeInput, cleanupPlayback]);
 
-    // Auto-enter fallback mode for OBS rooms only when behind a tunnel without TURN
+    // Auto-enter fallback mode for OBS rooms only when media is actually ready.
     useEffect(() => {
         if (joined && ingestMode === 'obs' && !fallbackMode && !fmp4PlayerRef.current
-            && preferRelayFirst && !watching && !watchLoading) {
+            && preferRelayFirst && hasProducer && !whipReconnecting && !watching && !watchLoading) {
             enterFallbackMode();
         }
-    }, [joined, ingestMode, fallbackMode, enterFallbackMode, preferRelayFirst, watching, watchLoading]);
+    }, [joined, ingestMode, fallbackMode, enterFallbackMode, preferRelayFirst, hasProducer, whipReconnecting, watching, watchLoading]);
 
     const exitFallbackMode = useCallback(() => {
         if (fmp4PlayerRef.current) {
             fmp4PlayerRef.current.stop();
             fmp4PlayerRef.current = null;
         }
-        cleanupPlayback(); // Ensure everything from relay is gone before returning
+        isEnteringFallbackRef.current = false;
         socket.emit('fallback-consume-stop');
         setFallbackMode(false);
         setFallbackState(null);
+        cleanupPlayback(); // Ensure everything from relay is gone before returning
     }, [socket, cleanupPlayback]);
 
-    const startWhepPlayback = useCallback(async () => {
-        const roomCode = codeInput.trim().toUpperCase().replace(/-/g, '');
 
-        const pc = new RTCPeerConnection({
-            iceServers: hasTurnServer ? undefined : [] // For WHEP we rely on the server's ICE response mostly
-        });
-        whepPcRef.current = pc;
-
-        pc.addTransceiver('video', { direction: 'recvonly' });
-        pc.addTransceiver('audio', { direction: 'recvonly' });
-
-        pc.ontrack = (event) => {
-            if (event.track.kind === 'video') {
-                const stream = new MediaStream([event.track]);
-                playVideoElement(stream).catch(console.warn);
-            } else if (event.track.kind === 'audio') {
-                if (mediaStreamRef.current) {
-                    mediaStreamRef.current.addTrack(event.track);
-                } else {
-                    mediaStreamRef.current = new MediaStream([event.track]);
-                }
-            }
-        };
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        const response = await fetch(`/whep/watch/${roomCode}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/sdp' },
-            body: offer.sdp
-        });
-
-        if (!response.ok) {
-            throw new Error(`WHEP connection failed: ${response.statusText}`);
-        }
-
-        const answerSdp = await response.text();
-        await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-
-        whepSessionUrlRef.current = response.headers.get('Location');
-        
-        setPlaybackMode('whep');
-        setWatching(true);
-        setHostDisconnected(false);
-        setHasProducer(true);
-    }, [codeInput, playVideoElement, hasTurnServer]);
-
-    const handleTryWhep = useCallback(async () => {
+    const handleTryMediasoup = useCallback(async () => {
         setError('');
         setWatchLoading(true);
-        
-        // Use standard WebRTC teardown path
         exitFallbackMode();
-
+        
         try {
-            await startWhepPlayback();
+            await startMediasoupPlayback({ forceProbe: true });
         } catch (err) {
-            console.warn('[Nextra] WHEP fallback failed:', err.message);
-            setError(err.message || 'WHEP connection failed.');
-            cleanupWhep();
+            console.warn('[Nextra] Mediasoup override failed:', err.message);
+            setError(err.message || 'WebRTC connection failed.');
+            cleanupPlayback();
             setWatching(false);
-            
-            // Allow retry of relay mode on error
-            setFallbackMode(true);
+            setPlaybackMode('');
         } finally {
             setWatchLoading(false);
         }
-    }, [startWhepPlayback, cleanupWhep, exitFallbackMode]);
+    }, [startMediasoupPlayback, cleanupPlayback, exitFallbackMode]);
+
 
     const handleWatch = useCallback(async () => {
         setError('');
@@ -907,12 +818,13 @@ export default function WatchView({ initialCode = '' }) {
             setWatching(false);
             setWatchLoading(false);
             setError('Connection timed out. Check your network or try again.');
-        }, 30000);
+        }, 40000);
 
         if (preferRelayFirst) {
             try {
                 console.log('[Nextra] Starting relay playback first for public tunnel viewer.');
                 await startRelayPlayback();
+                if (watchTimedOut) return;
                 console.log('[Nextra] Relay playback connected.');
             } catch (primaryErr) {
                 if (watchTimedOut) return;
@@ -922,6 +834,7 @@ export default function WatchView({ initialCode = '' }) {
                 try {
                     console.log('[Nextra] Trying mediasoup fallback.');
                     await startMediasoupPlayback();
+                    if (watchTimedOut) return;
                     console.log('[Nextra] Mediasoup fallback connected.');
                 } catch (fallbackErr) {
                     if (watchTimedOut) return;
@@ -942,6 +855,7 @@ export default function WatchView({ initialCode = '' }) {
         try {
             console.log('[Nextra] Starting mediasoup playback…');
             await startMediasoupPlayback();
+            if (watchTimedOut) return;
             console.log('[Nextra] Mediasoup playback connected.');
         } catch (primaryErr) {
             if (watchTimedOut) return;
@@ -951,6 +865,7 @@ export default function WatchView({ initialCode = '' }) {
             try {
                 console.log('[Nextra] Starting relay playback…');
                 await startRelayPlayback();
+                if (watchTimedOut) return;
                 console.log('[Nextra] Relay playback connected.');
             } catch (fallbackErr) {
                 if (watchTimedOut) return;
@@ -995,7 +910,6 @@ export default function WatchView({ initialCode = '' }) {
         setError('');
         setPlaybackMode('');
         setIsMuted(false);
-        setViewerLayerPreference('auto');
         setIngestMode('browser');
         setFallbackMode(false);
         setFallbackState(null);
@@ -1020,7 +934,12 @@ export default function WatchView({ initialCode = '' }) {
             setHostReconnectingReason('');
             setPlaybackMode('');
             setIsMuted(false);
-            setViewerLayerPreference('auto');
+            setIngestMode('browser');
+            setFallbackMode(false);
+            setFallbackState(null);
+            setFallbackCodec(null);
+            setCodecUnsupported(false);
+            setWhipReconnecting(false);
             setError('Connection was lost. Please rejoin the room.');
         };
 
@@ -1037,6 +956,17 @@ export default function WatchView({ initialCode = '' }) {
         cleanupPlayback();
         resetDevice();
     }, [cleanupPlayback, socket]);
+
+    const playbackStatus = fallbackMode
+        ? `Relay Mode (${fallbackCodec || 'unknown'}) - ${fallbackState || 'initializing'}`
+        : watching && playbackMode === 'relay'
+            ? 'Compatibility relay mode active (higher latency).'
+            : watching
+                ? ingestMode === 'obs'
+                    ? 'OBS WebRTC mode active (lowest latency).'
+                    : 'WebRTC mode active (lowest latency).'
+                : '';
+    const renderLegacyStatusBlocks = false;
 
     return (
         <div className="view-container">
@@ -1128,17 +1058,6 @@ export default function WatchView({ initialCode = '' }) {
                         </div>
                     )}
 
-                    {ingestMode === 'obs' && !fallbackMode && !codecUnsupported && (
-                        <button
-                            onClick={enterFallbackMode}
-                            style={{ padding: '0.5rem 1rem', marginTop: '0.5rem', cursor: 'pointer' }}
-                        >
-                            Switch to Relay Mode
-                        </button>
-                    )}
-
-
-
                     <div className="controls">
                         {(watching || fallbackMode) && (
                             <button
@@ -1152,7 +1071,7 @@ export default function WatchView({ initialCode = '' }) {
                             </button>
                         )}
 
-                        {watching && allowMediaControl && (
+                        {(watching || fallbackMode) && allowMediaControl && (
                             <button className="btn btn-secondary" onClick={handleToggleMedia}>
                                 Play/Pause Host Media
                             </button>
@@ -1174,45 +1093,40 @@ export default function WatchView({ initialCode = '' }) {
                             </button>
                         )}
 
-                        {watching && playbackMode === 'mediasoup' && (
-                            <select
-                                className="input-code"
-                                style={{ maxWidth: '220px', height: '44px' }}
-                                value={viewerLayerPreference}
-                                onChange={(evt) => setViewerLayerPreference(evt.target.value)}
-                                title="Viewer quality preference"
-                            >
-                                <option value="auto">Quality: Auto</option>
-                                <option value="high">Quality: High</option>
-                                <option value="balanced">Quality: Balanced</option>
-                                <option value="low">Quality: Low</option>
-                            </select>
+                        {watching && !fallbackMode && playbackMode === 'mediasoup' && ingestMode === 'obs' && !codecUnsupported && (
+                            <button className="btn btn-secondary" onClick={enterFallbackMode}>
+                                Switch to Relay Mode
+                            </button>
+                        )}
+                        {fallbackMode && (
+                            <button className="btn btn-primary" onClick={handleTryMediasoup} disabled={watchLoading}>
+                                Try WebRTC
+                            </button>
                         )}
 
                         <button className="btn btn-outline" onClick={handleLeave}>
                             Leave Room
                         </button>
-                        
-                        {fallbackMode && (
-                            <div className="relay-mode-pill">
+
+                    </div>
+
+                    {renderLegacyStatusBlocks && fallbackMode && (
+                            <div className="media-status">
                                 <span>Relay Mode ({fallbackCodec || 'unknown'}) — {fallbackState || 'initializing'}</span>
-                                <button className="btn btn-primary" onClick={exitFallbackMode}>
-                                    Try WebRTC
-                                </button>
-                                <button className="btn btn-secondary" onClick={handleTryWhep} disabled={watchLoading}>
-                                    Try WHEP
-                                </button>
                             </div>
                         )}
 
-                        {watching && playbackMode === 'whep' && (
-                            <div className="media-status">WHEP mode active (standards-based WebRTC).</div>
-                        )}
-                    </div>
-
-                    {watching && playbackMode === 'relay' && (
+                    {renderLegacyStatusBlocks && watching && playbackMode === 'relay' && (
                         <div className="media-status">Compatibility relay mode active (higher latency).</div>
                     )}
+
+                    {renderLegacyStatusBlocks && watching && !fallbackMode && playbackMode === 'mediasoup' && (
+                        <div className="media-status">
+                            {ingestMode === 'obs' ? 'OBS WebRTC mode active (lowest latency).' : 'WebRTC mode active (lowest latency).'}
+                        </div>
+                    )}
+
+                    {playbackStatus && <div className="media-status">{playbackStatus}</div>}
 
                     {mediaControlStatus && (
                         <div className="media-status">{mediaControlStatus}</div>
