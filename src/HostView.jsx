@@ -800,7 +800,7 @@ export default function HostView() {
 
             // Auto-configure OBS via WebSocket when in OBS mode
             if (ingestMode === 'obs' && code && hostToken) {
-                const whipUrl = `http://${window.location.hostname}:3001/whip/broadcast/${code}`;
+                const whipUrl = `http://${window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname}:3001/whip/broadcast/${code}`;
                 setObsAutoStatus('configuring');
                 setObsAutoMessage('Connecting to OBS...');
                 configureObsStream(buildObsAutoConfig(whipUrl, hostToken)).then((result) => {
@@ -1201,7 +1201,7 @@ export default function HostView() {
                                         <div style={{ fontSize: '0.85rem', marginBottom: '0.75rem' }}>
                                             <button
                                                 onClick={() => {
-                                                    const whipUrl = `http://${window.location.hostname}:3001/whip/broadcast/${roomCode}`;
+                                                    const whipUrl = `http://${window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname}:3001/whip/broadcast/${roomCode}`;
                                                     setObsAutoStatus('configuring');
                                                     setObsAutoMessage('Connecting to OBS...');
                                                     const retryOpts = {
@@ -1225,7 +1225,7 @@ export default function HostView() {
                                             <div style={{ marginBottom: '0.5rem' }}>
                                                 <strong>WHIP URL:</strong>
                                                 <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
-                                                    {`http://${window.location.hostname}:3001/whip/broadcast/${roomCode}`}
+                                                    {`http://${window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname}:3001/whip/broadcast/${roomCode}`}
                                                 </code>
                                             </div>
                                             <div style={{ marginBottom: '0.5rem' }}>
