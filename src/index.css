@@ -22,7 +22,7 @@
   --amber-muted: rgba(229, 168, 75, 0.08);
   --media-stage-max-width: 1680px;
   --host-panel-gap: 1.5rem;
-  --host-side-card-width: 25rem;
+  --host-side-card-width: clamp(24rem, 26vw, 32rem);
   --panel-shell-radius: 18px;
   --radius: 8px;
   --radius-lg: 12px;
@@ -45,7 +45,7 @@ body,
 }
 
 html {
-  overflow-y: scroll;
+  overflow-x: hidden;
 }
 
 body {
@@ -452,6 +452,7 @@ body {
 .settings-wrapper {
   position: relative;
   width: var(--host-side-card-width);
+  overflow: clip;
   transition: width var(--transition-panel);
 }
 
@@ -467,6 +468,7 @@ body {
   position: absolute;
   left: calc(var(--host-side-card-width) + var(--host-panel-gap));
   top: 0;
+  bottom: 0;
   width: var(--host-side-card-width);
   overflow: clip;
   opacity: 0;
@@ -484,6 +486,12 @@ body {
 }
 
 .settings-wrapper.settings-expanded .settings-panel.obs-config-panel {
+  position: relative;
+  left: auto;
+  top: auto;
+  bottom: auto;
+  width: 100%;
+  height: 100%;
   opacity: 1;
   visibility: visible;
   transform: translateX(0) scale(1);
@@ -499,7 +507,110 @@ body {
 }
 
 .settings-wrapper.settings-expanded {
+  display: grid;
+  grid-template-columns: repeat(2, var(--host-side-card-width));
+  align-items: stretch;
+  gap: var(--host-panel-gap);
   width: calc(var(--host-side-card-width) + var(--host-side-card-width) + var(--host-panel-gap));
+}
+
+.settings-wrapper.settings-expanded .settings-panel {
+  width: var(--host-side-card-width);
+  height: 100%;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(7, 8, 12, 0.72);
+  backdrop-filter: blur(10px);
+}
+
+.settings-modal {
+  width: min(680px, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  padding: 1.35rem 1.45rem 1.45rem;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background:
+    radial-gradient(circle at top right, rgba(91, 141, 239, 0.16), transparent 34%),
+    linear-gradient(180deg, rgba(29, 31, 41, 0.98), rgba(19, 20, 27, 0.99));
+  box-shadow:
+    0 34px 80px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.settings-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.settings-modal-eyebrow {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #7481ab;
+  margin-bottom: 0.45rem;
+}
+
+.settings-modal-head h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  color: var(--text-1);
+}
+
+.settings-modal-head p {
+  margin: 0.45rem 0 0;
+  font-size: 0.85rem;
+  color: rgba(236, 236, 240, 0.66);
+  max-width: 42ch;
+  line-height: 1.55;
+}
+
+.settings-modal-close {
+  min-width: 5rem;
+  padding: 0.6rem 0.95rem;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-1);
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition), transform var(--transition);
+}
+
+.settings-modal-close:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
+}
+
+.settings-modal-callout {
+  padding: 0.85rem 0.95rem;
+  border-radius: 14px;
+  border: 1px solid rgba(229, 168, 75, 0.18);
+  background: linear-gradient(180deg, rgba(44, 34, 22, 0.9), rgba(28, 23, 18, 0.94));
+  color: var(--text-2);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.settings-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 0.2rem;
 }
 
 /* ========== MODE TOGGLE ========== */
@@ -1190,13 +1301,20 @@ body {
 
   .settings-wrapper,
   .settings-wrapper.settings-expanded {
+    display: block;
     width: 100%;
+  }
+
+  .settings-wrapper.settings-expanded .settings-panel {
+    width: 100%;
+    height: auto;
   }
 
   .settings-wrapper .settings-panel.obs-config-panel {
     position: relative;
     left: auto;
     top: auto;
+    bottom: auto;
     width: 100%;
     max-height: 0;
     margin-top: -0.6rem;
@@ -1227,5 +1345,33 @@ body {
       transform var(--transition-panel),
       clip-path var(--transition-panel),
       visibility 0s linear 0s;
+  }
+
+  .modal-backdrop {
+    align-items: flex-end;
+    padding: 0.75rem;
+  }
+
+  .settings-modal {
+    width: 100%;
+    max-height: min(92vh, 900px);
+    border-radius: 22px 22px 18px 18px;
+    padding: 1.1rem 1rem 1rem;
+  }
+
+  .settings-modal-head {
+    flex-direction: column;
+  }
+
+  .settings-modal-close {
+    align-self: flex-start;
+  }
+
+  .settings-modal-actions {
+    flex-direction: column-reverse;
+  }
+
+  .settings-modal-actions .btn {
+    width: 100%;
   }
 }
