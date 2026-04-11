@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSocket } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { createFmp4RelayPlayer } from './lib/fmp4RelayPlayer';
+import { isAv1PlaybackUnsupported, shouldPreferRelayPlayback } from './lib/watchPlaybackMode.mjs';
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
@@ -41,7 +42,10 @@ export default function WatchView({ initialCode = '' }) {
     const [watchLoading, setWatchLoading] = useState(false);
     const [playbackMode, setPlaybackMode] = useState('');
     const [hasTurnServer, setHasTurnServer] = useState(false);
+    const [roomHasTurnServer, setRoomHasTurnServer] = useState(false);
     const [ingestMode, setIngestMode] = useState('browser');
+    const [relayAllowed, setRelayAllowed] = useState(true);
+    const [obsVideoCodec, setObsVideoCodec] = useState(null);
     const [fallbackMode, setFallbackMode] = useState(false); // true when using fMP4 fallback
     const [fallbackState, setFallbackState] = useState(null); // 'connecting'|'buffering'|'playing'|'error'|'stopped'
     const [fallbackCodec, setFallbackCodec] = useState(null);
@@ -199,7 +203,12 @@ export default function WatchView({ initialCode = '' }) {
 
     const isTunnelOrigin = /\.trycloudflare\.com$/i.test(window.location.hostname)
         || /\.cloudflare/i.test(window.location.hostname);
-    const preferRelayFirst = isTunnelOrigin && !hasTurnServer;
+    const effectiveTurnAvailability = roomHasTurnServer || hasTurnServer;
+    const preferRelayFirst = shouldPreferRelayPlayback({
+        isTunnelOrigin,
+        hasTurnServer: effectiveTurnAvailability,
+        relayAllowed,
+    });
 
     useEffect(() => {
         const onServerConfig = (data = {}) => {
@@ -254,7 +263,7 @@ export default function WatchView({ initialCode = '' }) {
         // Tunnel viewers get a very short timeout (2s) — mediasoup WebRTC cannot
         // work through a Cloudflare tunnel (no UDP), so fail fast and fall back
         // to relay playback instead of wasting time on unreachable candidates.
-        const shouldFailFastForTunnel = isTunnelOrigin && !hasTurnServer && !forceProbe;
+        const shouldFailFastForTunnel = isTunnelOrigin && !effectiveTurnAvailability && !forceProbe;
         const iceTimeoutMs = shouldFailFastForTunnel ? 2000 : 8000;
         const connectionState = recvTransport.connectionState;
         if (connectionState !== 'connected') {
@@ -263,7 +272,9 @@ export default function WatchView({ initialCode = '' }) {
                     cleanup();
                     reject(new Error(
                         shouldFailFastForTunnel
-                            ? 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required, or use Relay mode instead.'
+                            ? relayAllowed
+                                ? 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required, or use Relay mode instead.'
+                                : 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required for this room.'
                             : 'WebRTC connection timed out (ICE could not connect). Try refreshing or check firewall settings.'
                     ));
                 }, iceTimeoutMs);
@@ -294,7 +305,7 @@ export default function WatchView({ initialCode = '' }) {
         setWatching(true);
         setHostDisconnected(false);
         setHasProducer(true);
-    }, [socket, consumeProducer, isTunnelOrigin, hasTurnServer]);
+    }, [socket, consumeProducer, isTunnelOrigin, effectiveTurnAvailability, relayAllowed]);
 
     const startRelayPlayback = useCallback(async () => {
         const attemptId = ++activePlaybackAttemptRef.current;
@@ -662,7 +673,10 @@ export default function WatchView({ initialCode = '' }) {
             setHostReconnectingReason('');
             setPlaybackMode('');
             setIsMuted(false);
+            setRoomHasTurnServer(false);
             setIngestMode('browser');
+            setRelayAllowed(true);
+            setObsVideoCodec(null);
             setFallbackMode(false);
             setFallbackState(null);
             setFallbackCodec(null);
@@ -680,6 +694,9 @@ export default function WatchView({ initialCode = '' }) {
         setHostDisconnected(false);
         setHostReconnectingReason('');
         setIngestMode('browser');
+        setRelayAllowed(true);
+        setObsVideoCodec(null);
+        setRoomHasTurnServer(false);
         setFallbackMode(false);
         setFallbackState(null);
         setFallbackCodec(null);
@@ -699,17 +716,21 @@ export default function WatchView({ initialCode = '' }) {
             setAllowMediaControl(response.allowMediaControl !== false);
 
             if (response.ingestMode) setIngestMode(response.ingestMode);
+            if (typeof response.relayAllowed === 'boolean') setRelayAllowed(response.relayAllowed);
+            if (typeof response.hasRoomTurnServer === 'boolean') setRoomHasTurnServer(response.hasRoomTurnServer);
+            if (typeof response.obsVideoCodec === 'string') setObsVideoCodec(response.obsVideoCodec);
             if (response.fallbackCodec) setFallbackCodec(response.fallbackCodec);
 
-            // AV1 compatibility check
-            if (response.fallbackCodec === 'av1') {
-                const av1Supported = typeof MediaSource !== 'undefined' &&
-                    MediaSource.isTypeSupported('video/mp4; codecs="av01.0.08M.08"');
-                if (!av1Supported) {
-                    console.warn('[WatchView] AV1 MSE playback not supported in this browser');
-                    setCodecUnsupported(true);
-                }
+            const av1Supported = typeof MediaSource !== 'undefined'
+                && MediaSource.isTypeSupported('video/mp4; codecs="av01.0.08M.08"');
+            const av1Unsupported = isAv1PlaybackUnsupported({
+                obsVideoCodec: response.obsVideoCodec,
+                mediaSourceSupported: av1Supported,
+            });
+            if (av1Unsupported) {
+                console.warn('[WatchView] AV1 playback is not supported in this browser');
             }
+            setCodecUnsupported(av1Unsupported);
 
             const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
             const device = await getDevice();
@@ -859,6 +880,12 @@ export default function WatchView({ initialCode = '' }) {
             console.log('[Nextra] Mediasoup playback connected.');
         } catch (primaryErr) {
             if (watchTimedOut) return;
+            if (!relayAllowed) {
+                cleanupPlayback();
+                setWatching(false);
+                setError(primaryErr.message || 'Failed to start watching.');
+                return;
+            }
             console.warn('[Nextra] Primary playback failed; trying relay fallback:', primaryErr.message);
             cleanupPlayback();
 
@@ -880,7 +907,7 @@ export default function WatchView({ initialCode = '' }) {
                 setWatchLoading(false);
             }
         }
-    }, [cleanupPlayback, preferRelayFirst, startMediasoupPlayback, startRelayPlayback]);
+    }, [cleanupPlayback, preferRelayFirst, relayAllowed, startMediasoupPlayback, startRelayPlayback]);
 
     const handleToggleMedia = useCallback(async () => {
         setMediaControlStatus('');
@@ -910,7 +937,10 @@ export default function WatchView({ initialCode = '' }) {
         setError('');
         setPlaybackMode('');
         setIsMuted(false);
+        setRoomHasTurnServer(false);
         setIngestMode('browser');
+        setRelayAllowed(true);
+        setObsVideoCodec(null);
         setFallbackMode(false);
         setFallbackState(null);
         setFallbackCodec(null);
@@ -934,7 +964,10 @@ export default function WatchView({ initialCode = '' }) {
             setHostReconnectingReason('');
             setPlaybackMode('');
             setIsMuted(false);
+            setRoomHasTurnServer(false);
             setIngestMode('browser');
+            setRelayAllowed(true);
+            setObsVideoCodec(null);
             setFallbackMode(false);
             setFallbackState(null);
             setFallbackCodec(null);
@@ -1052,7 +1085,7 @@ export default function WatchView({ initialCode = '' }) {
                         </div>
                     )}
 
-                    {ingestMode === 'obs' && codecUnsupported && (
+                    {ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported && (
                         <div style={{ padding: '0.75rem 1rem', background: '#3a1a1a', border: '1px solid #662222', borderRadius: '4px', fontSize: '0.85rem', color: '#ff8888', marginTop: '0.5rem' }}>
                             Your browser does not support AV1 playback. The host is streaming in AV1. Fallback playback is not available in this browser.
                         </div>
@@ -1093,7 +1126,7 @@ export default function WatchView({ initialCode = '' }) {
                             </button>
                         )}
 
-                        {watching && !fallbackMode && playbackMode === 'mediasoup' && ingestMode === 'obs' && !codecUnsupported && (
+                        {watching && !fallbackMode && playbackMode === 'mediasoup' && ingestMode === 'obs' && relayAllowed && !codecUnsupported && (
                             <button className="btn btn-secondary" onClick={enterFallbackMode}>
                                 Switch to Relay Mode
                             </button>

@@ -10,6 +10,7 @@ const {
     reclaimHostRoom,
     removeViewer,
     destroyRoom,
+    refreshRoomIceServers,
     startRoomCleanup,
     stopRoomCleanup,
 } = require('../lib/rooms');
@@ -44,6 +45,77 @@ test('reclaimHostRoom swaps host ownership using the host token', { concurrency:
         assert.equal(findRoomByHost('host-new')?.code, room.code);
     } finally {
         destroyRoom(room.code);
+    }
+});
+
+test('AV1 OBS rooms keep room-scoped TURN config in memory and disable relay fallback', { concurrency: false }, () => {
+    const room = createRoom('host-av1', {
+        ingestMode: 'obs',
+        obsAv1Mode: true,
+        turnConfig: {
+            urls: ['turn:room-turn.example.com:3478?transport=udp'],
+            authType: 'secret',
+            secret: 'room-secret',
+        },
+    });
+
+    try {
+        assert.equal(room.obsAv1Mode, true);
+        assert.equal(room.obsVideoCodec, 'av1');
+        assert.equal(room.relayAllowed, false);
+        assert.equal(room.relaySupported, false);
+        assert.equal(room.turnConfig?.secret, 'room-secret');
+        assert.equal(room.hasRoomTurnServer, true);
+        assert.ok(room.iceServers.some((server) => String(server.urls || '').startsWith('turn:')));
+
+        const joinedRoom = joinRoom(room.code, 'viewer-av1');
+        assert.equal(joinedRoom?.hasRoomTurnServer, true);
+    } finally {
+        destroyRoom(room.code);
+    }
+
+    assert.equal(findRoomByCode(room.code), null);
+});
+
+test('room-scoped TURN ICE overrides global TURN config and is cleared with the room', { concurrency: false }, () => {
+    const previousTurnUrl = config.TURN_URL;
+    const previousTurnSecret = config.TURN_SECRET;
+    const previousTurnUsername = config.TURN_USERNAME;
+    const previousTurnCredential = config.TURN_CREDENTIAL;
+
+    config.TURN_URL = 'turn:global-turn.example.com:3478?transport=udp';
+    config.TURN_SECRET = 'global-secret';
+    config.TURN_USERNAME = '';
+    config.TURN_CREDENTIAL = '';
+
+    const room = createRoom('host-room-turn', {
+        ingestMode: 'obs',
+        obsAv1Mode: true,
+        turnConfig: {
+            urls: ['turns:room-turn.example.com:5349?transport=tcp'],
+            authType: 'static',
+            username: 'room-user',
+            credential: 'room-pass',
+        },
+    });
+
+    try {
+        const roomIceServers = refreshRoomIceServers(room);
+        assert.ok(roomIceServers.some((server) => String(server.urls || '').startsWith('turns:room-turn.example.com')));
+        assert.equal(roomIceServers.some((server) => String(server.urls || '').startsWith('turn:global-turn.example.com')), false);
+    } finally {
+        destroyRoom(room.code);
+        config.TURN_URL = previousTurnUrl;
+        config.TURN_SECRET = previousTurnSecret;
+        config.TURN_USERNAME = previousTurnUsername;
+        config.TURN_CREDENTIAL = previousTurnCredential;
+    }
+
+    const plainRoom = createRoom('host-no-turn');
+    try {
+        assert.equal(plainRoom.turnConfig, null);
+    } finally {
+        destroyRoom(plainRoom.code);
     }
 });
 
