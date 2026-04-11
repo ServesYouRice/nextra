@@ -2,6 +2,11 @@
 require('dotenv').config();
 const os = require('os');
 const crypto = require('crypto');
+const {
+    DEFAULT_CLOUDFLARE_TURN_BASE_URL,
+    DEFAULT_CLOUDFLARE_TURN_TTL_SECONDS,
+    hasCloudflareTurnCredentialSource,
+} = require('./lib/cloudflareTurn');
 
 function getLanIp() {
     const ifaces = os.networkInterfaces();
@@ -46,6 +51,95 @@ const explicitPublicIp = (process.env.PUBLIC_IP || '').trim();
 const bindHost = (process.env.BIND_HOST || '127.0.0.1').trim() || '127.0.0.1';
 const rtcListenIp = (process.env.RTC_LISTEN_IP || (bindHost === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1')).trim();
 const isPackagedRuntime = process.env.NEXTRA_PACKAGED === '1';
+const DEFAULT_STUN_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+];
+
+function normalizeTurnUrls(value) {
+    const rawValues = Array.isArray(value)
+        ? value
+        : String(value || '').split(',');
+    return rawValues
+        .map((entry) => String(entry || '').trim())
+        .filter(Boolean);
+}
+
+function normalizeTurnConfig(turnConfig = null) {
+    if (turnConfig == null) return null;
+
+    if (typeof turnConfig === 'string' || Array.isArray(turnConfig)) {
+        return {
+            urls: normalizeTurnUrls(turnConfig),
+            authType: 'secret',
+            secret: '',
+            username: '',
+            credential: '',
+        };
+    }
+
+    if (typeof turnConfig !== 'object') return null;
+
+    const authType = String(turnConfig.authType || '').trim().toLowerCase() === 'static'
+        ? 'static'
+        : 'secret';
+
+    return {
+        urls: normalizeTurnUrls(turnConfig.urls),
+        authType,
+        secret: String(turnConfig.secret || '').trim(),
+        username: String(turnConfig.username || '').trim(),
+        credential: String(turnConfig.credential || '').trim(),
+    };
+}
+
+function hasUsableTurnConfig(turnConfig) {
+    const normalized = normalizeTurnConfig(turnConfig);
+    if (!normalized || normalized.urls.length === 0) return false;
+
+    if (normalized.authType === 'secret') {
+        return normalized.secret.length > 0;
+    }
+
+    return normalized.username.length > 0 && normalized.credential.length > 0;
+}
+
+function buildIceServers(turnConfig = null) {
+    const servers = DEFAULT_STUN_SERVERS.map((server) => ({ ...server }));
+    const normalized = normalizeTurnConfig(turnConfig);
+    if (!hasUsableTurnConfig(normalized)) return servers;
+
+    if (normalized.authType === 'secret') {
+        const ttl = 86400; // 24h in seconds
+        const timestamp = Math.floor(Date.now() / 1000) + ttl;
+        const username = `${timestamp}:nextra`;
+        const credential = crypto
+            .createHmac('sha1', normalized.secret)
+            .update(username)
+            .digest('base64');
+
+        normalized.urls.forEach((url) => {
+            servers.push({ urls: url, username, credential });
+        });
+        return servers;
+    }
+
+    normalized.urls.forEach((url) => {
+        servers.push({
+            urls: url,
+            username: normalized.username,
+            credential: normalized.credential,
+        });
+    });
+    return servers;
+}
+
+function iceServersIncludeTurn(servers = []) {
+    return servers.some((server) => {
+        const urls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
+        return urls.some((url) => typeof url === 'string' && /^turns?:/i.test(url.trim()));
+    });
+}
 
 module.exports = {
     // Server
@@ -93,6 +187,11 @@ module.exports = {
             parameters: { 'packetization-mode': 1, 'profile-level-id': '640032', 'level-asymmetry-allowed': 1 },
         },
         {
+            kind: 'video',
+            mimeType: 'video/AV1',
+            clockRate: 90000,
+        },
+        {
             kind: 'audio',
             mimeType: 'audio/opus',
             clockRate: 48000,
@@ -117,38 +216,45 @@ module.exports = {
     TURN_SECRET: process.env.TURN_SECRET || '',
     TURN_USERNAME: process.env.TURN_USERNAME || '',
     TURN_CREDENTIAL: process.env.TURN_CREDENTIAL || '',
+    CLOUDFLARE_TURN_KEY_ID: (process.env.CLOUDFLARE_TURN_KEY_ID || '').trim(),
+    CLOUDFLARE_TURN_API_TOKEN: (process.env.CLOUDFLARE_TURN_API_TOKEN || '').trim(),
+    CLOUDFLARE_TURN_API_BASE_URL: (process.env.CLOUDFLARE_TURN_API_BASE_URL || DEFAULT_CLOUDFLARE_TURN_BASE_URL).trim(),
+    CLOUDFLARE_TURN_TTL_SECONDS: parseIntEnv(process.env.CLOUDFLARE_TURN_TTL_SECONDS, DEFAULT_CLOUDFLARE_TURN_TTL_SECONDS),
+    DEFAULT_STUN_SERVERS,
+    normalizeTurnConfig,
+    hasUsableTurnConfig,
+    buildIceServers,
+    iceServersIncludeTurn,
+
+    getDefaultTurnConfig() {
+        return normalizeTurnConfig({
+            urls: this.TURN_URL,
+            authType: this.TURN_SECRET ? 'secret' : 'static',
+            secret: this.TURN_SECRET,
+            username: this.TURN_USERNAME,
+            credential: this.TURN_CREDENTIAL,
+        });
+    },
 
     // Generate ICE servers with ephemeral TURN credentials.
     getIceServers() {
-        const servers = [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-        ];
+        return buildIceServers(this.getDefaultTurnConfig());
+    },
 
-        const turnUrl = this.TURN_URL;
-        if (!turnUrl) return servers;
+    hasCloudflareTurnCredentialSource() {
+        return hasCloudflareTurnCredentialSource({
+            keyId: this.CLOUDFLARE_TURN_KEY_ID,
+            apiToken: this.CLOUDFLARE_TURN_API_TOKEN,
+        });
+    },
 
-        const urls = turnUrl.split(',').map((u) => u.trim()).filter(Boolean);
-
-        if (this.TURN_SECRET) {
-            const ttl = 86400; // 24h in seconds
-            const timestamp = Math.floor(Date.now() / 1000) + ttl;
-            const username = `${timestamp}:nextra`;
-            const credential = crypto
-                .createHmac('sha1', this.TURN_SECRET)
-                .update(username)
-                .digest('base64');
-
-            urls.forEach((url) => {
-                servers.push({ urls: url, username, credential });
-            });
-        } else if (this.TURN_USERNAME && this.TURN_CREDENTIAL) {
-            urls.forEach((url) => {
-                servers.push({ urls: url, username: this.TURN_USERNAME, credential: this.TURN_CREDENTIAL });
-            });
-        }
-
-        return servers;
+    getCloudflareTurnCredentialSource() {
+        return {
+            keyId: this.CLOUDFLARE_TURN_KEY_ID,
+            apiToken: this.CLOUDFLARE_TURN_API_TOKEN,
+            baseUrl: this.CLOUDFLARE_TURN_API_BASE_URL,
+            ttlSeconds: this.CLOUDFLARE_TURN_TTL_SECONDS,
+        };
     },
 
     // Bandwidth management

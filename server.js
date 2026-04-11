@@ -19,6 +19,7 @@ const {
 const { startRoomCleanup, stopRoomCleanup, getAllRoomStats } = require('./lib/rooms');
 const { getOrCreateCert } = require('./lib/https');
 const { startCloudflareQuickTunnel } = require('./lib/tunnel');
+const { fetchCloudflareTurnCredentials } = require('./lib/cloudflareTurn');
 const {
     normalizeIp,
     parseForwardedFirst,
@@ -407,6 +408,7 @@ function buildSocketConfigPayload(socket) {
         shareBaseUrl: getShareBaseUrlForSocket(socket),
         lanUrl: shouldExposeLanForSocket(socket) ? getLocalBaseUrl() : '',
         hasTurnServer: getHasTurnServer(),
+        cloudflareTurnAutofillAvailable: config.hasCloudflareTurnCredentialSource(),
         mediaMaxChunkSize: config.MEDIA_MAX_CHUNK_SIZE,
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
@@ -460,12 +462,27 @@ function isMetricsTokenAuthorized(req) {
     return timingSafeStringEqual(provided, expected);
 }
 
+async function loadCloudflareTurnCredentials() {
+    const turnSource = config.getCloudflareTurnCredentialSource();
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => abortController.abort(), 10_000);
+    try {
+        return await fetchCloudflareTurnCredentials({
+            ...turnSource,
+            signal: abortController.signal,
+        });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 app.get('/api/config', (req, res) => {
     res.json({
         hostUploadMbps: config.HOST_UPLOAD_MBPS,
         shareBaseUrl: getShareBaseUrl(req),
         lanUrl: shouldExposeLanUrl(req) ? getLocalBaseUrl() : '',
         hasTurnServer: getHasTurnServer(),
+        cloudflareTurnAutofillAvailable: config.hasCloudflareTurnCredentialSource(),
         iceServers: config.getIceServers(),
         mediaMaxChunkSize: config.MEDIA_MAX_CHUNK_SIZE,
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
@@ -475,6 +492,33 @@ app.get('/api/config', (req, res) => {
         whipEnabled: config.WHIP_ENABLED,
         whepEnabled: config.WHEP_ENABLED,
     });
+});
+
+app.get('/api/cloudflare-turn-credentials', async (req, res) => {
+    if (!isLocalClientIp(getRequestClientIp(req))) {
+        res.status(403).json({ error: 'Cloudflare TURN autofill is only available to local or LAN hosts.' });
+        return;
+    }
+
+    if (!config.hasCloudflareTurnCredentialSource()) {
+        res.status(404).json({ error: 'Cloudflare TURN autofill is not configured on this server.' });
+        return;
+    }
+
+    try {
+        const result = await loadCloudflareTurnCredentials();
+        res.set('Cache-Control', 'no-store');
+        res.json({
+            provider: 'cloudflare',
+            ttlSeconds: result.ttlSeconds,
+            turnConfig: result.turnConfig,
+        });
+    } catch (err) {
+        const statusCode = err?.name === 'AbortError' ? 504 : 502;
+        res.status(statusCode).json({
+            error: err?.message || 'Failed to fetch Cloudflare TURN credentials.',
+        });
+    }
 });
 
 app.get('/api/metrics', (req, res) => {

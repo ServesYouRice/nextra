@@ -33,6 +33,8 @@ const OBS_TUNING_PROFILES = {
         nvencMultipass: 'fullres',
     },
 };
+const OBS_WS_PASSWORD_STORAGE_KEY = 'nextra.obsWsPassword.v1';
+const BYOK_TURN_SESSION_STORAGE_KEY = 'nextra.byokTurnSession.v1';
 
 const QUALITY_PROFILES = {
     '4k': {
@@ -100,6 +102,8 @@ function createGpuCapability(overrides = {}) {
         gpu: 'unknown',
         h264EncoderIds: ['obs_x264'],
         h264Label: 'x264',
+        av1EncoderIds: [],
+        av1Label: 'AV1',
         av1Supported: false,
         ...overrides,
     };
@@ -145,6 +149,8 @@ function detectGpuCapability() {
                 gpu: renderer,
                 h264EncoderIds: ['obs_nvenc_h264_tex', 'jim_nvenc', 'obs_x264'],
                 h264Label: 'NVENC',
+                av1EncoderIds: av1Supported ? ['obs_nvenc_av1_tex', 'jim_av1_nvenc', 'ffmpeg_nvenc_av1'] : [],
+                av1Label: 'NVENC AV1',
                 av1Supported,
             });
         }
@@ -154,6 +160,8 @@ function detectGpuCapability() {
                 gpu: renderer,
                 h264EncoderIds: ['h264_texture_amf', 'obs_amf_h264', 'obs_x264'],
                 h264Label: 'AMF',
+                av1EncoderIds: av1Supported ? ['av1_texture_amf', 'obs_amf_av1', 'amd_amf_av1'] : [],
+                av1Label: 'AMF AV1',
                 av1Supported,
             });
         }
@@ -163,6 +171,8 @@ function detectGpuCapability() {
                 gpu: renderer,
                 h264EncoderIds: ['obs_qsv11', 'obs_x264'],
                 h264Label: 'QSV',
+                av1EncoderIds: av1Supported ? ['obs_qsv11_av1', 'obs_qsv_av1'] : [],
+                av1Label: 'QSV AV1',
                 av1Supported,
             });
         }
@@ -175,11 +185,21 @@ function detectGpuCapability() {
 
 const gpuInfo = detectGpuCapability();
 
-function getObsEncoderSelectionConfig(gpuCapability) {
+function getObsEncoderSelectionConfig(gpuCapability, { preferAv1 = false } = {}) {
+    if (preferAv1) {
+        return {
+            videoCodec: 'av1',
+            preset: 'p5',
+            obsEncoderIds: gpuCapability.av1EncoderIds,
+            label: gpuCapability.av1Label || 'AV1',
+        };
+    }
+
     return {
-        encoder: 'h264',
+        videoCodec: 'h264',
         preset: 'veryfast',
         obsEncoderIds: gpuCapability.h264EncoderIds,
+        label: gpuCapability.h264Label || 'H.264',
     };
 }
 
@@ -225,8 +245,106 @@ function formatBytes(value) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function parseTurnUrlInput(value) {
+    return String(value || '')
+        .split(/[\n,]+/)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+}
+
+function buildByokTurnConfig({ urlsInput, authType, secret, username, credential }) {
+    const urls = parseTurnUrlInput(urlsInput);
+    if (urls.length === 0) {
+        throw new Error('AV1 mode requires at least one TURN URL.');
+    }
+
+    if (authType === 'static') {
+        if (!String(username || '').trim() || !String(credential || '').trim()) {
+            throw new Error('AV1 mode requires a TURN username and credential.');
+        }
+        return {
+            urls,
+            authType: 'static',
+            username: String(username || '').trim(),
+            credential: String(credential || '').trim(),
+        };
+    }
+
+    if (!String(secret || '').trim()) {
+        throw new Error('AV1 mode requires a TURN shared secret.');
+    }
+
+    return {
+        urls,
+        authType: 'secret',
+        secret: String(secret || '').trim(),
+    };
+}
+
+function loadStoredObsPassword() {
+    try {
+        return window.localStorage.getItem(OBS_WS_PASSWORD_STORAGE_KEY) || '';
+    } catch {
+        return '';
+    }
+}
+
+function persistObsPassword(value) {
+    try {
+        const normalized = String(value || '');
+        if (normalized) {
+            window.localStorage.setItem(OBS_WS_PASSWORD_STORAGE_KEY, normalized);
+        } else {
+            window.localStorage.removeItem(OBS_WS_PASSWORD_STORAGE_KEY);
+        }
+    } catch {
+        // Ignore storage write failures.
+    }
+}
+
+function loadStoredByokTurnSession() {
+    try {
+        const raw = window.sessionStorage.getItem(BYOK_TURN_SESSION_STORAGE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        return {
+            urls: String(parsed.urls || ''),
+            authType: parsed.authType === 'static' ? 'static' : 'secret',
+            secret: String(parsed.secret || ''),
+            username: String(parsed.username || ''),
+            credential: String(parsed.credential || ''),
+        };
+    } catch {
+        return null;
+    }
+}
+
+function clearStoredByokTurnSession() {
+    try {
+        window.sessionStorage.removeItem(BYOK_TURN_SESSION_STORAGE_KEY);
+    } catch {
+        // Ignore storage write failures.
+    }
+}
+
+function persistByokTurnSession({ urls, authType, secret, username, credential }) {
+    try {
+        window.sessionStorage.setItem(BYOK_TURN_SESSION_STORAGE_KEY, JSON.stringify({
+            urls: String(urls || ''),
+            authType: authType === 'static' ? 'static' : 'secret',
+            secret: String(secret || ''),
+            username: String(username || ''),
+            credential: String(credential || ''),
+        }));
+    } catch {
+        // Ignore storage write failures.
+    }
+}
+
 export default function HostView() {
     const socket = useContext(SocketContext);
+    const [storedByokTurnSession] = useState(() => loadStoredByokTurnSession());
     const [roomCode, setRoomCode] = useState(null);
     const [isSharing, setIsSharing] = useState(false);
     const [viewerCount, setViewerCount] = useState(0);
@@ -256,16 +374,26 @@ export default function HostView() {
     const [ingestMode, setIngestMode] = useState('browser');
     const [whipConnected, setWhipConnected] = useState(false);
     const [fallbackViewerCount, setFallbackViewerCount] = useState(0);
-    const [fallbackCodec, setFallbackCodec] = useState(null);
+    const [obsVideoCodec, setObsVideoCodec] = useState(null);
     const [fallbackAvailable, setFallbackAvailable] = useState(false);
+    const [roomHasTurnServer, setRoomHasTurnServer] = useState(false);
     const [whepViewerCount, setWhepViewerCount] = useState(0);
+    const [cloudflareTurnAutofillAvailable, setCloudflareTurnAutofillAvailable] = useState(false);
+    const [cloudflareTurnAutofillLoading, setCloudflareTurnAutofillLoading] = useState(false);
     const [obsAutoStatus, setObsAutoStatus] = useState(''); // '' | 'configuring' | 'success' | 'error'
     const [obsAutoMessage, setObsAutoMessage] = useState('');
-    const [obsPassword, setObsPassword] = useState('');
+    const [obsPassword, setObsPassword] = useState(() => loadStoredObsPassword());
     const [obsAutoStart, setObsAutoStart] = useState(true);
     const [obsApplySettings, setObsApplySettings] = useState(true);
     const [obsTryAv1, setObsTryAv1] = useState(false);
     const [obsTuningProfile, setObsTuningProfile] = useState('balanced');
+    const [byokTurnUrls, setByokTurnUrls] = useState(() => storedByokTurnSession?.urls || '');
+    const [byokTurnAuthType, setByokTurnAuthType] = useState(() => storedByokTurnSession?.authType || 'secret');
+    const [byokTurnSecret, setByokTurnSecret] = useState(() => storedByokTurnSession?.secret || '');
+    const [byokTurnUsername, setByokTurnUsername] = useState(() => storedByokTurnSession?.username || '');
+    const [byokTurnCredential, setByokTurnCredential] = useState(() => storedByokTurnSession?.credential || '');
+    const [saveByokTurnForSession, setSaveByokTurnForSession] = useState(() => storedByokTurnSession != null);
+    const [showByokTurnModal, setShowByokTurnModal] = useState(false);
     const [hostToken, setHostToken] = useState('');
 
     const videoRef = useRef(null);
@@ -298,8 +426,11 @@ export default function HostView() {
         150,
         Math.min(relayFlushIntervalMs, Math.floor(relayFlushThresholdMs / 2)),
     );
+    const obsAv1Mode = ingestMode === 'obs' && obsTryAv1;
     const hasRemoteShareLink = !!shareBaseUrl && !isLikelyLocalOrigin(shareBaseUrl);
-    const shouldPrewarmRelay = hasRemoteShareLink && !hasTurnServer;
+    const effectiveTurnAvailability = obsAv1Mode ? roomHasTurnServer : hasTurnServer;
+    const shouldPrewarmRelay = ingestMode !== 'obs' && hasRemoteShareLink && !effectiveTurnAvailability;
+    const byokTurnSessionHint = 'Keeps TURN credentials in session storage so they survive reloads and are cleared when the tab or window closes.';
 
     const buildObsAutoConfig = useCallback((whipUrl, bearerToken) => {
         const obsOpts = {
@@ -314,7 +445,7 @@ export default function HostView() {
         }
 
         const profile = getQualityProfile(qualityProfile);
-        const encoderConfig = getObsEncoderSelectionConfig(gpuInfo);
+        const encoderConfig = getObsEncoderSelectionConfig(gpuInfo, { preferAv1: obsAv1Mode });
         const tuningProfile = getObsTuningProfile(obsTuningProfile);
         const bitrateKbps = scaleObsBitrateKbps(
             getObsBitrateKbps(profile, frameRate),
@@ -330,8 +461,8 @@ export default function HostView() {
         obsOpts.encoderSettings = {
             bitrateKbps,
             keyframeIntervalSec: 2,
-            preset: encoderConfig.encoder === 'h264' ? tuningProfile.x264Preset : encoderConfig.preset,
-            encoder: encoderConfig.encoder,
+            preset: encoderConfig.videoCodec === 'h264' ? tuningProfile.x264Preset : encoderConfig.preset,
+            encoder: encoderConfig.videoCodec,
             obsEncoderIds: encoderConfig.obsEncoderIds,
             nvencPreset: tuningProfile.nvencPreset,
             nvencMultipass: tuningProfile.nvencMultipass,
@@ -339,7 +470,55 @@ export default function HostView() {
         };
 
         return obsOpts;
-    }, [frameRate, obsApplySettings, obsAutoStart, obsPassword, qualityProfile, obsTuningProfile]);
+    }, [frameRate, obsApplySettings, obsAutoStart, obsAv1Mode, obsPassword, qualityProfile, obsTuningProfile]);
+
+    useEffect(() => {
+        if (obsTryAv1 && !obsApplySettings) {
+            setObsApplySettings(true);
+        }
+    }, [obsTryAv1, obsApplySettings]);
+
+    useEffect(() => {
+        persistObsPassword(obsPassword);
+    }, [obsPassword]);
+
+    useEffect(() => {
+        if (!saveByokTurnForSession) {
+            clearStoredByokTurnSession();
+            return;
+        }
+        persistByokTurnSession({
+            urls: byokTurnUrls,
+            authType: byokTurnAuthType,
+            secret: byokTurnSecret,
+            username: byokTurnUsername,
+            credential: byokTurnCredential,
+        });
+    }, [
+        saveByokTurnForSession,
+        byokTurnUrls,
+        byokTurnAuthType,
+        byokTurnSecret,
+        byokTurnUsername,
+        byokTurnCredential,
+    ]);
+
+    useEffect(() => {
+        if (ingestMode !== 'obs' || !obsTryAv1) {
+            setShowByokTurnModal(false);
+        }
+    }, [ingestMode, obsTryAv1]);
+
+    useEffect(() => {
+        if (!showByokTurnModal) return undefined;
+        const onKeyDown = (event) => {
+            if (event.key === 'Escape') {
+                setShowByokTurnModal(false);
+            }
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [showByokTurnModal]);
 
 
     useEffect(() => {
@@ -545,8 +724,12 @@ export default function HostView() {
         setRoomMetrics(null);
         setWhipConnected(false);
         setFallbackViewerCount(0);
-        setFallbackCodec(null);
+        setObsVideoCodec(null);
         setFallbackAvailable(false);
+        setRoomHasTurnServer(false);
+        setObsAutoStatus('');
+        setObsAutoMessage('');
+        setShowByokTurnModal(false);
         setStatus('idle');
         resetDevice();
     }, [stopRelayRecorder]);
@@ -579,8 +762,9 @@ export default function HostView() {
                 setWhepViewerCount(Math.max(0, Number(data.whepViewerCount) || 0));
                 if (data.whipConnected !== undefined) setWhipConnected(data.whipConnected);
                 if (data.fallbackViewerCount !== undefined) setFallbackViewerCount(data.fallbackViewerCount);
-                if (data.fallbackCodec) setFallbackCodec(data.fallbackCodec);
+                if (typeof data.obsVideoCodec === 'string') setObsVideoCodec(data.obsVideoCodec);
                 if (data.fallbackAvailable !== undefined) setFallbackAvailable(data.fallbackAvailable);
+                if (typeof data.hasRoomTurnServer === 'boolean') setRoomHasTurnServer(data.hasRoomTurnServer);
             }
         };
 
@@ -612,6 +796,11 @@ export default function HostView() {
                 if (metrics) {
                     setRelayViewerCount(Math.max(0, Number(metrics.relayViewerCount) || 0));
                     setWhepViewerCount(Math.max(0, Number(metrics.whepViewerCount) || 0));
+                    if (metrics.whipConnected !== undefined) setWhipConnected(metrics.whipConnected);
+                    if (metrics.fallbackViewerCount !== undefined) setFallbackViewerCount(metrics.fallbackViewerCount);
+                    if (typeof metrics.obsVideoCodec === 'string') setObsVideoCodec(metrics.obsVideoCodec);
+                    if (metrics.fallbackAvailable !== undefined) setFallbackAvailable(metrics.fallbackAvailable);
+                    if (typeof metrics.hasRoomTurnServer === 'boolean') setRoomHasTurnServer(metrics.hasRoomTurnServer);
                 }
             })
             .catch(() => { });
@@ -688,6 +877,25 @@ export default function HostView() {
         setStatus('connecting');
 
         try {
+            let roomTurnConfig = null;
+            if (obsAv1Mode) {
+                try {
+                    roomTurnConfig = buildByokTurnConfig({
+                        urlsInput: byokTurnUrls,
+                        authType: byokTurnAuthType,
+                        secret: byokTurnSecret,
+                        username: byokTurnUsername,
+                        credential: byokTurnCredential,
+                    });
+                } catch (turnError) {
+                    setShowByokTurnModal(true);
+                    throw turnError;
+                }
+                if (!obsApplySettings) {
+                    throw new Error('AV1 mode requires OBS auto-configuration so the encoder can be switched to AV1.');
+                }
+            }
+
             if (ingestMode !== 'obs') {
                 const userAgent = navigator.userAgent || '';
                 const isChromiumBrand = !!navigator.userAgentData?.brands?.some((b) => /Chrom/i.test(b.brand));
@@ -730,10 +938,22 @@ export default function HostView() {
                 await socketRequest(socket, 'leave-room', {}, { timeoutMs: 5000, maxAttempts: 1 });
             } catch { }
 
-            const { code, hostToken } = await socketRequest(socket, 'create-room', { allowMediaControl, ingestMode });
+            const {
+                code,
+                hostToken,
+                obsVideoCodec: createdObsVideoCodec,
+                hasRoomTurnServer: createdRoomHasTurnServer,
+            } = await socketRequest(socket, 'create-room', {
+                allowMediaControl,
+                ingestMode,
+                obsAv1Mode,
+                turnConfig: roomTurnConfig,
+            });
             setRoomCode(code);
             setHostToken(hostToken || '');
             hostTokenRef.current = hostToken || null;
+            setObsVideoCodec(createdObsVideoCodec || null);
+            setRoomHasTurnServer(!!createdRoomHasTurnServer);
 
             if (ingestMode !== 'obs') {
                 const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
@@ -803,10 +1023,12 @@ export default function HostView() {
                 const whipUrl = `http://${window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname}:3001/whip/broadcast/${code}`;
                 setObsAutoStatus('configuring');
                 setObsAutoMessage('Connecting to OBS...');
-                configureObsStream(buildObsAutoConfig(whipUrl, hostToken)).then((result) => {
-                    setObsAutoStatus(result.success ? 'success' : 'error');
-                    setObsAutoMessage(result.message);
-                });
+                const result = await configureObsStream(buildObsAutoConfig(whipUrl, hostToken));
+                setObsAutoStatus(result.success ? 'success' : 'error');
+                setObsAutoMessage(result.message);
+                if (obsAv1Mode && !result.success) {
+                    throw new Error(result.message);
+                }
             }
         } catch (err) {
             console.error('Start sharing failed:', err);
@@ -818,7 +1040,63 @@ export default function HostView() {
             socket.emit('host-stopped');
             cleanup();
         }
-    }, [socket, allowMediaControl, ingestMode, cleanup, selectedProfile, qualityProfile, frameRate, buildObsAutoConfig]);
+    }, [
+        socket,
+        allowMediaControl,
+        ingestMode,
+        cleanup,
+        selectedProfile,
+        qualityProfile,
+        frameRate,
+        buildObsAutoConfig,
+        byokTurnUrls,
+        byokTurnAuthType,
+        byokTurnSecret,
+        byokTurnUsername,
+        byokTurnCredential,
+        obsApplySettings,
+        obsAv1Mode,
+    ]);
+
+    const handleAutofillCloudflareTurn = useCallback(async () => {
+        setError('');
+        setCloudflareTurnAutofillLoading(true);
+        try {
+            const response = await fetch('/api/cloudflare-turn-credentials', {
+                method: 'GET',
+                headers: {
+                    accept: 'application/json',
+                },
+                credentials: 'same-origin',
+            });
+
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch {
+                payload = null;
+            }
+
+            if (!response.ok) {
+                throw new Error(payload?.error || 'Cloudflare TURN autofill request failed.');
+            }
+
+            const turnConfig = payload?.turnConfig;
+            if (!turnConfig || !Array.isArray(turnConfig.urls) || !turnConfig.username || !turnConfig.credential) {
+                throw new Error('Server returned an invalid TURN credential payload.');
+            }
+
+            setByokTurnAuthType('static');
+            setByokTurnUrls(turnConfig.urls.join('\n'));
+            setByokTurnUsername(turnConfig.username);
+            setByokTurnCredential(turnConfig.credential);
+            setByokTurnSecret('');
+        } catch (err) {
+            setError(`Failed to autofill Cloudflare TURN: ${err.message}`);
+        } finally {
+            setCloudflareTurnAutofillLoading(false);
+        }
+    }, []);
 
     const applyServerConfig = useCallback((data = {}) => {
         if (typeof data.hostUploadMbps === 'number') {
@@ -840,6 +1118,9 @@ export default function HostView() {
         }
         if (typeof data.hasTurnServer === 'boolean') {
             setHasTurnServer(data.hasTurnServer);
+        }
+        if (typeof data.cloudflareTurnAutofillAvailable === 'boolean') {
+            setCloudflareTurnAutofillAvailable(data.cloudflareTurnAutofillAvailable);
         }
         if (typeof data.relayFlushIntervalMs === 'number' && data.relayFlushIntervalMs >= 100) {
             setRelayFlushIntervalMs(data.relayFlushIntervalMs);
@@ -880,6 +1161,16 @@ export default function HostView() {
         setTimeout(() => setCopied(false), 2000);
     }, [roomCode]);
 
+    const handleObsTryAv1Change = useCallback((enabled) => {
+        setObsTryAv1(enabled);
+        if (enabled) {
+            setObsApplySettings(true);
+            setShowByokTurnModal(true);
+            return;
+        }
+        setShowByokTurnModal(false);
+    }, []);
+
     const localWatchLink = roomCode ? `${lanBaseUrl}/#watch/${roomCode}` : '';
     const publicWatchLink = roomCode && shareBaseUrl ? `${shareBaseUrl}/#watch/${roomCode}` : '';
     const showPublicLink = !!publicWatchLink && publicWatchLink !== localWatchLink;
@@ -913,7 +1204,7 @@ export default function HostView() {
                                 <p>Streaming via OBS</p>
                                 <p style={{ fontSize: '0.8rem', color: 'var(--text-3)', marginTop: '0.25rem' }}>
                                     {whipConnected ? 'OBS connected' : 'Waiting for OBS...'}
-                                    {fallbackCodec ? ` \u00B7 ${fallbackCodec.toUpperCase()}` : ''}
+                                    {obsVideoCodec ? ` \u00B7 ${obsVideoCodec.toUpperCase()}` : ''}
                                     {(viewerCount + whepViewerCount) > 0 ? ` \u00B7 ${viewerCount + whepViewerCount} viewer${(viewerCount + whepViewerCount) !== 1 ? 's' : ''}` : ''}
                                 </p>
                             </div>
@@ -1050,6 +1341,7 @@ export default function HostView() {
                                             type="checkbox"
                                             id="obsApplySettings"
                                             checked={obsApplySettings}
+                                            disabled={obsAv1Mode}
                                             onChange={(e) => setObsApplySettings(e.target.checked)}
                                         />
                                         <label htmlFor="obsApplySettings">
@@ -1065,11 +1357,11 @@ export default function HostView() {
                                             id="obsTryAv1"
                                             checked={obsTryAv1}
                                             disabled={!gpuInfo.av1Supported}
-                                            onChange={(e) => setObsTryAv1(e.target.checked)}
+                                            onChange={(e) => handleObsTryAv1Change(e.target.checked)}
                                         />
                                         <label htmlFor="obsTryAv1">
                                             Use BYOK TURN (AV1)
-                                            <span className="setting-hint">Improve quality by bringing your own key from a remote TURN server</span>
+                                            <span className="setting-hint">Open TURN setup in a modal and switch OBS rooms to AV1 WebRTC-only mode</span>
                                             {!gpuInfo.av1Supported && (
                                                 <span className="setting-hint">
                                                     Disabled: AV1 encode was not detected on this host GPU.
@@ -1171,9 +1463,10 @@ export default function HostView() {
                             )}
                             {ingestMode === 'obs' && (
                                 <div className="copy-hint" style={{ marginTop: '0.25rem' }}>
-                                    Fallback viewers: {fallbackViewerCount} |{' '}
-                                    Codec: {fallbackCodec || 'waiting'} |{' '}
-                                    {fallbackAvailable ? 'Fallback active' : 'Fallback inactive'}
+                                    Codec: {obsVideoCodec || 'waiting'} |{' '}
+                                    {obsAv1Mode || obsVideoCodec === 'av1'
+                                        ? `WebRTC-only AV1 room | TURN ${roomHasTurnServer ? 'ready' : 'missing'}`
+                                        : `Fallback viewers: ${fallbackViewerCount} | ${fallbackAvailable ? 'Fallback active' : 'Fallback inactive'}`}
                                 </div>
                             )}
                         </div>
@@ -1237,6 +1530,11 @@ export default function HostView() {
                                             <div style={{ color: '#aaa' }}>
                                                 In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
                                             </div>
+                                            {(obsAv1Mode || obsVideoCodec === 'av1') && (
+                                                <div style={{ color: '#e5a84b', marginTop: '0.5rem' }}>
+                                                    Keep AV1 selected in OBS output. This room disables relay fallback and expects viewers to connect over WebRTC.
+                                                </div>
+                                            )}
                                         </div>
                                     </details>
 
@@ -1249,6 +1547,151 @@ export default function HostView() {
                     )}
                 </div>
             </div>
+            {showByokTurnModal && (
+                <div
+                    className="modal-backdrop"
+                    role="presentation"
+                    onClick={() => setShowByokTurnModal(false)}
+                >
+                    <div
+                        className="settings-modal"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="byokTurnModalTitle"
+                        onClick={(event) => event.stopPropagation()}
+                    >
+                        <div className="settings-modal-head">
+                            <div>
+                                <div className="settings-modal-eyebrow">AV1 WebRTC Mode</div>
+                                <h3 id="byokTurnModalTitle">Bring Your Own TURN</h3>
+                                <p>AV1 rooms disable relay fallback and require TURN so viewers stay on WebRTC.</p>
+                            </div>
+                            <button
+                                type="button"
+                                className="settings-modal-close"
+                                onClick={() => setShowByokTurnModal(false)}
+                            >
+                                Close
+                            </button>
+                        </div>
+                        {cloudflareTurnAutofillAvailable && (
+                            <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={handleAutofillCloudflareTurn}
+                                    disabled={cloudflareTurnAutofillLoading}
+                                >
+                                    {cloudflareTurnAutofillLoading ? 'Fetching Cloudflare TURN...' : 'Autofill From Cloudflare'}
+                                </button>
+                            </div>
+                        )}
+                        <div className="setting-row setting-row-toggle" title={byokTurnSessionHint}>
+                            <input
+                                type="checkbox"
+                                id="saveByokTurnForSession"
+                                checked={saveByokTurnForSession}
+                                title={byokTurnSessionHint}
+                                onChange={(e) => setSaveByokTurnForSession(e.target.checked)}
+                            />
+                            <label htmlFor="saveByokTurnForSession" title={byokTurnSessionHint}>
+                                Save TURN credentials for this session
+                            </label>
+                        </div>
+                        <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
+                            <label htmlFor="byokTurnUrls" className="setting-row-label" style={{ minWidth: '110px', flexShrink: 0 }}>
+                                TURN URLs
+                            </label>
+                            <textarea
+                                id="byokTurnUrls"
+                                value={byokTurnUrls}
+                                onChange={(e) => setByokTurnUrls(e.target.value)}
+                                placeholder={'turn:turn.example.com:3478?transport=udp\nturns:turn.example.com:5349?transport=tcp'}
+                                className="select-input"
+                                style={{ minHeight: '6rem', resize: 'vertical', paddingTop: '0.85rem', paddingBottom: '0.85rem' }}
+                            />
+                        </div>
+                        <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
+                            <label htmlFor="byokTurnAuthType" className="setting-row-label" style={{ minWidth: '110px', flexShrink: 0 }}>
+                                Auth mode
+                            </label>
+                            <select
+                                id="byokTurnAuthType"
+                                value={byokTurnAuthType}
+                                onChange={(e) => setByokTurnAuthType(e.target.value)}
+                                className="select-input"
+                            >
+                                <option value="secret">Shared secret (recommended)</option>
+                                <option value="static">Static username/password</option>
+                            </select>
+                        </div>
+                        {byokTurnAuthType === 'secret' ? (
+                            <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
+                                <label htmlFor="byokTurnSecret" className="setting-row-label" style={{ minWidth: '110px', flexShrink: 0 }}>
+                                    TURN secret
+                                </label>
+                                <input
+                                    id="byokTurnSecret"
+                                    type="password"
+                                    value={byokTurnSecret}
+                                    onChange={(e) => setByokTurnSecret(e.target.value)}
+                                    placeholder="coturn static-auth-secret"
+                                    className="select-input"
+                                />
+                            </div>
+                        ) : (
+                            <>
+                                <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
+                                    <label htmlFor="byokTurnUsername" className="setting-row-label" style={{ minWidth: '110px', flexShrink: 0 }}>
+                                        Username
+                                    </label>
+                                    <input
+                                        id="byokTurnUsername"
+                                        type="text"
+                                        value={byokTurnUsername}
+                                        onChange={(e) => setByokTurnUsername(e.target.value)}
+                                        placeholder="turn username"
+                                        className="select-input"
+                                    />
+                                </div>
+                                <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
+                                    <label htmlFor="byokTurnCredential" className="setting-row-label" style={{ minWidth: '110px', flexShrink: 0 }}>
+                                        Credential
+                                    </label>
+                                    <input
+                                        id="byokTurnCredential"
+                                        type="password"
+                                        value={byokTurnCredential}
+                                        onChange={(e) => setByokTurnCredential(e.target.value)}
+                                        placeholder="turn password"
+                                        className="select-input"
+                                    />
+                                </div>
+                            </>
+                        )}
+                        <div className="settings-modal-actions">
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={() => {
+                                    setObsTryAv1(false);
+                                    setShowByokTurnModal(false);
+                                }}
+                            >
+                                Disable AV1 Mode
+                            </button>
+                            <button
+                                type="button"
+                                className="btn btn-primary"
+                                onClick={() => setShowByokTurnModal(false)}
+                                disabled={cloudflareTurnAutofillLoading}
+                            >
+                                Done
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

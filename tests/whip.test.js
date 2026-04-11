@@ -26,7 +26,7 @@ function buildOffer(videoSection) {
     ].join('\r\n');
 }
 
-test('WHIP parser prefers H.264 when OBS offers both AV1 and H.264', () => {
+test('WHIP parser prefers H.264 when OBS offers both AV1 and H.264 in legacy rooms', () => {
     const offer = buildOffer([
         'm=video 9 UDP/TLS/RTP/SAVPF 96 97',
         'c=IN IP4 0.0.0.0',
@@ -49,6 +49,32 @@ test('WHIP parser prefers H.264 when OBS offers both AV1 and H.264', () => {
     assert.equal(validation.videoCodec, 'h264');
     assert.equal(rtpParameters.video.codecs[0].mimeType, 'video/H264');
     assert.equal(rtpParameters.video.codecs[0].parameters['profile-level-id'], '42e01f');
+});
+
+test('WHIP parser can require AV1 for AV1 OBS rooms', () => {
+    const offer = buildOffer([
+        'm=video 9 UDP/TLS/RTP/SAVPF 96 97',
+        'c=IN IP4 0.0.0.0',
+        'a=mid:0',
+        'a=sendonly',
+        'a=rtpmap:96 H264/90000',
+        'a=fmtp:96 profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1',
+        'a=rtpmap:97 AV1/90000',
+        'a=rtcp-fb:97 nack',
+        'a=ssrc:1111 cname:test',
+    ].join('\r\n'));
+
+    const parsed = parseOffer(offer, { preferAv1: true });
+    const validation = validateCodecs(parsed, {
+        allowAv1: true,
+        requiredVideoCodec: 'av1',
+    });
+    const rtpParameters = toMediasoupRtpParameters(parsed);
+
+    assert.equal(parsed.video.selectedCodec.codec, 'av1');
+    assert.equal(validation.valid, true);
+    assert.equal(validation.videoCodec, 'av1');
+    assert.equal(rtpParameters.video.codecs[0].mimeType, 'video/AV1');
 });
 
 test('WHIP parser picks the highest H.264 profile when AV1 is absent', () => {
@@ -75,7 +101,29 @@ test('WHIP parser picks the highest H.264 profile when AV1 is absent', () => {
     assert.equal(validation.videoCodec, 'h264');
 });
 
-test('WHIP parser rejects AV1-only offers', () => {
+test('WHIP validator rejects H.264 when the room requires AV1', () => {
+    const offer = buildOffer([
+        'm=video 9 UDP/TLS/RTP/SAVPF 96',
+        'c=IN IP4 0.0.0.0',
+        'a=mid:0',
+        'a=sendonly',
+        'a=rtpmap:96 H264/90000',
+        'a=fmtp:96 profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1',
+        'a=ssrc:1111 cname:test',
+    ].join('\r\n'));
+
+    const parsed = parseOffer(offer, { preferAv1: true });
+    const validation = validateCodecs(parsed, {
+        allowAv1: true,
+        requiredVideoCodec: 'av1',
+    });
+
+    assert.equal(parsed.video.selectedCodec.codec, 'h264');
+    assert.equal(validation.valid, false);
+    assert.match(validation.warnings[0], /requires AV1/i);
+});
+
+test('WHIP parser rejects AV1-only offers for legacy rooms', () => {
     const offer = buildOffer([
         'm=video 9 UDP/TLS/RTP/SAVPF 97',
         'c=IN IP4 0.0.0.0',
