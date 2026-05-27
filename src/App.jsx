@@ -1,5 +1,6 @@
 import React, { lazy, Suspense, useState, useEffect } from 'react';
 import { SocketProvider } from './context/SocketContext';
+import BrandLogo from './components/BrandLogo';
 import './index.css';
 
 const HostView = lazy(() => import('./HostView'));
@@ -35,7 +36,7 @@ function Router() {
             <header className="main-nav">
                 <div className="nav-brand">
                     <a href="#" className="nav-logo" title="Home">
-                        <span>Nextra</span>
+                        <BrandLogo className="brand-logo-nav" />
                     </a>
                 </div>
                 <nav className="nav-links">
@@ -69,10 +70,6 @@ function Landing() {
     return (
         <div className="landing">
             <div className="landing-content">
-                <div className="logo-section">
-                    <h1 className="app-title">Nextra</h1>
-                </div>
-
                 <div className="card-grid">
                     <a href="#host" className="card card-host">
                         <h2>Host</h2>
