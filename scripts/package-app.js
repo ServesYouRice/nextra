@@ -2,20 +2,28 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const crypto = require('crypto');
+const os = require('os');
 const { spawnSync } = require('child_process');
 
 const projectRoot = path.resolve(__dirname, '..');
 const stageDir = path.join(projectRoot, '.caxa-stage');
 const outputExe = path.join(projectRoot, 'Nextra.exe');
 const outputSha256 = path.join(projectRoot, 'Nextra.exe.sha256');
+const appIcon = path.join(projectRoot, 'public', 'app.ico');
+// Bump when the startup file layout changes; caxa trusts any existing cache for an identifier.
+const caxaCacheSchema = 'startup-runtime-preload-v2';
 
-const requiredEntries = [
+const sourceEntries = [
     'server.js',
     'config.js',
     'package.json',
     'package-lock.json',
     'lib',
     'dist',
+];
+
+const buildIdentifierEntries = [
+    ...sourceEntries,
     'node_modules',
 ];
 
@@ -31,16 +39,24 @@ function copyEntry(relativePath) {
     fs.cpSync(src, dest, { recursive: true, dereference: true });
 }
 
-function run(command, args) {
+function run(command, args, options = {}) {
     const result = spawnSync(command, args, {
-        cwd: projectRoot,
+        cwd: options.cwd || projectRoot,
         stdio: 'inherit',
         shell: process.platform === 'win32',
+        env: {
+            ...process.env,
+            ...(options.env || {}),
+        },
     });
 
     if (result.status !== 0) {
         throw new Error(`${command} failed with code ${result.status}`);
     }
+}
+
+function installProductionDependencies() {
+    run('npm', ['ci', '--omit=dev', '--no-audit', '--no-fund'], { cwd: stageDir });
 }
 
 function findCloudflaredOnPath() {
@@ -151,7 +167,9 @@ function hashPathRecursive(hash, fullPath, relativePath) {
 
 function getBuildIdentifier() {
     const hash = crypto.createHash('sha256');
-    const identifierInputs = requiredEntries;
+    const identifierInputs = buildIdentifierEntries;
+
+    hash.update(`cache-schema:${caxaCacheSchema}\n`);
 
     identifierInputs.forEach((relativePath) => {
         const fullPath = path.join(stageDir, relativePath);
@@ -172,6 +190,60 @@ function writeReleaseChecksum() {
     const line = `${checksum} *${path.basename(outputExe)}\n`;
     fs.writeFileSync(outputSha256, line, 'utf8');
     console.log(`Wrote checksum: ${outputSha256}`);
+}
+
+function getPackageVersion() {
+    const packageJsonPath = path.join(projectRoot, 'package.json');
+    try {
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+        return packageJson.version || '1.0.0';
+    } catch {
+        return '1.0.0';
+    }
+}
+
+function getDefaultCaxaStub() {
+    const caxaEntry = require.resolve('caxa');
+    return path.resolve(path.dirname(caxaEntry), '..', 'stubs', `stub--${process.platform}--${process.arch}`);
+}
+
+async function prepareWindowsCaxaStub() {
+    if (process.platform !== 'win32') {
+        return '';
+    }
+
+    if (!fs.existsSync(appIcon)) {
+        throw new Error(`Missing Windows app icon: ${path.relative(projectRoot, appIcon)}`);
+    }
+
+    const defaultStub = getDefaultCaxaStub();
+    if (!fs.existsSync(defaultStub)) {
+        throw new Error(`Missing caxa Windows stub: ${defaultStub}`);
+    }
+
+    const iconStub = path.join(os.tmpdir(), `nextra-caxa-stub-${process.pid}.exe`);
+    fs.copyFileSync(defaultStub, iconStub);
+
+    const { rcedit } = await import('rcedit');
+    const version = getPackageVersion();
+
+    const metadata = {
+        icon: appIcon,
+        'file-version': version,
+        'product-version': version,
+        'version-string': {
+            FileDescription: 'Nextra',
+            InternalName: 'Nextra',
+            OriginalFilename: 'Nextra.exe',
+            ProductName: 'Nextra',
+            CompanyName: 'Nextra',
+        },
+    };
+
+    await rcedit(iconStub, metadata);
+    fs.appendFileSync(iconStub, '\nCAXACAXACAXA\n');
+    console.log(`Prepared Windows caxa stub with icon: ${path.relative(projectRoot, appIcon)}`);
+    return iconStub;
 }
 
 function copyCloudflaredToStage(sourcePath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath) {
@@ -259,29 +331,47 @@ async function bundleCloudflared() {
 async function main() {
     fs.rmSync(stageDir, { recursive: true, force: true });
     fs.mkdirSync(stageDir, { recursive: true });
+    let iconStub = '';
 
-    requiredEntries.forEach(copyEntry);
-    await bundleCloudflared();
-    const buildIdentifier = getBuildIdentifier();
+    try {
+        sourceEntries.forEach(copyEntry);
+        installProductionDependencies();
+        await bundleCloudflared();
+        const buildIdentifier = getBuildIdentifier();
+        iconStub = await prepareWindowsCaxaStub();
 
-    run('npx', [
-        'caxa',
-        '--input',
-        stageDir,
-        '--output',
-        outputExe,
-        '--identifier',
-        buildIdentifier,
-        '--',
-        '{{caxa}}/node_modules/.bin/node',
-        '-r',
-        '{{caxa}}/lib/startupRuntime.js',
-        '{{caxa}}/server.js',
-    ]);
-    writeReleaseChecksum();
+        const caxaArgs = [
+            'caxa',
+            '--input',
+            stageDir,
+            '--output',
+            outputExe,
+            '--identifier',
+            buildIdentifier,
+        ];
 
-    fs.rmSync(stageDir, { recursive: true, force: true });
-    console.log(`Packaged executable: ${outputExe}`);
+        if (iconStub) {
+            caxaArgs.push('--stub', iconStub);
+        }
+
+        caxaArgs.push(
+            '--',
+            '{{caxa}}/node_modules/.bin/node',
+            '-r',
+            '{{caxa}}/lib/startupRuntime.js',
+            '{{caxa}}/server.js',
+        );
+
+        run('npx', caxaArgs);
+        writeReleaseChecksum();
+
+        console.log(`Packaged executable: ${outputExe}`);
+    } finally {
+        fs.rmSync(stageDir, { recursive: true, force: true });
+        if (iconStub) {
+            try { fs.rmSync(iconStub, { force: true }); } catch { }
+        }
+    }
 }
 
 main().catch((err) => {

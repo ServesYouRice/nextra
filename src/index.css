@@ -101,13 +101,100 @@ body {
 
 .nav-logo {
   text-decoration: none;
-  font-size: 1.125rem;
-  font-weight: 700;
   color: var(--text-1);
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  letter-spacing: -0.02em;
+  min-width: 0;
+}
+
+.brand-logo {
+  --brand-accent-blue: #8fa1bb;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--brand-logo-gap, 0.62rem);
+  line-height: 1;
+  min-width: 0;
+}
+
+.brand-logo-mark-image,
+.brand-logo-tra-image {
+  display: block;
+  height: auto;
+  user-select: none;
+}
+
+.brand-logo-mark-image {
+  width: var(--brand-mark-width, 2.35rem);
+  flex: 0 0 auto;
+}
+
+.brand-logo-copy {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+}
+
+.brand-logo-word {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--brand-word-gap, 0.16rem);
+}
+
+.brand-logo-tra-image {
+  height: var(--brand-tra-height, 0.86rem);
+  flex: 0 0 auto;
+}
+
+.brand-e-mark {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  justify-content: space-between;
+  width: var(--brand-e-width, 0.74rem);
+  height: var(--brand-e-height, 0.86rem);
+}
+
+.brand-e-mark span {
+  display: block;
+  width: 100%;
+  height: var(--brand-e-stroke, 0.16rem);
+  border-radius: 999px;
+  background: var(--brand-accent-blue);
+}
+
+.brand-x-mark {
+  width: var(--brand-x-width, 1.1rem);
+  height: var(--brand-x-height, 0.86rem);
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.brand-x-mark path {
+  fill: none;
+  stroke-width: 10;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+}
+
+.brand-x-accent {
+  stroke: var(--brand-accent-blue);
+}
+
+.brand-x-light {
+  stroke: #f3f2ef;
+}
+
+.brand-logo-nav {
+  --brand-logo-gap: 0.52rem;
+  --brand-mark-width: 2.35rem;
+  --brand-tra-height: 0.82rem;
+  --brand-x-width: 1.06rem;
+  --brand-x-height: 0.86rem;
+  --brand-e-width: 0.78rem;
+  --brand-e-height: 0.86rem;
+  --brand-e-stroke: 0.16rem;
+  --brand-word-gap: 0.05rem;
 }
 
 .nav-links {
@@ -144,25 +231,6 @@ body {
 .landing-content {
   max-width: 560px;
   width: 100%;
-}
-
-.logo-section {
-  margin-bottom: 1.25rem;
-  text-align: center;
-}
-
-.app-title {
-  font-size: 2rem;
-  font-weight: 700;
-  color: var(--text-1);
-  letter-spacing: -0.03em;
-  margin-bottom: 0;
-}
-
-.app-tagline {
-  font-size: 0.85rem;
-  color: var(--text-3);
-  font-weight: 400;
 }
 
 .card-grid {
@@ -1277,6 +1345,18 @@ body {
 
   .nav-links {
     gap: 1rem;
+  }
+
+  .brand-logo-nav {
+    --brand-logo-gap: 0.42rem;
+    --brand-mark-width: 1.85rem;
+    --brand-tra-height: 0.64rem;
+    --brand-x-width: 0.84rem;
+    --brand-x-height: 0.68rem;
+    --brand-e-width: 0.62rem;
+    --brand-e-height: 0.68rem;
+    --brand-e-stroke: 0.13rem;
+    --brand-word-gap: 0.04rem;
   }
 
   .setting-row-inline {
