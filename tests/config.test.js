@@ -79,3 +79,16 @@ test('bitrate defaults reflect the finalized H.264 plan', () => {
     assert.equal(config.CODEC_OPTIONS.videoGoogleStartBitrate, 5_000);
     assert.equal(config.RELAY_VIDEO_BITS_PER_SECOND, 45_000_000);
 });
+
+test('production safety limits include room creation throttles', () => {
+    assert.equal(config.MAX_ACTIVE_ROOMS, 100);
+    assert.equal(config.CREATE_ROOM_RATE_LIMIT_MAX, 10);
+    assert.equal(config.CREATE_ROOM_RATE_LIMIT_WINDOW_MS, 60000);
+    assert.equal(config.JOIN_RATE_LIMIT_MAX, 20);
+    assert.equal(config.JOIN_RATE_LIMIT_WINDOW_MS, 60000);
+});
+
+test('socket heartbeat defaults tolerate slow watcher links', () => {
+    assert.equal(config.SOCKET_PING_INTERVAL_MS, 25000);
+    assert.equal(config.SOCKET_PING_TIMEOUT_MS, 60000);
+});

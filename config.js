@@ -262,12 +262,15 @@ module.exports = {
 
     // Room limits
     MAX_VIEWERS_PER_ROOM: parseIntEnv(process.env.MAX_VIEWERS_PER_ROOM, 20),
+    MAX_ACTIVE_ROOMS: parseIntEnv(process.env.MAX_ACTIVE_ROOMS, 100),
 
     // Rate limits
     MEDIA_TOGGLE_COOLDOWN_MS: 1000,
     MEDIA_TOGGLE_VIEWER_COOLDOWN_MS: parseIntEnv(process.env.MEDIA_TOGGLE_VIEWER_COOLDOWN_MS, 3000),
-    JOIN_RATE_LIMIT_MAX: 5,
-    JOIN_RATE_LIMIT_WINDOW_MS: 60000,
+    CREATE_ROOM_RATE_LIMIT_MAX: parseIntEnv(process.env.CREATE_ROOM_RATE_LIMIT_MAX, 10),
+    CREATE_ROOM_RATE_LIMIT_WINDOW_MS: parseIntEnv(process.env.CREATE_ROOM_RATE_LIMIT_WINDOW_MS, 60000),
+    JOIN_RATE_LIMIT_MAX: parseIntEnv(process.env.JOIN_RATE_LIMIT_MAX, 20),
+    JOIN_RATE_LIMIT_WINDOW_MS: parseIntEnv(process.env.JOIN_RATE_LIMIT_WINDOW_MS, 60000),
 
     // Room cleanup
     ROOM_HEARTBEAT_INTERVAL_MS: 60000,
@@ -275,6 +278,8 @@ module.exports = {
 
     // Socket.io
     SOCKET_PATH: '/socket.io',
+    SOCKET_PING_INTERVAL_MS: parseIntEnv(process.env.SOCKET_PING_INTERVAL_MS, 25000),
+    SOCKET_PING_TIMEOUT_MS: parseIntEnv(process.env.SOCKET_PING_TIMEOUT_MS, 60000),
 
     // Socket / relay limits
     MAX_CONNECTIONS_PER_IP: parseIntEnv(process.env.MAX_CONNECTIONS_PER_IP, 60),
@@ -297,6 +302,7 @@ module.exports = {
     // ── OBS / WHIP ──
     WHIP_ENABLED: parseBoolEnv(process.env.WHIP_ENABLED, true),
     WHIP_HTTP_PORT: parseIntEnv(process.env.WHIP_HTTP_PORT, 3001),
+    WHIP_BIND_HOST: (process.env.WHIP_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1',
     FFMPEG_PATH: (process.env.FFMPEG_PATH || 'ffmpeg').trim(),
     FALLBACK_AUDIO_BITRATE: (process.env.FALLBACK_AUDIO_BITRATE || '192k').trim(),
     FALLBACK_FRAGMENT_DURATION_MS: parseIntEnv(process.env.FALLBACK_FRAGMENT_DURATION_MS, 500),

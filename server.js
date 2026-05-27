@@ -30,7 +30,7 @@ const {
 } = require('./lib/network');
 const { createWhipRouter, setIo: setWhipIo } = require('./lib/whipRoutes');
 const { createWhepRouter } = require('./lib/whepRoutes');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 
 const app = express();
 let runtimeShareBaseUrl = '';
@@ -76,27 +76,6 @@ function getRemoteAddressFromReq(req) {
     );
 }
 
-function getRequestClientIp(req) {
-    const remoteAddress = getRemoteAddressFromReq(req);
-    const forwardedIp = getTrustedForwardedClientIp(
-        req?.headers || {},
-        remoteAddress,
-        config.TRUST_X_FORWARDED_HEADERS
-    );
-    if (forwardedIp) return forwardedIp;
-
-    return normalizeIp(
-        req.socket?.remoteAddress
-        || req.connection?.remoteAddress
-        || 'unknown'
-    );
-}
-
-function shouldExposeLanUrl(req) {
-    if (config.EXPOSE_LAN_URL) return true;
-    return isLocalClientIp(getRequestClientIp(req));
-}
-
 function parseUrlHostParts(hostValue) {
     if (!hostValue) return null;
     const trimmed = hostValue.trim();
@@ -129,6 +108,99 @@ function normalizeBaseUrl(url) {
     return normalized.replace(/\/$/, '');
 }
 
+function getOriginHostname(origin) {
+    const normalized = normalizeOrigin(origin);
+    if (!normalized) return '';
+    try {
+        return new URL(normalized).hostname;
+    } catch {
+        return '';
+    }
+}
+
+function isPublicOrigin(origin) {
+    const hostname = getOriginHostname(origin);
+    return !!hostname && !isLocalHostname(hostname, config.LAN_IP);
+}
+
+function getKnownPublicShareOrigins() {
+    return [
+        normalizeBaseUrl(config.SHARE_BASE_URL),
+        runtimeShareBaseUrl,
+    ].filter((origin) => origin && isPublicOrigin(origin));
+}
+
+function isKnownPublicShareOrigin(origin) {
+    const normalized = normalizeBaseUrl(origin);
+    if (!normalized || !isPublicOrigin(normalized)) return false;
+    return getKnownPublicShareOrigins().includes(normalized);
+}
+
+function getForwardedOrigin(headers = {}) {
+    const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
+    const forwardedHost = parseForwardedFirst(headers['x-forwarded-host']);
+    const proto = (forwardedProto || '').toLowerCase();
+    const hostParts = parseUrlHostParts(forwardedHost);
+    if ((proto === 'http' || proto === 'https') && hostParts) {
+        return `${proto}://${hostParts.hostWithPort}`;
+    }
+
+    return '';
+}
+
+function getRequestHostOrigin(headers = {}, encrypted = true) {
+    const hostHeader = typeof headers.host === 'string' ? headers.host : '';
+    const hostParts = parseUrlHostParts(hostHeader);
+    if (!hostParts) return '';
+    return `${encrypted ? 'https' : 'http'}://${hostParts.hostWithPort}`;
+}
+
+function isKnownPublicShareRequest(headers = {}, encrypted = true) {
+    const candidates = [
+        getForwardedOrigin(headers),
+        getRequestHostOrigin(headers, encrypted),
+        normalizeOrigin(headers.origin),
+        normalizeOrigin(headers.referer || headers.referrer),
+    ];
+
+    return candidates.some((origin) => isKnownPublicShareOrigin(origin));
+}
+
+function shouldTrustRequestForwardedHeaders(headers = {}, remoteAddress = '', encrypted = true) {
+    if (shouldTrustForwardedHeaders(remoteAddress, config.TRUST_X_FORWARDED_HEADERS)) {
+        return true;
+    }
+
+    return isLocalClientIp(remoteAddress)
+        && isKnownPublicShareRequest(headers, encrypted);
+}
+
+function getClientIpFromHeaders(headers = {}, remoteAddress = '', encrypted = true) {
+    const normalizedRemote = normalizeIp(remoteAddress || 'unknown');
+    const trustForwarded = shouldTrustRequestForwardedHeaders(headers, normalizedRemote, encrypted);
+    const forwardedIp = getTrustedForwardedClientIp(headers, normalizedRemote, trustForwarded);
+    if (forwardedIp) return forwardedIp;
+
+    if (isKnownPublicShareRequest(headers, encrypted)) {
+        return 'public-share-proxy';
+    }
+
+    return normalizedRemote;
+}
+
+function getRequestClientIp(req) {
+    return getClientIpFromHeaders(
+        req?.headers || {},
+        getRemoteAddressFromReq(req),
+        !!req?.socket?.encrypted
+    );
+}
+
+function shouldExposeLanUrl(req) {
+    if (config.EXPOSE_LAN_URL) return true;
+    return isLocalClientIp(getRequestClientIp(req));
+}
+
 function getHasTurnServer() {
     return config.getIceServers().some((server) => {
         const urls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
@@ -144,14 +216,15 @@ function isAllowedSocketOrigin(origin) {
     if (allowed.has(normalized)) return true;
 
     return config.ALLOW_TRYCLOUDFLARE_ORIGINS
-        && /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/i.test(normalized);
+        && /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/i.test(normalized)
+        && isKnownPublicShareOrigin(normalized);
 }
 
 function getSocketRequestHostOrigin(req) {
     const remoteAddress = getRemoteAddressFromReq(req);
     let proto = req?.socket?.encrypted ? 'https' : 'http';
 
-    if (shouldTrustForwardedHeaders(remoteAddress, config.TRUST_X_FORWARDED_HEADERS)) {
+    if (shouldTrustRequestForwardedHeaders(req?.headers || {}, remoteAddress, !!req?.socket?.encrypted)) {
         const forwardedProto = parseForwardedFirst(req?.headers?.['x-forwarded-proto']);
         if (forwardedProto === 'http' || forwardedProto === 'https') {
             proto = forwardedProto;
@@ -245,7 +318,7 @@ function getShareBaseUrl(req) {
         return manualShareBase;
     }
 
-    if (shouldTrustForwardedHeaders(getRemoteAddressFromReq(req))) {
+    if (shouldTrustRequestForwardedHeaders(req.headers || {}, getRemoteAddressFromReq(req), !!req?.socket?.encrypted)) {
         const forwardedProto = parseForwardedFirst(req.headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(req.headers['x-forwarded-host']);
         const proto = (forwardedProto || '').toLowerCase();
@@ -333,7 +406,7 @@ async function probeExistingNextraInstance() {
 }
 
 function getShareBaseUrlFromHeaders(headers = {}, remoteAddress = '') {
-    if (shouldTrustForwardedHeaders(remoteAddress, config.TRUST_X_FORWARDED_HEADERS)) {
+    if (shouldTrustRequestForwardedHeaders(headers, remoteAddress, true)) {
         const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(headers['x-forwarded-host']);
         const proto = (forwardedProto || '').toLowerCase();
@@ -382,18 +455,11 @@ function getSocketHandshakeIp(socket) {
         || socket?.conn?.remoteAddress
         || socket?.handshake?.address
         || '';
-    const forwardedIp = getTrustedForwardedClientIp(
+
+    return getClientIpFromHeaders(
         socket?.handshake?.headers || {},
         remoteAddress,
-        config.TRUST_X_FORWARDED_HEADERS
-    );
-    if (forwardedIp) return forwardedIp;
-
-    return normalizeIp(
-        socket?.handshake?.address
-        || socket?.request?.socket?.remoteAddress
-        || socket?.conn?.remoteAddress
-        || 'unknown'
+        !!socket?.request?.socket?.encrypted
     );
 }
 
@@ -414,6 +480,7 @@ function buildSocketConfigPayload(socket) {
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
         publicShareStatus,
         publicShareError,
+        whipHttpPort: config.WHIP_HTTP_PORT,
     };
 }
 
@@ -490,6 +557,7 @@ app.get('/api/config', (req, res) => {
         publicShareStatus,
         publicShareError,
         whipEnabled: config.WHIP_ENABLED,
+        whipHttpPort: config.WHIP_HTTP_PORT,
         whepEnabled: config.WHEP_ENABLED,
     });
 });
@@ -604,18 +672,11 @@ const CONNECTION_WINDOW_MS = config.CONNECTION_WINDOW_MS;
 function getSocketClientIp(rawSocket) {
     const req = rawSocket.request;
     const remoteAddress = req?.socket?.remoteAddress || req?.connection?.remoteAddress || '';
-    const forwardedIp = getTrustedForwardedClientIp(
+
+    return getClientIpFromHeaders(
         req?.headers || {},
         remoteAddress,
-        config.TRUST_X_FORWARDED_HEADERS
-    );
-    if (forwardedIp) return forwardedIp;
-
-    return normalizeIp(
-        req?.socket?.remoteAddress
-        || req?.connection?.remoteAddress
-        || req?.connection?.socket?.remoteAddress
-        || 'unknown'
+        !!req?.socket?.encrypted
     );
 }
 
@@ -773,7 +834,7 @@ async function handleHttpsServerError(err) {
     // Check FFmpeg availability for OBS fallback
     if (config.WHIP_ENABLED) {
         try {
-            execSync(`${config.FFMPEG_PATH} -version`, { stdio: 'ignore' });
+            execFileSync(config.FFMPEG_PATH, ['-version'], { stdio: 'ignore' });
             console.log('[Startup] FFmpeg found — OBS fallback available');
         } catch {
             console.warn('[Startup] FFmpeg not found — OBS fallback will not work');
@@ -791,7 +852,7 @@ async function handleHttpsServerError(err) {
 
     // Mount WHEP routes on HTTPS only (browser viewers)
     if (config.WHEP_ENABLED) {
-        const whepRouter = createWhepRouter(result.router);
+        const whepRouter = createWhepRouter(result.router, { getClientIp: getRequestClientIp });
         app.use('/whep', whepRouter);
         console.log('   WHEP:    /whep/watch/<roomCode>');
     }
@@ -799,6 +860,8 @@ async function handleHttpsServerError(err) {
     const io = new Server(httpsServer, {
         path: config.SOCKET_PATH,
         maxHttpBufferSize: config.SOCKET_MAX_HTTP_BUFFER_SIZE,
+        pingInterval: config.SOCKET_PING_INTERVAL_MS,
+        pingTimeout: config.SOCKET_PING_TIMEOUT_MS,
         allowRequest: (req, callback) => {
             const validation = validateSocketHandshakeRequest(req);
             if (!validation.ok) {
@@ -863,7 +926,7 @@ async function handleHttpsServerError(err) {
         }
     }, 300000);
 
-    registerSocketHandlers(io, result.router);
+    registerSocketHandlers(io, result.router, { getClientIp: getSocketHandshakeIp });
     startJoinCleanup();
 
     httpsServer.on('error', (err) => {
@@ -897,8 +960,11 @@ async function handleHttpsServerError(err) {
             whipApp.use('/whip', whipRouter);
             const whipHttpServer = http.createServer(whipApp);
             const whipPort = config.WHIP_HTTP_PORT;
-            whipHttpServer.listen(whipPort, config.BIND_HOST, () => {
-                console.log(`   WHIP:    http://localhost:${whipPort}/whip/broadcast/<roomCode>`);
+            whipHttpServer.listen(whipPort, config.WHIP_BIND_HOST, () => {
+                const whipHost = config.WHIP_BIND_HOST === '0.0.0.0' || config.WHIP_BIND_HOST === '::'
+                    ? 'localhost'
+                    : config.WHIP_BIND_HOST;
+                console.log(`   WHIP:    http://${whipHost}:${whipPort}/whip/broadcast/<roomCode>`);
                 console.log('');
             });
             whipHttpServer.on('error', (err) => {

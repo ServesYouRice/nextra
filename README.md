@@ -246,9 +246,13 @@ Notes:
 | Variable | Default | Description |
 |---|---|---|
 | `MAX_VIEWERS_PER_ROOM` | `20` | Max WebRTC viewers per room |
+| `MAX_ACTIVE_ROOMS` | `100` | Max active rooms before new hosts are rejected |
+| `CREATE_ROOM_RATE_LIMIT_MAX` | `10` | Room creation attempts per IP per window |
+| `JOIN_RATE_LIMIT_MAX` | `20` | Viewer join or auto-rejoin attempts per IP per window |
 | `HOST_UPLOAD_MBPS` | `36` | Assumed host upload bandwidth |
 | `RELAY_VIDEO_BITS_PER_SECOND` | `45000000` | Max relay video bitrate ceiling |
 | `MAX_CONNECTIONS_PER_IP` | `60` | Rate limit: connections per IP |
+| `SOCKET_PING_TIMEOUT_MS` | `60000` | Grace period before a quiet watcher socket is considered disconnected |
 
 See `.env.example` for the full list.
 
