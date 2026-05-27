@@ -238,6 +238,11 @@ function isLikelyLocalOrigin(origin) {
     }
 }
 
+function formatHostForUrl(host) {
+    const value = String(host || '127.0.0.1').trim() || '127.0.0.1';
+    return value.includes(':') && !value.startsWith('[') ? `[${value}]` : value;
+}
+
 function formatBytes(value) {
     const bytes = Number(value) || 0;
     if (bytes < 1024) return `${bytes} B`;
@@ -356,6 +361,10 @@ export default function HostView() {
     const [publicShareStatus, setPublicShareStatus] = useState('disabled');
     const [publicShareError, setPublicShareError] = useState('');
     const [hasTurnServer, setHasTurnServer] = useState(false);
+    const [whipHttpHost, setWhipHttpHost] = useState('127.0.0.1');
+    const [whipHttpPort, setWhipHttpPort] = useState(3001);
+    const [whipHttpStatus, setWhipHttpStatus] = useState('starting');
+    const [whipHttpError, setWhipHttpError] = useState('');
     const [relayFlushIntervalMs, setRelayFlushIntervalMs] = useState(300);
     const [relayVideoBitsPerSecond, setRelayVideoBitsPerSecond] = useState(45_000_000);
     const [relayMaxChunkSize, setRelayMaxChunkSize] = useState(4 * 1024 * 1024);
@@ -431,6 +440,9 @@ export default function HostView() {
     const effectiveTurnAvailability = obsAv1Mode ? roomHasTurnServer : hasTurnServer;
     const shouldPrewarmRelay = ingestMode !== 'obs' && hasRemoteShareLink && !effectiveTurnAvailability;
     const byokTurnSessionHint = 'Keeps TURN credentials in session storage so they survive reloads and are cleared when the tab or window closes.';
+    const buildWhipBroadcastUrl = useCallback((code) => (
+        `http://${formatHostForUrl(whipHttpHost)}:${whipHttpPort}/whip/broadcast/${code}`
+    ), [whipHttpHost, whipHttpPort]);
 
     const buildObsAutoConfig = useCallback((whipUrl, bearerToken) => {
         const obsOpts = {
@@ -1020,14 +1032,25 @@ export default function HostView() {
 
             // Auto-configure OBS via WebSocket when in OBS mode
             if (ingestMode === 'obs' && code && hostToken) {
-                const whipUrl = `http://${window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname}:3001/whip/broadcast/${code}`;
-                setObsAutoStatus('configuring');
-                setObsAutoMessage('Connecting to OBS...');
-                const result = await configureObsStream(buildObsAutoConfig(whipUrl, hostToken));
-                setObsAutoStatus(result.success ? 'success' : 'error');
-                setObsAutoMessage(result.message);
-                if (obsAv1Mode && !result.success) {
-                    throw new Error(result.message);
+                const whipUrl = buildWhipBroadcastUrl(code);
+                if (whipHttpStatus !== 'ready') {
+                    const message = whipHttpStatus === 'error'
+                        ? `OBS WHIP endpoint is unavailable: ${whipHttpError || 'HTTP listener failed.'}`
+                        : 'OBS WHIP endpoint is still starting. Retry OBS auto-configuration in a moment.';
+                    setObsAutoStatus('error');
+                    setObsAutoMessage(message);
+                    if (obsAv1Mode) {
+                        throw new Error(message);
+                    }
+                } else {
+                    setObsAutoStatus('configuring');
+                    setObsAutoMessage('Connecting to OBS...');
+                    const result = await configureObsStream(buildObsAutoConfig(whipUrl, hostToken));
+                    setObsAutoStatus(result.success ? 'success' : 'error');
+                    setObsAutoMessage(result.message);
+                    if (obsAv1Mode && !result.success) {
+                        throw new Error(result.message);
+                    }
                 }
             }
         } catch (err) {
@@ -1049,6 +1072,7 @@ export default function HostView() {
         qualityProfile,
         frameRate,
         buildObsAutoConfig,
+        buildWhipBroadcastUrl,
         byokTurnUrls,
         byokTurnAuthType,
         byokTurnSecret,
@@ -1056,6 +1080,8 @@ export default function HostView() {
         byokTurnCredential,
         obsApplySettings,
         obsAv1Mode,
+        whipHttpStatus,
+        whipHttpError,
     ]);
 
     const handleAutofillCloudflareTurn = useCallback(async () => {
@@ -1118,6 +1144,18 @@ export default function HostView() {
         }
         if (typeof data.hasTurnServer === 'boolean') {
             setHasTurnServer(data.hasTurnServer);
+        }
+        if (typeof data.whipHttpHost === 'string' && data.whipHttpHost) {
+            setWhipHttpHost(data.whipHttpHost);
+        }
+        if (typeof data.whipHttpPort === 'number' && data.whipHttpPort > 0) {
+            setWhipHttpPort(data.whipHttpPort);
+        }
+        if (typeof data.whipHttpStatus === 'string') {
+            setWhipHttpStatus(data.whipHttpStatus);
+        }
+        if (typeof data.whipHttpError === 'string') {
+            setWhipHttpError(data.whipHttpError);
         }
         if (typeof data.cloudflareTurnAutofillAvailable === 'boolean') {
             setCloudflareTurnAutofillAvailable(data.cloudflareTurnAutofillAvailable);
@@ -1474,6 +1512,14 @@ export default function HostView() {
                         <div className="obs-whip-setup-panel room-info">
                             <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1rem' }}>OBS WHIP Setup</h3>
 
+                                    {whipHttpStatus !== 'ready' && (
+                                        <div style={{ fontSize: '0.85rem', color: '#e5a84b', marginBottom: '0.5rem' }}>
+                                            {whipHttpStatus === 'error'
+                                                ? `OBS WHIP endpoint unavailable: ${whipHttpError || 'HTTP listener failed.'}`
+                                                : 'OBS WHIP endpoint is starting...'}
+                                        </div>
+                                    )}
+
                                     {obsAutoStatus === 'configuring' && (
                                         <div style={{ fontSize: '0.85rem', color: '#5b8def', marginBottom: '0.5rem' }}>
                                             {obsAutoMessage}
@@ -1494,7 +1540,15 @@ export default function HostView() {
                                         <div style={{ fontSize: '0.85rem', marginBottom: '0.75rem' }}>
                                             <button
                                                 onClick={() => {
-                                                    const whipUrl = `http://${window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname}:3001/whip/broadcast/${roomCode}`;
+                                                    if (whipHttpStatus !== 'ready') {
+                                                        setObsAutoStatus('error');
+                                                        setObsAutoMessage(whipHttpStatus === 'error'
+                                                            ? `OBS WHIP endpoint is unavailable: ${whipHttpError || 'HTTP listener failed.'}`
+                                                            : 'OBS WHIP endpoint is still starting. Retry in a moment.');
+                                                        socket.emit('request-server-config');
+                                                        return;
+                                                    }
+                                                    const whipUrl = buildWhipBroadcastUrl(roomCode);
                                                     setObsAutoStatus('configuring');
                                                     setObsAutoMessage('Connecting to OBS...');
                                                     const retryOpts = {
@@ -1518,7 +1572,7 @@ export default function HostView() {
                                             <div style={{ marginBottom: '0.5rem' }}>
                                                 <strong>WHIP URL:</strong>
                                                 <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
-                                                    {`http://${window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname}:3001/whip/broadcast/${roomCode}`}
+                                                    {buildWhipBroadcastUrl(roomCode)}
                                                 </code>
                                             </div>
                                             <div style={{ marginBottom: '0.5rem' }}>

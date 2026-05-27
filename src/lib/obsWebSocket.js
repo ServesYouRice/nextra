@@ -137,6 +137,46 @@ function normalizeOutputValue(value) {
     return String(value);
 }
 
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function getStreamStatus(sendRequest) {
+    const response = await sendRequest('GetStreamStatus');
+    if (response.requestStatus?.result !== true) return null;
+    return response.responseData || null;
+}
+
+async function stopActiveStream(sendRequest) {
+    const status = await getStreamStatus(sendRequest);
+    if (!status?.outputActive && !status?.outputReconnecting) {
+        return { stopped: false, ok: true };
+    }
+
+    const stopResponse = await sendRequest('StopStream');
+    if (stopResponse.requestStatus?.result !== true) {
+        return {
+            stopped: false,
+            ok: false,
+            message: stopResponse.requestStatus?.comment || 'unknown error',
+        };
+    }
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+        await delay(250);
+        const nextStatus = await getStreamStatus(sendRequest);
+        if (!nextStatus?.outputActive && !nextStatus?.outputReconnecting) {
+            return { stopped: true, ok: true };
+        }
+    }
+
+    return {
+        stopped: true,
+        ok: false,
+        message: 'OBS did not stop the previous stream in time.',
+    };
+}
+
 async function getProfileValue(sendRequest, category, name) {
     const response = await sendRequest('GetProfileParameter', {
         parameterCategory: category,
@@ -250,6 +290,20 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
     return withObsConnection(password, async (sendRequest, done) => {
         const applied = [];
         const warnings = [];
+
+        if (autoStart) {
+            const stopResult = await stopActiveStream(sendRequest);
+            if (!stopResult.ok) {
+                done({
+                    success: false,
+                    message: `OBS is still streaming to a previous target and could not be stopped: ${stopResult.message}`,
+                });
+                return;
+            }
+            if (stopResult.stopped) {
+                applied.push('previous stream stopped');
+            }
+        }
 
         const setResult = await sendRequest('SetStreamServiceSettings', {
             streamServiceType: 'whip_custom',
@@ -450,7 +504,21 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             if (startResult.requestStatus?.result === true) {
                 applied.push('streaming started');
             } else {
-                warnings.push(`auto-start failed: ${startResult.requestStatus?.comment || 'unknown'}`);
+                done({
+                    success: false,
+                    message: `OBS configured, but auto-start failed: ${startResult.requestStatus?.comment || 'unknown error'}`,
+                });
+                return;
+            }
+
+            await delay(750);
+            const streamStatus = await getStreamStatus(sendRequest);
+            if (streamStatus && !streamStatus.outputActive && !streamStatus.outputReconnecting) {
+                done({
+                    success: false,
+                    message: 'OBS configured, but streaming stopped immediately. Check the WHIP URL and local Nextra server status.',
+                });
+                return;
             }
         }
 
