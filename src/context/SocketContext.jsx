@@ -8,8 +8,8 @@ export function SocketProvider({ children }) {
         return io({
             path: '/socket.io',
             autoConnect: true,
-            transports: ['polling', 'websocket'],
-            upgrade: true,
+            transports: ['websocket'],
+            upgrade: false,
         });
     }, []);
 

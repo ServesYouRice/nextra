@@ -26,6 +26,10 @@ function toUint8ArraySync(data) {
     return null;
 }
 
+function normalizeRoomCode(value) {
+    return String(value || '').trim().toUpperCase().replace(/-/g, '');
+}
+
 
 export default function WatchView({ initialCode = '' }) {
     const socket = useSocket();
@@ -69,6 +73,12 @@ export default function WatchView({ initialCode = '' }) {
     const fmp4PlayerRef = useRef(null);
     const isEnteringFallbackRef = useRef(false);
     const activePlaybackAttemptRef = useRef(0);
+    const joinedRef = useRef(false);
+    const joinedRoomCodeRef = useRef(normalizeRoomCode(initialCode));
+    const watchingRef = useRef(false);
+    const playbackModeRef = useRef('');
+    const fallbackModeRef = useRef(false);
+    const reconnectingRef = useRef(false);
 
     const cleanupPlayback = useCallback(() => {
         activePlaybackAttemptRef.current += 1;
@@ -222,7 +232,34 @@ export default function WatchView({ initialCode = '' }) {
         return () => socket.off('server-config', onServerConfig);
     }, [socket]);
 
-    const startMediasoupPlayback = useCallback(async ({ forceProbe = false } = {}) => {
+    useEffect(() => {
+        joinedRef.current = joined;
+    }, [joined]);
+
+    useEffect(() => {
+        watchingRef.current = watching;
+    }, [watching]);
+
+    useEffect(() => {
+        playbackModeRef.current = playbackMode;
+    }, [playbackMode]);
+
+    useEffect(() => {
+        fallbackModeRef.current = fallbackMode;
+    }, [fallbackMode]);
+
+    const startMediasoupPlayback = useCallback(async ({
+        forceProbe = false,
+        relayAllowedOverride,
+        turnAvailableOverride,
+    } = {}) => {
+        const canUseRelay = typeof relayAllowedOverride === 'boolean'
+            ? relayAllowedOverride
+            : relayAllowed;
+        const turnAvailable = typeof turnAvailableOverride === 'boolean'
+            ? turnAvailableOverride
+            : effectiveTurnAvailability;
+
         const attemptId = ++activePlaybackAttemptRef.current;
         const device = deviceRef.current;
         if (!device || !device.loaded) {
@@ -263,7 +300,7 @@ export default function WatchView({ initialCode = '' }) {
         // Tunnel viewers get a very short timeout (2s) — mediasoup WebRTC cannot
         // work through a Cloudflare tunnel (no UDP), so fail fast and fall back
         // to relay playback instead of wasting time on unreachable candidates.
-        const shouldFailFastForTunnel = isTunnelOrigin && !effectiveTurnAvailability && !forceProbe;
+        const shouldFailFastForTunnel = isTunnelOrigin && !turnAvailable && !forceProbe;
         const iceTimeoutMs = shouldFailFastForTunnel ? 2000 : 8000;
         const connectionState = recvTransport.connectionState;
         if (connectionState !== 'connected') {
@@ -272,7 +309,7 @@ export default function WatchView({ initialCode = '' }) {
                     cleanup();
                     reject(new Error(
                         shouldFailFastForTunnel
-                            ? relayAllowed
+                            ? canUseRelay
                                 ? 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required, or use Relay mode instead.'
                                 : 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required for this room.'
                             : 'WebRTC connection timed out (ICE could not connect). Try refreshing or check firewall settings.'
@@ -663,9 +700,57 @@ export default function WatchView({ initialCode = '' }) {
     }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback]);
 
     useEffect(() => {
-        const onTransportFailed = ({ reason } = {}) => {
+        const onTransportFailed = async ({ reason, recoverable } = {}) => {
+            if (recoverable && joinedRef.current) {
+                const wasWatching = watchingRef.current;
+                const previousPlaybackMode = playbackModeRef.current;
+
+                cleanupPlayback();
+                setWatching(false);
+                setHostDisconnected(false);
+                setHostReconnectingReason('');
+                setPlaybackMode('');
+                setFallbackMode(false);
+                setFallbackState(null);
+                setError(reason || 'Stream connection interrupted. Reconnecting...');
+
+                if (!wasWatching) return;
+
+                setWatchLoading(true);
+                try {
+                    if (previousPlaybackMode === 'relay') {
+                        await startRelayPlayback();
+                    } else {
+                        try {
+                            await startMediasoupPlayback({
+                                relayAllowedOverride: relayAllowed,
+                                turnAvailableOverride: roomHasTurnServer || hasTurnServer,
+                            });
+                        } catch (err) {
+                            if (relayAllowed === false) throw err;
+                            console.warn('[Nextra] Recovered WebRTC transport failed; trying relay:', err.message);
+                            cleanupPlayback();
+                            await startRelayPlayback();
+                        }
+                    }
+                    setError('');
+                } catch (err) {
+                    console.warn('[Nextra] Failed to recover viewer transport:', err.message);
+                    cleanupPlayback();
+                    setWatching(false);
+                    setPlaybackMode('');
+                    setFallbackMode(false);
+                    setFallbackState(null);
+                    setError(err.message || 'Stream connection was interrupted. Click Watch Stream to reconnect.');
+                } finally {
+                    setWatchLoading(false);
+                }
+                return;
+            }
+
             cleanupPlayback();
             resetDevice();
+            joinedRoomCodeRef.current = '';
             setJoined(false);
             setWatching(false);
             setHasProducer(false);
@@ -687,7 +772,50 @@ export default function WatchView({ initialCode = '' }) {
 
         socket.on('transport-failed', onTransportFailed);
         return () => socket.off('transport-failed', onTransportFailed);
-    }, [socket, cleanupPlayback]);
+    }, [
+        socket,
+        cleanupPlayback,
+        hasTurnServer,
+        relayAllowed,
+        roomHasTurnServer,
+        startMediasoupPlayback,
+        startRelayPlayback,
+    ]);
+
+    const joinRoomAndLoadDevice = useCallback(async (roomCode) => {
+        const cleanCode = normalizeRoomCode(roomCode);
+        const response = await socketRequest(socket, 'join-room', { code: cleanCode });
+        joinedRoomCodeRef.current = cleanCode;
+        setJoined(true);
+        setHasProducer(response.hasProducer || false);
+        setAllowMediaControl(response.allowMediaControl !== false);
+
+        if (response.ingestMode) setIngestMode(response.ingestMode);
+        if (typeof response.relayAllowed === 'boolean') setRelayAllowed(response.relayAllowed);
+        if (typeof response.hasRoomTurnServer === 'boolean') setRoomHasTurnServer(response.hasRoomTurnServer);
+        if (typeof response.obsVideoCodec === 'string') setObsVideoCodec(response.obsVideoCodec);
+        if (response.fallbackCodec) setFallbackCodec(response.fallbackCodec);
+        setWhipReconnecting(!!response.whipReconnecting);
+
+        const av1Supported = typeof MediaSource !== 'undefined'
+            && MediaSource.isTypeSupported('video/mp4; codecs="av01.0.08M.08"');
+        const av1Unsupported = isAv1PlaybackUnsupported({
+            obsVideoCodec: response.obsVideoCodec,
+            mediaSourceSupported: av1Supported,
+        });
+        if (av1Unsupported) {
+            console.warn('[WatchView] AV1 playback is not supported in this browser');
+        }
+        setCodecUnsupported(av1Unsupported);
+
+        const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
+        const device = await getDevice();
+        if (!device.loaded) {
+            await device.load({ routerRtpCapabilities: rtpCapabilities });
+        }
+        deviceRef.current = device;
+        return response;
+    }, [socket]);
 
     const handleJoin = useCallback(async () => {
         setError('');
@@ -703,45 +831,18 @@ export default function WatchView({ initialCode = '' }) {
         setCodecUnsupported(false);
         setWhipReconnecting(false);
 
-        const code = codeInput.trim().toUpperCase().replace(/-/g, '');
+        const code = normalizeRoomCode(codeInput);
         if (!code) {
             setError('Please enter a room code.');
             return;
         }
 
         try {
-            const response = await socketRequest(socket, 'join-room', { code });
-            setJoined(true);
-            setHasProducer(response.hasProducer || false);
-            setAllowMediaControl(response.allowMediaControl !== false);
-
-            if (response.ingestMode) setIngestMode(response.ingestMode);
-            if (typeof response.relayAllowed === 'boolean') setRelayAllowed(response.relayAllowed);
-            if (typeof response.hasRoomTurnServer === 'boolean') setRoomHasTurnServer(response.hasRoomTurnServer);
-            if (typeof response.obsVideoCodec === 'string') setObsVideoCodec(response.obsVideoCodec);
-            if (response.fallbackCodec) setFallbackCodec(response.fallbackCodec);
-
-            const av1Supported = typeof MediaSource !== 'undefined'
-                && MediaSource.isTypeSupported('video/mp4; codecs="av01.0.08M.08"');
-            const av1Unsupported = isAv1PlaybackUnsupported({
-                obsVideoCodec: response.obsVideoCodec,
-                mediaSourceSupported: av1Supported,
-            });
-            if (av1Unsupported) {
-                console.warn('[WatchView] AV1 playback is not supported in this browser');
-            }
-            setCodecUnsupported(av1Unsupported);
-
-            const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
-            const device = await getDevice();
-            if (!device.loaded) {
-                await device.load({ routerRtpCapabilities: rtpCapabilities });
-            }
-            deviceRef.current = device;
+            await joinRoomAndLoadDevice(code);
         } catch (err) {
             setError(err.message);
         }
-    }, [socket, codeInput]);
+    }, [codeInput, joinRoomAndLoadDevice]);
 
     const enterFallbackMode = useCallback(() => {
         if (fmp4PlayerRef.current || isEnteringFallbackRef.current) return;
@@ -772,7 +873,7 @@ export default function WatchView({ initialCode = '' }) {
                 return;
             }
 
-            const roomCode = codeInput.trim().toUpperCase().replace(/-/g, '');
+            const roomCode = joinedRoomCodeRef.current || normalizeRoomCode(codeInput);
             const player = createFmp4RelayPlayer({
                 videoElement: videoRef.current,
                 socket,
@@ -929,6 +1030,7 @@ export default function WatchView({ initialCode = '' }) {
 
         cleanupPlayback();
         resetDevice();
+        joinedRoomCodeRef.current = '';
         setJoined(false);
         setWatching(false);
         setHasProducer(false);
@@ -948,37 +1050,105 @@ export default function WatchView({ initialCode = '' }) {
         setWhipReconnecting(false);
     }, [cleanupPlayback, socket]);
 
-    // Detect socket reconnection while viewer thinks they're in a room.
-    // After reconnect the server has no record of this socket ID, so all
-    // subsequent requests would silently fail — reset to the join screen.
     useEffect(() => {
-        const onReconnect = () => {
-            if (!joined) return;
-            console.warn('[Nextra] Socket reconnected while in a room — resetting viewer state.');
+        const onReconnect = async () => {
+            if (!joinedRef.current || reconnectingRef.current) return;
+            const roomCode = joinedRoomCodeRef.current || normalizeRoomCode(codeInput);
+            if (!roomCode) return;
+
+            const wasWatching = watchingRef.current;
+            const previousPlaybackMode = playbackModeRef.current;
+            const wasFallbackMode = fallbackModeRef.current;
+            reconnectingRef.current = true;
+            console.warn('[Nextra] Socket reconnected while in a room - rejoining viewer session.');
+
             cleanupPlayback();
             resetDevice();
-            setJoined(false);
             setWatching(false);
-            setHasProducer(false);
             setHostDisconnected(false);
             setHostReconnectingReason('');
             setPlaybackMode('');
-            setIsMuted(false);
-            setRoomHasTurnServer(false);
-            setIngestMode('browser');
-            setRelayAllowed(true);
-            setObsVideoCodec(null);
             setFallbackMode(false);
             setFallbackState(null);
-            setFallbackCodec(null);
-            setCodecUnsupported(false);
             setWhipReconnecting(false);
-            setError('Connection was lost. Please rejoin the room.');
+            if (wasWatching || wasFallbackMode) {
+                setWatchLoading(true);
+                setError('Connection interrupted. Reconnecting...');
+            }
+
+            try {
+                const response = await joinRoomAndLoadDevice(roomCode);
+                setError('');
+
+                if ((wasWatching || wasFallbackMode) && response.hasProducer) {
+                    try {
+                        if (wasFallbackMode) {
+                            enterFallbackMode();
+                        } else if (previousPlaybackMode === 'relay') {
+                            await startRelayPlayback();
+                        } else {
+                            try {
+                                await startMediasoupPlayback({
+                                    relayAllowedOverride: response.relayAllowed,
+                                    turnAvailableOverride: !!response.hasRoomTurnServer || hasTurnServer,
+                                });
+                            } catch (err) {
+                                if (response.relayAllowed === false) throw err;
+                                console.warn('[Nextra] Reconnected WebRTC playback failed; trying relay:', err.message);
+                                cleanupPlayback();
+                                await startRelayPlayback();
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('[Nextra] Rejoined room but could not resume playback:', err.message);
+                        cleanupPlayback();
+                        setWatching(false);
+                        setPlaybackMode('');
+                        setFallbackMode(false);
+                        setFallbackState(null);
+                        setError(err.message || 'Reconnected. Click Watch Stream to resume playback.');
+                    }
+                }
+            } catch (err) {
+                console.warn('[Nextra] Failed to rejoin viewer session after reconnect:', err.message);
+                cleanupPlayback();
+                resetDevice();
+                joinedRoomCodeRef.current = '';
+                setJoined(false);
+                setWatching(false);
+                setHasProducer(false);
+                setHostDisconnected(false);
+                setHostReconnectingReason('');
+                setPlaybackMode('');
+                setIsMuted(false);
+                setRoomHasTurnServer(false);
+                setIngestMode('browser');
+                setRelayAllowed(true);
+                setObsVideoCodec(null);
+                setFallbackMode(false);
+                setFallbackState(null);
+                setFallbackCodec(null);
+                setCodecUnsupported(false);
+                setWhipReconnecting(false);
+                setError('Connection was lost. Please rejoin the room.');
+            } finally {
+                reconnectingRef.current = false;
+                setWatchLoading(false);
+            }
         };
 
         socket.on('connect', onReconnect);
         return () => socket.off('connect', onReconnect);
-    }, [socket, joined, cleanupPlayback]);
+    }, [
+        socket,
+        codeInput,
+        cleanupPlayback,
+        enterFallbackMode,
+        hasTurnServer,
+        joinRoomAndLoadDevice,
+        startMediasoupPlayback,
+        startRelayPlayback,
+    ]);
 
     useEffect(() => () => {
         if (fmp4PlayerRef.current) {
