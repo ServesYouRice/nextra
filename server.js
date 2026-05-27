@@ -30,6 +30,7 @@ const {
 } = require('./lib/network');
 const { createWhipRouter, setIo: setWhipIo } = require('./lib/whipRoutes');
 const { createWhepRouter } = require('./lib/whepRoutes');
+const { findAvailablePort } = require('./lib/portResolver');
 const { execFileSync } = require('child_process');
 
 const app = express();
@@ -38,6 +39,10 @@ let stopPublicTunnel = null;
 let ioServer = null;
 let publicShareStatus = normalizeBaseUrl(config.SHARE_BASE_URL) ? 'manual' : (config.AUTO_PUBLIC_TUNNEL ? 'starting' : 'disabled');
 let publicShareError = '';
+let runtimeWhipHttpPort = config.WHIP_HTTP_PORT;
+let whipHttpStatus = config.WHIP_ENABLED ? 'starting' : 'disabled';
+let whipHttpError = '';
+let whipHttpServer = null;
 
 if (config.TRUST_PROXY !== false) {
     app.set('trust proxy', config.TRUST_PROXY);
@@ -468,6 +473,26 @@ function shouldExposeLanForSocket(socket) {
     return isLocalClientIp(getSocketHandshakeIp(socket));
 }
 
+function getWhipHttpClientHost() {
+    const host = (config.WHIP_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1';
+    if (host === '0.0.0.0' || host === '::' || host === '[::]' || host === 'localhost' || host === '::1' || host === '[::1]') {
+        return '127.0.0.1';
+    }
+    return host;
+}
+
+function formatHostForUrl(host) {
+    if (!host) return '127.0.0.1';
+    if (host.includes(':') && !host.startsWith('[')) {
+        return `[${host}]`;
+    }
+    return host;
+}
+
+function getWhipHttpBaseUrl() {
+    return `http://${formatHostForUrl(getWhipHttpClientHost())}:${runtimeWhipHttpPort}`;
+}
+
 function buildSocketConfigPayload(socket) {
     return {
         hostUploadMbps: config.HOST_UPLOAD_MBPS,
@@ -480,7 +505,11 @@ function buildSocketConfigPayload(socket) {
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
         publicShareStatus,
         publicShareError,
-        whipHttpPort: config.WHIP_HTTP_PORT,
+        whipHttpHost: getWhipHttpClientHost(),
+        whipHttpPort: runtimeWhipHttpPort,
+        whipHttpStatus,
+        whipHttpError,
+        whipHttpUrl: getWhipHttpBaseUrl(),
     };
 }
 
@@ -557,7 +586,11 @@ app.get('/api/config', (req, res) => {
         publicShareStatus,
         publicShareError,
         whipEnabled: config.WHIP_ENABLED,
-        whipHttpPort: config.WHIP_HTTP_PORT,
+        whipHttpHost: getWhipHttpClientHost(),
+        whipHttpPort: runtimeWhipHttpPort,
+        whipHttpStatus,
+        whipHttpError,
+        whipHttpUrl: getWhipHttpBaseUrl(),
         whepEnabled: config.WHEP_ENABLED,
     });
 });
@@ -774,6 +807,11 @@ function cleanupGlobalResources() {
         connectionCleanupInterval = null;
     }
 
+    if (whipHttpServer) {
+        try { whipHttpServer.close(); } catch { }
+        whipHttpServer = null;
+    }
+
     if (worker) {
         try { worker.close(); } catch { }
         worker = null;
@@ -788,6 +826,9 @@ function cleanupGlobalResources() {
     runtimeShareBaseUrl = '';
     publicShareStatus = normalizeBaseUrl(config.SHARE_BASE_URL) ? 'manual' : (config.AUTO_PUBLIC_TUNNEL ? 'starting' : 'disabled');
     publicShareError = '';
+    runtimeWhipHttpPort = config.WHIP_HTTP_PORT;
+    whipHttpStatus = config.WHIP_ENABLED ? 'starting' : 'disabled';
+    whipHttpError = '';
 }
 
 async function handleHttpsServerError(err) {
@@ -809,6 +850,84 @@ async function handleHttpsServerError(err) {
 
     cleanupGlobalResources();
     process.exit(1);
+}
+
+function setWhipHttpRuntimeState(status, error = '') {
+    whipHttpStatus = status;
+    whipHttpError = error;
+    if (ioServer) {
+        emitServerConfigToAll(ioServer);
+    }
+}
+
+function listenServer(server, port, host) {
+    return new Promise((resolve, reject) => {
+        const cleanup = () => {
+            server.removeListener('error', onError);
+            server.removeListener('listening', onListening);
+        };
+        const onError = (err) => {
+            cleanup();
+            reject(err);
+        };
+        const onListening = () => {
+            cleanup();
+            resolve();
+        };
+
+        server.once('error', onError);
+        server.once('listening', onListening);
+        server.listen(port, host);
+    });
+}
+
+async function startWhipHttpServer(whipRouter) {
+    if (!whipRouter) {
+        setWhipHttpRuntimeState('disabled');
+        return;
+    }
+
+    setWhipHttpRuntimeState('starting');
+
+    const whipApp = express();
+    whipApp.use((req, res, next) => {
+        console.log(`[WHIP-HTTP] ${req.method} ${req.url} from ${req.ip}`);
+        next();
+    });
+    whipApp.use('/whip', whipRouter);
+
+    try {
+        const resolvedPort = await findAvailablePort({
+            preferredPort: config.WHIP_HTTP_PORT,
+            host: config.WHIP_BIND_HOST,
+            reservedPorts: [config.PORT],
+            maxAttempts: 25,
+        });
+
+        const server = http.createServer(whipApp);
+        await listenServer(server, resolvedPort, config.WHIP_BIND_HOST);
+        whipHttpServer = server;
+        runtimeWhipHttpPort = resolvedPort;
+        if (resolvedPort !== config.WHIP_HTTP_PORT) {
+            console.warn(`[Startup] WHIP HTTP port ${config.WHIP_HTTP_PORT} was unavailable; using ${resolvedPort}.`);
+        }
+
+        server.on('error', (err) => {
+            const message = `WHIP HTTP server failed: ${err.message}`;
+            console.warn(`${message} - OBS auto-start is disabled until this is fixed.`);
+            setWhipHttpRuntimeState('error', message);
+        });
+
+        setWhipHttpRuntimeState('ready');
+        console.log(`   WHIP:    ${getWhipHttpBaseUrl()}/whip/broadcast/<roomCode>`);
+        console.log('');
+    } catch (err) {
+        const message = `WHIP HTTP server failed: ${err.message}`;
+        console.warn(`${message} - OBS auto-start is disabled until this is fixed.`);
+        runtimeWhipHttpPort = config.WHIP_HTTP_PORT;
+        setWhipHttpRuntimeState('error', message);
+        console.log('');
+    }
 }
 
 (async () => {
@@ -950,29 +1069,8 @@ async function handleHttpsServerError(err) {
         }
         console.log(`   UDP:     ${config.RTC_MIN_PORT}-${config.RTC_MAX_PORT}`);
 
-        // Start HTTP server for WHIP (OBS rejects self-signed HTTPS certs)
-        if (whipRouter) {
-            const whipApp = express();
-            whipApp.use((req, res, next) => {
-                console.log(`[WHIP-HTTP] ${req.method} ${req.url} from ${req.ip}`);
-                next();
-            });
-            whipApp.use('/whip', whipRouter);
-            const whipHttpServer = http.createServer(whipApp);
-            const whipPort = config.WHIP_HTTP_PORT;
-            whipHttpServer.listen(whipPort, config.WHIP_BIND_HOST, () => {
-                const whipHost = config.WHIP_BIND_HOST === '0.0.0.0' || config.WHIP_BIND_HOST === '::'
-                    ? 'localhost'
-                    : config.WHIP_BIND_HOST;
-                console.log(`   WHIP:    http://${whipHost}:${whipPort}/whip/broadcast/<roomCode>`);
-                console.log('');
-            });
-            whipHttpServer.on('error', (err) => {
-                console.warn(`WHIP HTTP server failed: ${err.message} — OBS must use HTTPS`);
-            });
-        } else {
-            console.log('');
-        }
+        // Start HTTP server for WHIP (OBS rejects self-signed HTTPS certs).
+        void startWhipHttpServer(whipRouter);
 
         void maybeStartPublicTunnel();
     });
