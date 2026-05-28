@@ -3,7 +3,7 @@ import React from 'react';
 export default function HowToView() {
     const appOrigin = typeof window !== 'undefined'
         ? window.location.origin
-        : 'https://localhost:3000';
+        : 'http://127.0.0.1:3000';
 
     return (
         <div className="article-container">
@@ -56,9 +56,7 @@ export default function HowToView() {
                         <li style={{ marginBottom: '0.5rem' }}>
                             Allow firewall access for Node.js when prompted, or viewers may not connect.
                         </li>
-                        <li>
-                            The browser will warn about a self-signed certificate on first launch. That is expected for local HTTPS.
-                        </li>
+                        <li>Use the local host page from this machine when capturing a browser screen.</li>
                     </ul>
                 </div>
             </div>
@@ -227,7 +225,7 @@ export default function HowToView() {
 
             <h2>Security and privacy</h2>
             <p>
-                Streams are encrypted in transit with HTTPS and WebRTC DTLS. Media is not stored by Nextra.
+                Public links use HTTPS, and media is encrypted in transit with WebRTC DTLS. Media is not stored by Nextra.
                 OBS WebSocket traffic stays on localhost. Room access is code-based with no user accounts.
                 If you enable Cloudflare TURN autofill, the long-lived API token stays on the server and the browser only receives short-lived TURN credentials.
             </p>

@@ -21,6 +21,25 @@ export function resetDevice() {
     deviceInstance = null;
 }
 
+function getSocketEndpointLabel() {
+    if (typeof window === 'undefined') return '/socket.io';
+    return `${window.location.origin.replace(/\/$/, '')}/socket.io`;
+}
+
+function formatSocketConnectError(err) {
+    const rawMessage = err?.message || 'unknown error';
+    const lowerMessage = rawMessage.toLowerCase();
+    if (
+        lowerMessage.includes('xhr poll error')
+        || lowerMessage.includes('websocket error')
+        || lowerMessage.includes('timeout')
+    ) {
+        return `Socket connect failed: cannot reach the Nextra server at ${getSocketEndpointLabel()}. Make sure the backend is running; in source/dev, use npm run dev.`;
+    }
+
+    return `Socket connect failed: ${rawMessage}`;
+}
+
 function waitForSocketConnect(socket, timeoutMs = 10000) {
     if (socket.connected) return Promise.resolve();
 
@@ -37,7 +56,7 @@ function waitForSocketConnect(socket, timeoutMs = 10000) {
         };
 
         const onConnectError = (err) => {
-            lastConnectError = new Error(`Socket connect failed: ${err?.message || 'unknown error'}`);
+            lastConnectError = new Error(formatSocketConnectError(err));
         };
 
         const cleanup = () => {

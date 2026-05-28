@@ -145,8 +145,10 @@ module.exports = {
     // Server
     PORT: parseIntEnv(process.env.PORT, 3000),
     BIND_HOST: bindHost,
+    OPEN_BROWSER: parseBoolEnv(process.env.OPEN_BROWSER, isPackagedRuntime),
 
     // HTTPS - self-signed cert auto-generated and cached here
+    LOCAL_HTTPS: parseBoolEnv(process.env.LOCAL_HTTPS, false),
     HTTPS_CERT_DIR: (process.env.HTTPS_CERT_DIR || './certs').trim(),
 
     // Network

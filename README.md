@@ -32,7 +32,7 @@ You can grab `Nextra.exe` from [GitHub Releases](../../releases), run it, and st
 ### Host (Packaged)
 
 1. Download `Nextra.exe` from [GitHub Releases](../../releases).
-2. Run it. A browser tab opens to `https://localhost:3000/#host`.
+2. Run it and open `http://127.0.0.1:3000/#host`.
 3. Click **Start Sharing** for browser capture, or enable **Use OBS (WHIP ingest)** first if you want OBS mode.
 4. Send viewers the **Public Link** for internet viewing or the **Local Link** / room code for LAN viewing.
 
@@ -45,11 +45,11 @@ npm install
 npm start
 ```
 
-Open `https://localhost:3000/#host` and choose either browser capture or OBS mode.
+Open `http://127.0.0.1:3000/#host` and choose either browser capture or OBS mode.
 
 ### Viewer
 
-1. Open the link the host shared, or navigate to `https://<host>:3000/#watch`.
+1. Open the link the host shared, or navigate to `http://<host>:3000/#watch` for LAN viewing.
 2. Enter the room code if needed.
 3. Click **Watch Stream** when prompted.
 
@@ -200,9 +200,11 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 
 | Variable | Default | Description |
 |---|---|---|
-| `PORT` | `3000` | HTTPS server port |
+| `PORT` | `3000` | Browser server port |
 | `BIND_HOST` | `127.0.0.1` | Bind address |
-| `HTTPS_CERT_DIR` | `./certs` | TLS certificate directory |
+| `OPEN_BROWSER` | `false` from source, `true` in packaged `Nextra.exe` | Open the host page automatically on startup or duplicate launch |
+| `LOCAL_HTTPS` | `false` | Serve the local app over self-signed HTTPS instead of HTTP |
+| `HTTPS_CERT_DIR` | `./certs` | TLS certificate directory when `LOCAL_HTTPS=true` |
 
 ### OBS / WHIP
 
@@ -260,7 +262,7 @@ See `.env.example` for the full list.
 
 ## Security and Privacy
 
-- HTTPS + WebRTC transport encryption in transit
+- Public HTTPS tunnel links and WebRTC DTLS media encryption in transit
 - Room-code based access with no user accounts
 - Rate limiting and connection limits on signaling
 - OBS WebSocket communication is localhost-only
@@ -299,7 +301,7 @@ Important limits:
 
 ```text
 Browser (Host)                    Server                         Browser (Viewer)
-+--------------+     HTTPS      +----------------+    WebRTC    +--------------+
++--------------+    HTTP(S)     +----------------+    WebRTC    +--------------+
 | Screen/OBS   | ------------> | mediasoup SFU  | ----------> | Video player |
 | capture      |    WebSocket   |                |             |              |
 +--------------+               | FFmpeg relay    | -- fMP4 --> | MSE player   |
