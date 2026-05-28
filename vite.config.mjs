@@ -24,24 +24,31 @@ export default defineConfig(({ mode }) => {
   const allowedHosts = new Set(['.trycloudflare.com'])
   addAllowedHosts(allowedHosts, env.SHARE_BASE_URL)
   addAllowedHosts(allowedHosts, env.EXTRA_ALLOWED_ORIGINS)
+  const backendProtocol = String(env.LOCAL_HTTPS || '').toLowerCase() === 'true' ? 'https' : 'http'
+  const backendTarget = `${backendProtocol}://localhost:3000`
+  const proxy = {
+    '/socket.io': {
+      target: backendTarget,
+      ws: true,
+      changeOrigin: true,
+      secure: false,
+    },
+    '/api': {
+      target: backendTarget,
+      changeOrigin: true,
+      secure: false,
+    },
+  }
 
   return {
     plugins: [react()],
     server: {
       allowedHosts: [...allowedHosts],
-      proxy: {
-        '/socket.io': {
-          target: 'https://localhost:3000',
-          ws: true,
-          changeOrigin: true,
-          secure: false,
-        },
-        '/api': {
-          target: 'https://localhost:3000',
-          changeOrigin: true,
-          secure: false,
-        },
-      },
+      proxy,
+    },
+    preview: {
+      allowedHosts: [...allowedHosts],
+      proxy,
     },
     build: { outDir: 'dist', sourcemap: false },
     optimizeDeps: {

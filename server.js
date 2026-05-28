@@ -1,4 +1,4 @@
-// server.js - Entry point: Express + Socket.io + Mediasoup (HTTPS)
+// server.js - Entry point: Express + Socket.io + Mediasoup
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -31,7 +31,7 @@ const {
 const { createWhipRouter, setIo: setWhipIo } = require('./lib/whipRoutes');
 const { createWhepRouter } = require('./lib/whepRoutes');
 const { findAvailablePort } = require('./lib/portResolver');
-const { execFileSync } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 
 const app = express();
 let runtimeShareBaseUrl = '';
@@ -43,6 +43,32 @@ let runtimeWhipHttpPort = config.WHIP_HTTP_PORT;
 let whipHttpStatus = config.WHIP_ENABLED ? 'starting' : 'disabled';
 let whipHttpError = '';
 let whipHttpServer = null;
+
+function getLocalProtocol() {
+    return config.LOCAL_HTTPS ? 'https' : 'http';
+}
+
+function getHostPageUrl(protocol = getLocalProtocol()) {
+    return `${protocol}://127.0.0.1:${config.PORT}/#host`;
+}
+
+function openBrowser(url) {
+    if (!config.OPEN_BROWSER || !url) return;
+
+    try {
+        if (process.platform === 'win32') {
+            execFileSync('cmd.exe', ['/c', 'start', '', url], { stdio: 'ignore', windowsHide: true });
+            return;
+        }
+
+        const child = process.platform === 'darwin'
+            ? execFile('open', [url])
+            : execFile('xdg-open', [url]);
+        if (typeof child.unref === 'function') child.unref();
+    } catch (err) {
+        console.warn(`Could not open browser automatically: ${err.message}`);
+    }
+}
 
 if (config.TRUST_PROXY !== false) {
     app.set('trust proxy', config.TRUST_PROXY);
@@ -69,7 +95,7 @@ app.use((req, res, next) => {
         },
         crossOriginEmbedderPolicy: false,
         referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-        hsts: { maxAge: 31536000, includeSubDomains: false },
+        hsts: config.LOCAL_HTTPS ? { maxAge: 31536000, includeSubDomains: false } : false,
     })(req, res, next);
 });
 
@@ -282,17 +308,18 @@ function validateSocketHandshakeRequest(req) {
 }
 
 function getAllowedOrigins() {
+    const localProtocol = getLocalProtocol();
     const origins = new Set([
-        `https://localhost:${config.PORT}`,
-        `https://127.0.0.1:${config.PORT}`,
+        `${localProtocol}://localhost:${config.PORT}`,
+        `${localProtocol}://127.0.0.1:${config.PORT}`,
     ]);
 
     if (config.LAN_IP) {
-        origins.add(`https://${config.LAN_IP}:${config.PORT}`);
+        origins.add(`${localProtocol}://${config.LAN_IP}:${config.PORT}`);
     }
 
     if (config.PUBLIC_IP && config.PUBLIC_IP !== config.LAN_IP) {
-        origins.add(`https://${config.PUBLIC_IP}:${config.PORT}`);
+        origins.add(`${localProtocol}://${config.PUBLIC_IP}:${config.PORT}`);
     }
 
     if (process.env.NODE_ENV !== 'production') {
@@ -341,7 +368,7 @@ function getShareBaseUrl(req) {
     }
 
     if (config.PUBLIC_IP && config.PUBLIC_IP !== config.LAN_IP) {
-        return `https://${config.PUBLIC_IP}:${config.PORT}`;
+        return `${getLocalProtocol()}://${config.PUBLIC_IP}:${config.PORT}`;
     }
 
     return '';
@@ -349,32 +376,38 @@ function getShareBaseUrl(req) {
 
 function getLocalBaseUrl() {
     const bindHost = (config.BIND_HOST || '').toLowerCase();
+    const localProtocol = getLocalProtocol();
     if (bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1' || bindHost === '[::1]') {
-        return `https://localhost:${config.PORT}`;
+        return `${localProtocol}://localhost:${config.PORT}`;
     }
     if (bindHost && bindHost !== '0.0.0.0' && bindHost !== '::') {
-        return `https://${config.BIND_HOST}:${config.PORT}`;
+        return `${localProtocol}://${config.BIND_HOST}:${config.PORT}`;
     }
-    return `https://${config.LAN_IP}:${config.PORT}`;
+    return `${localProtocol}://${config.LAN_IP}:${config.PORT}`;
 }
 
-function getLoopbackBaseUrl() {
-    return `https://127.0.0.1:${config.PORT}`;
+function getLoopbackBaseUrl(protocol = getLocalProtocol()) {
+    return `${protocol}://127.0.0.1:${config.PORT}`;
 }
 
-async function probeExistingNextraInstance() {
+async function probeExistingNextraInstance(protocol = getLocalProtocol()) {
     return new Promise((resolve) => {
-        const req = https.get(
-            {
-                hostname: '127.0.0.1',
-                port: config.PORT,
-                path: '/api/config',
-                rejectUnauthorized: false,
-                timeout: 1500,
-                headers: {
-                    accept: 'application/json',
-                },
+        const client = protocol === 'https' ? https : http;
+        const requestOptions = {
+            hostname: '127.0.0.1',
+            port: config.PORT,
+            path: '/api/config',
+            timeout: 1500,
+            headers: {
+                accept: 'application/json',
             },
+        };
+        if (protocol === 'https') {
+            requestOptions.rejectUnauthorized = false;
+        }
+
+        const req = client.get(
+            requestOptions,
             (res) => {
                 if (res.statusCode !== 200) {
                     res.resume();
@@ -410,8 +443,33 @@ async function probeExistingNextraInstance() {
     });
 }
 
+async function findRunningNextraProtocol() {
+    const primaryProtocol = getLocalProtocol();
+    const alternateProtocol = primaryProtocol === 'https' ? 'http' : 'https';
+
+    if (await probeExistingNextraInstance(primaryProtocol)) {
+        return primaryProtocol;
+    }
+
+    if (await probeExistingNextraInstance(alternateProtocol)) {
+        return alternateProtocol;
+    }
+
+    return '';
+}
+
+async function exitIfAlreadyRunning() {
+    const runningProtocol = await findRunningNextraProtocol();
+    if (!runningProtocol) return false;
+
+    console.log(`Nextra is already running at ${getLoopbackBaseUrl(runningProtocol)}.`);
+    openBrowser(getHostPageUrl(runningProtocol));
+    process.exit(0);
+    return true;
+}
+
 function getShareBaseUrlFromHeaders(headers = {}, remoteAddress = '') {
-    if (shouldTrustRequestForwardedHeaders(headers, remoteAddress, true)) {
+    if (shouldTrustRequestForwardedHeaders(headers, remoteAddress, config.LOCAL_HTTPS)) {
         const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(headers['x-forwarded-host']);
         const proto = (forwardedProto || '').toLowerCase();
@@ -424,7 +482,7 @@ function getShareBaseUrlFromHeaders(headers = {}, remoteAddress = '') {
     const hostHeader = typeof headers.host === 'string' ? headers.host : '';
     const hostParts = parseUrlHostParts(hostHeader);
     if (hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
-        return `https://${hostParts.hostWithPort}`;
+        return `${getLocalProtocol()}://${hostParts.hostWithPort}`;
     }
 
     return '';
@@ -449,7 +507,7 @@ function getShareBaseUrlForSocket(socket) {
     }
 
     if (config.PUBLIC_IP && config.PUBLIC_IP !== config.LAN_IP) {
-        return `https://${config.PUBLIC_IP}:${config.PORT}`;
+        return `${getLocalProtocol()}://${config.PUBLIC_IP}:${config.PORT}`;
     }
 
     return '';
@@ -765,6 +823,7 @@ async function maybeStartPublicTunnel() {
     try {
         const tunnel = await startCloudflareQuickTunnel({
             port: config.PORT,
+            localProtocol: getLocalProtocol(),
             explicitPath: config.CLOUDFLARED_PATH,
             timeoutMs: config.PUBLIC_TUNNEL_TIMEOUT_MS,
             noTlsVerify: config.PUBLIC_TUNNEL_NO_TLS_VERIFY,
@@ -831,12 +890,13 @@ function cleanupGlobalResources() {
     whipHttpError = '';
 }
 
-async function handleHttpsServerError(err) {
-    console.error(`HTTPS server error: ${err.message}`);
+async function handleAppServerError(err) {
+    console.error(`${getLocalProtocol().toUpperCase()} server error: ${err.message}`);
     if (err.code === 'EADDRINUSE') {
-        const runningInstance = await probeExistingNextraInstance();
-        if (runningInstance) {
-            console.log(`Nextra is already running at ${getLoopbackBaseUrl()}.`);
+        const runningProtocol = await findRunningNextraProtocol();
+        if (runningProtocol) {
+            console.log(`Nextra is already running at ${getLoopbackBaseUrl(runningProtocol)}.`);
+            openBrowser(getHostPageUrl(runningProtocol));
             cleanupGlobalResources();
             process.exit(0);
             return;
@@ -931,6 +991,7 @@ async function startWhipHttpServer(whipRouter) {
 }
 
 (async () => {
+    await exitIfAlreadyRunning();
     await detectPublicIpIfEnabled();
 
     console.log(`LAN IP: ${config.LAN_IP}`);
@@ -943,8 +1004,13 @@ async function startWhipHttpServer(whipRouter) {
         console.log('Forwarded header trust: enabled for local/private proxy peers only.');
     }
 
-    const { cert, key } = await getOrCreateCert();
-    const httpsServer = https.createServer({ cert, key }, app);
+    let appServer = null;
+    if (config.LOCAL_HTTPS) {
+        const { cert, key } = await getOrCreateCert();
+        appServer = https.createServer({ cert, key }, app);
+    } else {
+        appServer = http.createServer(app);
+    }
 
     const result = await createMediasoupWorker();
     worker = result.worker;
@@ -960,8 +1026,8 @@ async function startWhipHttpServer(whipRouter) {
         }
     }
 
-    // Mount WHIP routes on main app (HTTPS) and a separate HTTP server
-    // OBS cannot connect to self-signed HTTPS, so we expose WHIP over HTTP.
+    // Mount WHIP routes on the main app and a separate HTTP server.
+    // OBS cannot connect to self-signed HTTPS reliably, so we expose WHIP over HTTP.
     // Media is still encrypted via DTLS/WebRTC.
     let whipRouter = null;
     if (config.WHIP_ENABLED) {
@@ -969,14 +1035,14 @@ async function startWhipHttpServer(whipRouter) {
         app.use('/whip', whipRouter);
     }
 
-    // Mount WHEP routes on HTTPS only (browser viewers)
+    // Mount WHEP routes on the main browser-facing server.
     if (config.WHEP_ENABLED) {
         const whepRouter = createWhepRouter(result.router, { getClientIp: getRequestClientIp });
         app.use('/whep', whepRouter);
         console.log('   WHEP:    /whep/watch/<roomCode>');
     }
 
-    const io = new Server(httpsServer, {
+    const io = new Server(appServer, {
         path: config.SOCKET_PATH,
         maxHttpBufferSize: config.SOCKET_MAX_HTTP_BUFFER_SIZE,
         pingInterval: config.SOCKET_PING_INTERVAL_MS,
@@ -1048,20 +1114,20 @@ async function startWhipHttpServer(whipRouter) {
     registerSocketHandlers(io, result.router, { getClientIp: getSocketHandshakeIp });
     startJoinCleanup();
 
-    httpsServer.on('error', (err) => {
-        void handleHttpsServerError(err);
+    appServer.on('error', (err) => {
+        void handleAppServerError(err);
     });
 
-    httpsServer.listen(config.PORT, config.BIND_HOST, () => {
-        console.log('\nNextra running (HTTPS):');
+    appServer.listen(config.PORT, config.BIND_HOST, () => {
+        console.log(`\nNextra running (${getLocalProtocol().toUpperCase()}):`);
         console.log(`   Bind:    ${config.BIND_HOST}:${config.PORT}`);
-        console.log(`   Local:   https://localhost:${config.PORT}`);
+        console.log(`   Local:   ${getLocalProtocol()}://127.0.0.1:${config.PORT}`);
         console.log(`   Access:  ${getLocalBaseUrl()}`);
         const manualShareBase = normalizeBaseUrl(config.SHARE_BASE_URL);
         if (manualShareBase) {
             console.log(`   Public:  ${manualShareBase}`);
         } else if (config.PUBLIC_IP && config.PUBLIC_IP !== config.LAN_IP) {
-            console.log(`   Public:  https://${config.PUBLIC_IP}:${config.PORT}`);
+            console.log(`   Public:  ${getLocalProtocol()}://${config.PUBLIC_IP}:${config.PORT}`);
         } else if (config.AUTO_PUBLIC_TUNNEL) {
             console.log('   Public:  starting automatic cloudflared tunnel...');
         } else {
@@ -1073,13 +1139,14 @@ async function startWhipHttpServer(whipRouter) {
         void startWhipHttpServer(whipRouter);
 
         void maybeStartPublicTunnel();
+        openBrowser(getHostPageUrl());
     });
 
     async function shutdown(signal) {
         console.log(`\n${signal} received. Shutting down gracefully...`);
         cleanupGlobalResources();
 
-        httpsServer.close(() => {
+        appServer.close(() => {
             console.log('Server closed.');
             process.exit(0);
         });
