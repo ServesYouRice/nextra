@@ -2,6 +2,20 @@
   "name": "nextra",
   "private": true,
   "version": "1.0.0",
+  "description": "Self-hosted low-latency screen sharing with browser capture, OBS WHIP ingest, mediasoup, and relay fallback.",
+  "license": "GPL-3.0-only",
+  "author": "ServesYouRice",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ServesYouRice/nextra.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ServesYouRice/nextra/issues"
+  },
+  "homepage": "https://github.com/ServesYouRice/nextra#readme",
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "dev:client": "vite",
     "dev:server": "node server.js --dev",
@@ -12,9 +26,11 @@
     "test": "node --test",
     "package": "npm run build && node scripts/package-app.js",
     "oss:check": "node scripts/opensource-preflight.js",
-    "release:prep": "npm run lint && npm test && npm run build && npm run oss:check"
+    "audit:prod": "npm audit --omit=dev",
+    "release:prep": "npm run lint && npm test && npm run build && npm run oss:check && npm run audit:prod"
   },
   "dependencies": {
+    "compression": "^1.8.1",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "helmet": "^8.1.0",

@@ -21,6 +21,10 @@ function addAllowedHosts(target, rawValue) {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
+  // Dev/preview only: allow ephemeral Cloudflare quick-tunnel hostnames so
+  // `npm run dev` works behind a tunnel. The production server (server.js) does
+  // NOT use this list. Prefer a concrete host via SHARE_BASE_URL /
+  // EXTRA_ALLOWED_ORIGINS when known, and never expose Vite dev/preview publicly.
   const allowedHosts = new Set(['.trycloudflare.com'])
   addAllowedHosts(allowedHosts, env.SHARE_BASE_URL)
   addAllowedHosts(allowedHosts, env.EXTRA_ALLOWED_ORIGINS)

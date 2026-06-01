@@ -45,4 +45,6 @@ cloudflared
 # Documentation files
 *.md
 !README.md
+!CODEX.md
+!OPUS.md
 !SENATE3.md

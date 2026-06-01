@@ -20,7 +20,7 @@ export default function HowToView() {
             <div className="article-step">
                 <strong>Everyone</strong>
                 <ul>
-                    <li><strong>Host:</strong> Windows machine running <code>Nextra.exe</code> or the project from source with <code>npm start</code></li>
+                    <li><strong>Host:</strong> Windows machine running <code>Nextra.exe</code> or the project from source with <code>npm run dev</code> / <code>npm run build && npm start</code></li>
                     <li><strong>Viewers:</strong> any modern browser, no install required</li>
                 </ul>
             </div>
@@ -40,7 +40,7 @@ export default function HowToView() {
             <div className="article-step">
                 <strong>1. Run the app</strong>
                 <p>
-                    Start <code>Nextra.exe</code>, or run <code>npm start</code> in development.
+                    Start <code>Nextra.exe</code>, run <code>npm run dev</code> for source development, or run <code>npm run build && npm start</code> for a source production start.
                     Keep the app running while you are streaming.
                 </p>
             </div>

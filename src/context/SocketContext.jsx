@@ -8,8 +8,9 @@ export function SocketProvider({ children }) {
         return io({
             path: '/socket.io',
             autoConnect: true,
-            transports: ['websocket'],
-            upgrade: false,
+            // WebSocket preferred, HTTP long-polling as a fallback for captive
+            // portals / proxies that block or delay the WebSocket upgrade.
+            transports: ['websocket', 'polling'],
         });
     }, []);
 

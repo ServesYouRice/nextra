@@ -1,5 +1,7 @@
 // config.js - Single source of truth for all configuration
-require('dotenv').config();
+// NOTE: dotenv is intentionally NOT loaded here. Entry points (server.js) load it
+// before requiring this module, which keeps `node --test` hermetic — tests use
+// explicit fixture env rather than the developer's local .env file.
 const os = require('os');
 const crypto = require('crypto');
 const {
@@ -309,7 +311,6 @@ module.exports = {
     FALLBACK_AUDIO_BITRATE: (process.env.FALLBACK_AUDIO_BITRATE || '192k').trim(),
     FALLBACK_FRAGMENT_DURATION_MS: parseIntEnv(process.env.FALLBACK_FRAGMENT_DURATION_MS, 500),
     MAX_FALLBACK_VIEWERS: parseIntEnv(process.env.MAX_FALLBACK_VIEWERS, 50),
-    MAX_FALLBACK_CHUNK_SIZE: parseIntEnv(process.env.MAX_FALLBACK_CHUNK_SIZE, 2 * 1024 * 1024),
     FALLBACK_RESTART_CAP: parseIntEnv(process.env.FALLBACK_RESTART_CAP, 5),
     WHIP_GRACE_TIMEOUT_MS: parseIntEnv(process.env.WHIP_GRACE_TIMEOUT_MS, 15000),
     // ── WHEP ──

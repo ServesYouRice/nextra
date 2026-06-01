@@ -288,7 +288,10 @@ function buildByokTurnConfig({ urlsInput, authType, secret, username, credential
 
 function loadStoredObsPassword() {
     try {
-        return window.localStorage.getItem(OBS_WS_PASSWORD_STORAGE_KEY) || '';
+        // Session-only: clear any legacy long-lived localStorage copy, then read
+        // from sessionStorage (survives reloads, cleared when the tab closes).
+        window.localStorage.removeItem(OBS_WS_PASSWORD_STORAGE_KEY);
+        return window.sessionStorage.getItem(OBS_WS_PASSWORD_STORAGE_KEY) || '';
     } catch {
         return '';
     }
@@ -298,9 +301,9 @@ function persistObsPassword(value) {
     try {
         const normalized = String(value || '');
         if (normalized) {
-            window.localStorage.setItem(OBS_WS_PASSWORD_STORAGE_KEY, normalized);
+            window.sessionStorage.setItem(OBS_WS_PASSWORD_STORAGE_KEY, normalized);
         } else {
-            window.localStorage.removeItem(OBS_WS_PASSWORD_STORAGE_KEY);
+            window.sessionStorage.removeItem(OBS_WS_PASSWORD_STORAGE_KEY);
         }
     } catch {
         // Ignore storage write failures.
