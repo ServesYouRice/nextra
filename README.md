@@ -42,6 +42,7 @@ You can grab `Nextra.exe` from [GitHub Releases](../../releases), run it, and st
 git clone <repo-url>
 cd P2Pvideo
 npm install
+npm run build        # build the client (required before npm start)
 npm start
 ```
 
@@ -321,9 +322,10 @@ FFmpeg relay is H.264-only. AV1 OBS rooms stay on mediasoup/WebRTC with room-sco
 
 ```bash
 npm install          # install dependencies
-npm start            # start dev server
+npm run dev          # development: hot reload (client + server)
+npm run build        # build the client into dist/
+npm start            # run the production server (serves dist/; build first)
 npm run lint         # lint code
-npm run build        # production build
 npm run package      # build Nextra.exe + sha256
 ```
 

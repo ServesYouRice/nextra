@@ -1,4 +1,5 @@
 // server.js - Entry point: Express + Socket.io + Mediasoup
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -7,8 +8,16 @@ const crypto = require('crypto');
 const fs = require('fs');
 const { Server } = require('socket.io');
 const helmet = require('helmet');
+const compression = require('compression');
 const config = require('./config');
-const { createMediasoupWorker } = require('./lib/mediasoup');
+
+// Resolved run mode. Development origins (the Vite dev server on :5173) are
+// opt-in via the --dev flag (npm run dev:server) or NODE_ENV/APP_ENV=development.
+// `npm start` sets none of these, so a production start never enables them.
+const isDevMode = process.argv.includes('--dev')
+    || process.env.NODE_ENV === 'development'
+    || process.env.APP_ENV === 'development';
+const { createMediasoupWorker, setWorkerDeathHandler } = require('./lib/mediasoup');
 const {
     registerSocketHandlers,
     startJoinCleanup,
@@ -74,30 +83,31 @@ if (config.TRUST_PROXY !== false) {
     app.set('trust proxy', config.TRUST_PROXY);
 }
 
+// gzip/deflate compression for HTTP responses (static assets, API, SPA HTML).
+app.use(compression());
+
 app.use((req, res, next) => {
     res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
     next();
 });
 
-app.use((req, res, next) => {
-    helmet({
-        contentSecurityPolicy: {
-            directives: {
-                defaultSrc: ["'self'"],
-                scriptSrc: ["'self'", `'nonce-${res.locals.cspNonce}'`],
-                styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-                fontSrc: ["'self'", 'https://fonts.gstatic.com'],
-                connectSrc: ["'self'", 'ws:', 'wss:'],
-                imgSrc: ["'self'", 'data:', 'blob:'],
-                mediaSrc: ["'self'", 'blob:'],
-                workerSrc: ["'self'", 'blob:'],
-            },
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", (_req, res) => `'nonce-${res.locals.cspNonce}'`],
+            styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+            fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+            connectSrc: ["'self'", 'ws:', 'wss:'],
+            imgSrc: ["'self'", 'data:', 'blob:'],
+            mediaSrc: ["'self'", 'blob:'],
+            workerSrc: ["'self'", 'blob:'],
         },
-        crossOriginEmbedderPolicy: false,
-        referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-        hsts: config.LOCAL_HTTPS ? { maxAge: 31536000, includeSubDomains: false } : false,
-    })(req, res, next);
-});
+    },
+    crossOriginEmbedderPolicy: false,
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+    hsts: config.LOCAL_HTTPS ? { maxAge: 31536000, includeSubDomains: false } : false,
+}));
 
 function getRemoteAddressFromReq(req) {
     return normalizeIp(
@@ -322,7 +332,7 @@ function getAllowedOrigins() {
         origins.add(`${localProtocol}://${config.PUBLIC_IP}:${config.PORT}`);
     }
 
-    if (process.env.NODE_ENV !== 'production') {
+    if (isDevMode) {
         origins.add('http://localhost:5173');
         origins.add('http://127.0.0.1:5173');
     }
@@ -741,6 +751,9 @@ app.use(express.static(distDir, {
             res.set('Cache-Control', 'no-store, max-age=0');
             res.set('Pragma', 'no-cache');
             res.set('Expires', '0');
+        } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            // Vite emits content-hashed filenames under /assets — safe to cache hard.
+            res.set('Cache-Control', 'public, max-age=31536000, immutable');
         }
     },
 }));
@@ -752,7 +765,20 @@ app.get('/{*splat}', (req, res) => {
     if (html) {
         res.type('html').send(html);
     } else {
-        res.sendFile(indexHtmlPath);
+        // No built client found (dist/index.html missing). This happens when
+        // running `npm start` from source without building first.
+        res.status(503).type('html').send(
+            '<!doctype html><meta charset="utf-8">'
+            + '<title>Nextra - build required</title>'
+            + '<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;line-height:1.5">'
+            + '<h1>Nextra is not built yet</h1>'
+            + '<p>The production client bundle (<code>dist/</code>) was not found. '
+            + 'This usually means <code>npm start</code> was run from source without building first.</p>'
+            + '<p>Build it once, then start again:</p>'
+            + '<pre style="background:#f4f4f5;padding:1rem;border-radius:8px">npm run build\nnpm start</pre>'
+            + '<p>For development with hot reload, run <code>npm run dev</code> instead.</p>'
+            + '</body>'
+        );
     }
 });
 
@@ -1005,6 +1031,7 @@ async function startWhipHttpServer(whipRouter) {
     }
 
     let appServer = null;
+    let isShuttingDown = false;
     if (config.LOCAL_HTTPS) {
         const { cert, key } = await getOrCreateCert();
         appServer = https.createServer({ cert, key }, app);
@@ -1015,6 +1042,55 @@ async function startWhipHttpServer(whipRouter) {
     const result = await createMediasoupWorker();
     worker = result.worker;
     console.log(`Mediasoup Worker PID: ${worker.pid}`);
+
+    // If the mediasoup worker subprocess dies, the media engine is gone and every
+    // room is dead. Rather than leave clients stuck, restart the whole process so
+    // viewers and OBS reconnect on their own (browser-capture hosts re-share).
+    setWorkerDeathHandler(() => {
+        // During an intentional shutdown (SIGINT/SIGTERM) the worker dies as a
+        // side effect of the process exiting — don't treat that as a crash or
+        // try to relaunch.
+        if (isShuttingDown) return;
+
+        // Guard against crash loops: only auto-restart if we were up long enough
+        // that this looks like a genuine runtime crash rather than a broken start.
+        const MIN_UPTIME_SECONDS = 30;
+        if (process.uptime() < MIN_UPTIME_SECONDS) {
+            console.error('[recovery] Media engine crashed during startup - not auto-restarting to avoid a crash loop.');
+            cleanupGlobalResources();
+            process.exit(1);
+            return;
+        }
+
+        console.error('[recovery] Media engine (mediasoup worker) crashed. Restarting Nextra automatically; viewers and OBS reconnect on their own.');
+
+        let finished = false;
+        const finish = () => {
+            if (finished) return;
+            finished = true;
+            try {
+                const { spawn } = require('child_process');
+                spawn(process.execPath, process.argv.slice(1), {
+                    detached: true,
+                    stdio: 'inherit',
+                    cwd: process.cwd(),
+                    env: process.env,
+                }).unref();
+            } catch (err) {
+                console.error('[recovery] Failed to relaunch automatically:', err.message);
+            }
+            process.exit(0);
+        };
+
+        // Release listeners (frees the port) before the replacement process binds.
+        cleanupGlobalResources();
+        try {
+            appServer.close(() => finish());
+            setTimeout(finish, 2000).unref();
+        } catch {
+            finish();
+        }
+    });
 
     // Check FFmpeg availability for OBS fallback
     if (config.WHIP_ENABLED) {
@@ -1031,13 +1107,13 @@ async function startWhipHttpServer(whipRouter) {
     // Media is still encrypted via DTLS/WebRTC.
     let whipRouter = null;
     if (config.WHIP_ENABLED) {
-        whipRouter = createWhipRouter(result.router);
+        whipRouter = createWhipRouter(result.router, { isAllowedOrigin: isAllowedSocketOrigin });
         app.use('/whip', whipRouter);
     }
 
     // Mount WHEP routes on the main browser-facing server.
     if (config.WHEP_ENABLED) {
-        const whepRouter = createWhepRouter(result.router, { getClientIp: getRequestClientIp });
+        const whepRouter = createWhepRouter(result.router, { getClientIp: getRequestClientIp, isAllowedOrigin: isAllowedSocketOrigin });
         app.use('/whep', whepRouter);
         console.log('   WHEP:    /whep/watch/<roomCode>');
     }
@@ -1121,6 +1197,8 @@ async function startWhipHttpServer(whipRouter) {
     appServer.listen(config.PORT, config.BIND_HOST, () => {
         console.log(`\nNextra running (${getLocalProtocol().toUpperCase()}):`);
         console.log(`   Bind:    ${config.BIND_HOST}:${config.PORT}`);
+        console.log(`   Mode:    ${isDevMode ? 'development (Vite dev origins enabled)' : 'production'}`);
+        console.log(`   Media:   RTC listen ${config.RTC_LISTEN_IP}${config.RTC_LISTEN_IP === '127.0.0.1' ? ' (local only)' : `, announce ${config.PUBLIC_IP || config.LAN_IP}`}`);
         console.log(`   Local:   ${getLocalProtocol()}://127.0.0.1:${config.PORT}`);
         console.log(`   Access:  ${getLocalBaseUrl()}`);
         const manualShareBase = normalizeBaseUrl(config.SHARE_BASE_URL);
@@ -1143,6 +1221,7 @@ async function startWhipHttpServer(whipRouter) {
     });
 
     async function shutdown(signal) {
+        isShuttingDown = true;
         console.log(`\n${signal} received. Shutting down gracefully...`);
         cleanupGlobalResources();
 
@@ -1156,6 +1235,11 @@ async function startWhipHttpServer(whipRouter) {
 
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
+    // Windows console-close (SIGHUP) and Ctrl+Break (SIGBREAK) take the same
+    // shutdown path so the worker dying during teardown is flagged as an
+    // intentional stop and never triggers the auto-restart.
+    process.on('SIGHUP', () => shutdown('SIGHUP'));
+    process.on('SIGBREAK', () => shutdown('SIGBREAK'));
 })().catch((err) => {
     console.error(`Fatal startup error: ${err?.stack || err?.message || err}`);
     cleanupGlobalResources();
