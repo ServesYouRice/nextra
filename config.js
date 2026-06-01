@@ -296,6 +296,7 @@ module.exports = {
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     ALLOW_REMOTE_METRICS: parseBoolEnv(process.env.ALLOW_REMOTE_METRICS, false),
     METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),
+    MEDIA_DEBUG_LOGS: parseBoolEnv(process.env.MEDIA_DEBUG_LOGS, false),
     // Public share URL (recommended when using a tunnel/reverse proxy)
     SHARE_BASE_URL: (process.env.SHARE_BASE_URL || '').trim(),
     EXTRA_ALLOWED_ORIGINS: (process.env.EXTRA_ALLOWED_ORIGINS || '').trim(),

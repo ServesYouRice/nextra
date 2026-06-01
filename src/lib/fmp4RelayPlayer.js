@@ -50,6 +50,7 @@ export function createFmp4RelayPlayer(opts) {
     let initTimeoutTimer = null;
     let bufferingTimer = null;
     let initTimeoutRetries = 0;
+    let lastQueueDropWarnAt = 0;
 
     function setState(newState) {
         if (newState !== 'buffering') {
@@ -444,7 +445,11 @@ export function createFmp4RelayPlayer(opts) {
 
         if (appendQueue.length >= MAX_QUEUE_SIZE || queueBytes >= MAX_QUEUE_BYTES) {
             consecutiveDrops++;
-            console.warn('[fmp4-player] Queue full, dropping fragment', data.sequence, `(${consecutiveDrops} consecutive)`);
+            const now = Date.now();
+            if (now - lastQueueDropWarnAt > 1000 || consecutiveDrops >= MAX_CONSECUTIVE_DROPS) {
+                lastQueueDropWarnAt = now;
+                console.warn('[fmp4-player] Queue full, dropping fragment', data.sequence, `(${consecutiveDrops} consecutive)`);
+            }
             if (consecutiveDrops >= MAX_CONSECUTIVE_DROPS) {
                 consecutiveDrops = 0;
                 resetAndRequestInit();

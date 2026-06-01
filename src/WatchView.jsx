@@ -6,6 +6,20 @@ import { isAv1PlaybackUnsupported, shouldPreferRelayPlayback } from './lib/watch
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
+const MEDIA_DEBUG_LOGS = (() => {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        return params.has('debugMedia') || window.localStorage.getItem('nextra.debugMedia') === '1';
+    } catch {
+        return false;
+    }
+})();
+
+function mediaDebugLog(...args) {
+    if (MEDIA_DEBUG_LOGS) {
+        console.log(...args);
+    }
+}
 
 function toUint8ArraySync(data) {
     if (!data) return null;
@@ -388,7 +402,7 @@ export default function WatchView({ initialCode = '' }) {
             }
             enqueueCount += 1;
             if (enqueueCount <= 3) {
-                console.log(`[Nextra] enqueueChunk #${enqueueCount}: ${uint.byteLength} bytes, queue=${chunkQueueRef.current.length}`);
+                mediaDebugLog(`[Nextra] enqueueChunk #${enqueueCount}: ${uint.byteLength} bytes, queue=${chunkQueueRef.current.length}`);
             }
 
             chunkQueueRef.current.push(uint);
@@ -417,7 +431,7 @@ export default function WatchView({ initialCode = '' }) {
         const onChunk = (data) => {
             chunkArrivalCount += 1;
             if (chunkArrivalCount <= 3 || chunkArrivalCount % 20 === 0) {
-                console.log(`[Nextra] media-chunk #${chunkArrivalCount} arrived, type=${typeof data}, constructor=${data?.constructor?.name}, size=${data?.size ?? data?.byteLength ?? '?'}`);
+                mediaDebugLog(`[Nextra] media-chunk #${chunkArrivalCount} arrived, type=${typeof data}, constructor=${data?.constructor?.name}, size=${data?.size ?? data?.byteLength ?? '?'}`);
             }
             if (data instanceof Blob) {
                 data.arrayBuffer()
@@ -437,7 +451,7 @@ export default function WatchView({ initialCode = '' }) {
             // A new recorder session started — discard any stale chunks from
             // the previous session so the fresh init segment is appended first.
             if (chunkQueueRef.current.length > 0) {
-                console.log(`[Nextra] media-init received, flushing ${chunkQueueRef.current.length} stale chunks`);
+                mediaDebugLog(`[Nextra] media-init received, flushing ${chunkQueueRef.current.length} stale chunks`);
                 chunkQueueRef.current.length = 0;
                 queuedBytesRef.current = 0;
             }
@@ -491,12 +505,12 @@ export default function WatchView({ initialCode = '' }) {
         try {
             try {
                 initResultData = await socketRequest(socket, 'get-media-init');
-                console.log('[Nextra] get-media-init OK:', initResultData?.init?.mimeType || 'no mime');
+                mediaDebugLog('[Nextra] get-media-init OK:', initResultData?.init?.mimeType || 'no mime');
                 if (initResultData.init?.mimeType) {
                     mimeType = initResultData.init.mimeType;
                 }
             } catch {
-                console.log('[Nextra] get-media-init not cached yet, waiting for live media-init…');
+                mediaDebugLog('[Nextra] get-media-init not cached yet, waiting for live media-init...');
             }
 
             // When the relay recorder is prewarmed (tunnel with no TURN), a
@@ -529,10 +543,10 @@ export default function WatchView({ initialCode = '' }) {
                 if (liveInit?.mimeType) {
                     mimeType = liveInit.mimeType;
                 }
-                console.log('[Nextra] Got live media-init:', mimeType);
+                mediaDebugLog('[Nextra] Got live media-init:', mimeType);
             }
 
-            console.log('[Nextra] Setting up MediaSource with mime:', mimeType);
+            mediaDebugLog('[Nextra] Setting up MediaSource with mime:', mimeType);
             const mseMimeSupported = window.MediaSource && MediaSource.isTypeSupported(mimeType);
             if (!mseMimeSupported) {
                 throw new Error('Your browser does not support live WebM streaming. Use Chrome, Edge, or Firefox.');
@@ -602,7 +616,7 @@ export default function WatchView({ initialCode = '' }) {
                 }
             }, 200);
 
-            console.log('[Nextra] MediaSource ready, waiting for first buffered media…');
+            mediaDebugLog('[Nextra] MediaSource ready, waiting for first buffered media...');
             processQueue();
             // Do not await here: with MSE the play() promise can stay pending
             // until enough media is buffered, which races the outer watch timeout.

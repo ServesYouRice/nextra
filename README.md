@@ -256,6 +256,7 @@ Notes:
 | `RELAY_VIDEO_BITS_PER_SECOND` | `45000000` | Max relay video bitrate ceiling |
 | `MAX_CONNECTIONS_PER_IP` | `60` | Rate limit: connections per IP |
 | `SOCKET_PING_TIMEOUT_MS` | `60000` | Grace period before a quiet watcher socket is considered disconnected |
+| `MEDIA_DEBUG_LOGS` | `false` | Verbose media-pipeline logging; keep off during normal streams |
 
 See `.env.example` for the full list.
 

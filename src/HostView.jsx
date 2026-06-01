@@ -35,6 +35,20 @@ const OBS_TUNING_PROFILES = {
 };
 const OBS_WS_PASSWORD_STORAGE_KEY = 'nextra.obsWsPassword.v1';
 const BYOK_TURN_SESSION_STORAGE_KEY = 'nextra.byokTurnSession.v1';
+const MEDIA_DEBUG_LOGS = (() => {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        return params.has('debugMedia') || window.localStorage.getItem('nextra.debugMedia') === '1';
+    } catch {
+        return false;
+    }
+})();
+
+function mediaDebugLog(...args) {
+    if (MEDIA_DEBUG_LOGS) {
+        console.log(...args);
+    }
+}
 
 const QUALITY_PROFILES = {
     '4k': {
@@ -666,7 +680,7 @@ export default function HostView() {
                 lastChunkAt = Date.now();
                 chunkCount += 1;
                 if (chunkCount % 20 === 0) {
-                    console.log(`[Nextra-Host] Emitted ${chunkCount} relay chunks. Latest size: ${evt.data.size}`);
+                    mediaDebugLog(`[Nextra-Host] Emitted ${chunkCount} relay chunks. Latest size: ${evt.data.size}`);
                 }
                 emitRelayChunk(evt.data);
             }
