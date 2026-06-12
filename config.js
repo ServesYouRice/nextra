@@ -292,7 +292,14 @@ module.exports = {
     MEDIA_MAX_CHUNK_SIZE: parseIntEnv(process.env.MEDIA_MAX_CHUNK_SIZE, 4 * 1024 * 1024),
     RELAY_FLUSH_INTERVAL_MS: parseIntEnv(process.env.RELAY_FLUSH_INTERVAL_MS, 300),
     RELAY_VIDEO_BITS_PER_SECOND: parseIntEnv(process.env.RELAY_VIDEO_BITS_PER_SECOND, 45000000),
-    HOST_RECONNECT_GRACE_MS: parseIntEnv(process.env.HOST_RECONNECT_GRACE_MS, 300000),
+    // Per-socket cap on bytes queued in the engine.io write buffer before a
+    // relay viewer is considered too slow (WebM viewers are kicked to recover;
+    // fMP4 viewers just skip fragments and seek past the gap client-side).
+    RELAY_SOCKET_MAX_BUFFERED_BYTES: parseIntEnv(process.env.RELAY_SOCKET_MAX_BUFFERED_BYTES, 16 * 1024 * 1024),
+    // How long viewers wait on "host reconnecting" before the room is destroyed.
+    // The reclaim-host flow covers a page reload in seconds; a long grace just
+    // leaves viewers staring at a frozen frame when the host is really gone.
+    HOST_RECONNECT_GRACE_MS: parseIntEnv(process.env.HOST_RECONNECT_GRACE_MS, 30000),
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     ALLOW_REMOTE_METRICS: parseBoolEnv(process.env.ALLOW_REMOTE_METRICS, false),
     METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),

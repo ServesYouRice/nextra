@@ -500,6 +500,12 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         }
 
         if (autoStart) {
+            // Let OBS finish resetting its video pipeline before starting the output.
+            // SetVideoSettings + ColorSpace/ColorRange above reinitialize the video
+            // output; starting the encoder while that is in flight can crash OBS in
+            // video_output_connect2 (access violation in obs.dll). A short settle
+            // delay avoids that race.
+            await delay(1200);
             const startResult = await sendRequest('StartStream');
             if (startResult.requestStatus?.result === true) {
                 applied.push('streaming started');

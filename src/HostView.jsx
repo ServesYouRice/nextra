@@ -431,6 +431,7 @@ export default function HostView() {
     const audioCtxRef = useRef(null);
     const silentAudioTrackRef = useRef(null);
     const hostTokenRef = useRef(null);
+    const prevRelayViewerCountRef = useRef(0);
 
     const bitratePerViewer = viewerCount > 0 ? hostUploadMbps / viewerCount : hostUploadMbps;
     const bandwidthWarning = viewerCount >= 3 && bitratePerViewer < 7
@@ -878,25 +879,49 @@ export default function HostView() {
         }
     }, []);
 
+    // Apply capture/producer quality changes to the live stream.
     useEffect(() => {
         if (!isSharing) return;
         void applyQualityProfileToLiveStream(qualityProfile, frameRate);
+    }, [isSharing, qualityProfile, frameRate, applyQualityProfileToLiveStream]);
+
+    // Relay recorder membership. Restart only when a NEW relay viewer joins —
+    // a joiner can only decode from a fresh WebM init segment, so that restart
+    // is load-bearing — or when the recorder should be running but isn't.
+    // A viewer leaving must NOT restart the recorder: that used to re-init the
+    // stream (and glitch playback) for every remaining viewer.
+    useEffect(() => {
+        if (!isSharing) {
+            prevRelayViewerCountRef.current = 0;
+            return;
+        }
+
+        const previousCount = prevRelayViewerCountRef.current;
+        prevRelayViewerCountRef.current = relayViewerCount;
 
         if (relayViewerCount > 0 || shouldPrewarmRelay) {
-            stopRelayRecorder();
-            startRelayRecorder();
+            if (relayViewerCount > previousCount || !mediaRecorderRef.current) {
+                stopRelayRecorder();
+                startRelayRecorder();
+            }
         } else {
             stopRelayRecorder();
         }
+    }, [isSharing, relayViewerCount, shouldPrewarmRelay, startRelayRecorder, stopRelayRecorder]);
+
+    // Recorder parameter changes (quality tier, fps, flush interval, bitrate)
+    // need a restart with the new settings — but only if it is already running;
+    // the membership effect above owns starting it.
+    useEffect(() => {
+        if (!isSharing || !mediaRecorderRef.current) return;
+        stopRelayRecorder();
+        startRelayRecorder();
     }, [
         isSharing,
         qualityProfile,
         frameRate,
-        relayViewerCount,
-        shouldPrewarmRelay,
         relayFlushIntervalMs,
         effectiveRelayBitsPerSecond,
-        applyQualityProfileToLiveStream,
         startRelayRecorder,
         stopRelayRecorder,
     ]);
@@ -977,6 +1002,9 @@ export default function HostView() {
                 ingestMode,
                 obsAv1Mode,
                 turnConfig: roomTurnConfig,
+                frameRate,
+                // H.264 fallback relay re-encode bitrate for the selected quality tier.
+                relayVideoKbps: Math.round(getProfileRelayBitsPerSecond(qualityProfile, frameRate) / 1000),
             });
             setRoomCode(code);
             setHostToken(hostToken || '');
