@@ -1230,7 +1230,10 @@ async function startWhipHttpServer(whipRouter) {
             process.exit(0);
         });
 
-        setTimeout(() => process.exit(1), 5000);
+        // Force exit if open connections (e.g. the prewarmed relay or socket.io
+        // clients) keep the server from closing. This is an intentional shutdown,
+        // so exit 0 — a non-zero code is misreported as a startup failure.
+        setTimeout(() => process.exit(0), 5000);
     }
 
     process.on('SIGINT', () => shutdown('SIGINT'));

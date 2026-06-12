@@ -3,30 +3,63 @@ const assert = require('node:assert/strict');
 
 const { FFmpegRelay } = require('../lib/ffmpegRelay');
 
-function createRelay(videoCodec) {
+function createRelay(videoCodec, opts = {}) {
     return new FFmpegRelay({
         roomCode: 'TEST01',
         videoCodec,
-        hasAudio: true,
+        hasAudio: opts.hasAudio !== undefined ? opts.hasAudio : true,
         videoRtpPort: 5004,
         videoRtcpPort: 5005,
         audioRtpPort: 5006,
         audioRtcpPort: 5007,
         videoPayloadType: 96,
         audioPayloadType: 111,
+        ...opts,
     });
 }
 
-test('FFmpeg relay uses the hardened H.264 probe window', () => {
-    const h264Relay = createRelay('h264');
-    const h264Args = h264Relay._buildArgs('test.sdp');
+test('FFmpeg relay reads video from stdin and audio from SDP', () => {
+    const relay = createRelay('h264');
+    const args = relay._buildArgs('test.sdp');
 
-    assert.equal(h264Args[h264Args.indexOf('-probesize') + 1], '8000000');
-    assert.equal(h264Args[h264Args.indexOf('-analyzeduration') + 1], '8000000');
-    assert.equal(h264Args[h264Args.indexOf('-muxpreload') + 1], '0');
-    assert.equal(h264Args[h264Args.indexOf('-muxdelay') + 1], '0');
+    // Video input 0 is a raw H.264 Annex-B stream over stdin at a constant rate.
+    assert.equal(args[args.indexOf('-f') + 1], 'h264');
+    assert.ok(args.includes('pipe:0'));
+    assert.ok(args.includes('-r'));
+    assert.ok(!args.includes('-use_wallclock_as_timestamps'));
+    // Video is re-encoded (H.264) with a regular keyframe interval so late
+    // viewers can start; audio is transcoded to AAC from the second input.
+    assert.equal(args[args.indexOf('-c:v') + 1], 'libx264');
+    assert.ok(args.includes('-g'));
+    assert.ok(args.includes('1:a:0'));
+    assert.equal(args[args.indexOf('-c:a') + 1], 'aac');
+    // Output is fragmented MP4 to stdout with zero mux latency.
+    assert.equal(args[args.indexOf('-muxpreload') + 1], '0');
+    assert.equal(args[args.indexOf('-muxdelay') + 1], '0');
+    assert.equal(args[args.length - 1], 'pipe:1');
+});
+
+test('FFmpeg relay omits the audio input when there is no audio', () => {
+    const relay = createRelay('h264', { hasAudio: false });
+    const args = relay._buildArgs(null);
+    assert.ok(args.includes('-an'));
+    assert.ok(!args.includes('1:a:0'));
+});
+
+test('FFmpeg relay SDP describes only the Opus audio stream', () => {
+    const relay = createRelay('h264');
+    const sdp = relay._buildSdp();
+    assert.match(sdp, /m=audio 5006 RTP\/AVP 111/);
+    assert.match(sdp, /a=rtpmap:111 opus\/48000\/2/);
+    // Video is not in the SDP anymore (it is piped as Annex-B).
+    assert.ok(!/m=video/.test(sdp));
 });
 
 test('FFmpeg relay rejects non-H.264 input', () => {
     assert.throws(() => createRelay('av1'), /H\.264 input/i);
+});
+
+test('writeVideo returns false when the relay is not running', () => {
+    const relay = createRelay('h264');
+    assert.equal(relay.writeVideo(Buffer.from([0, 0, 0, 1])), false);
 });
