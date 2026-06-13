@@ -63,3 +63,27 @@ test('writeVideo returns false when the relay is not running', () => {
     const relay = createRelay('h264');
     assert.equal(relay.writeVideo(Buffer.from([0, 0, 0, 1])), false);
 });
+
+test('audio itsoffset is the bootstrap delay plus the startup video backlog', () => {
+    const relay = createRelay('h264', { audioOffsetSec: 0.5 });
+    relay.setStartupVideoBacklogSec(0.4);
+    const args = relay._buildArgs('test.sdp');
+    const idx = args.indexOf('-itsoffset');
+    assert.ok(idx !== -1, 'itsoffset should be present');
+    assert.equal(args[idx + 1], '0.900');
+});
+
+test('startup video backlog does not apply when there is no audio input', () => {
+    const relay = createRelay('h264', { hasAudio: false, audioOffsetSec: 0.5 });
+    relay.setStartupVideoBacklogSec(0.4);
+    const args = relay._buildArgs(null);
+    assert.ok(!args.includes('-itsoffset'));
+});
+
+test('setStartupVideoBacklogSec ignores invalid or negative values', () => {
+    const relay = createRelay('h264', { audioOffsetSec: 0.5 });
+    relay.setStartupVideoBacklogSec(-1);
+    assert.equal(relay._buildArgs('test.sdp')[relay._buildArgs('test.sdp').indexOf('-itsoffset') + 1], '0.500');
+    relay.setStartupVideoBacklogSec(NaN);
+    assert.equal(relay._buildArgs('test.sdp')[relay._buildArgs('test.sdp').indexOf('-itsoffset') + 1], '0.500');
+});
