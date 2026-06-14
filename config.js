@@ -317,10 +317,11 @@ module.exports = {
     WHIP_BIND_HOST: (process.env.WHIP_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1',
     FFMPEG_PATH: (process.env.FFMPEG_PATH || 'ffmpeg').trim(),
     FALLBACK_AUDIO_BITRATE: (process.env.FALLBACK_AUDIO_BITRATE || '192k').trim(),
-    // Optional A/V fine-tune (milliseconds). The relay starts audio and video on
-    // the same event (first keyframe), so this is normally 0. Set positive to push
-    // audio later (if it still leads) or negative to pull it earlier (if it lags).
-    FALLBACK_AUDIO_OFFSET_MS: parseIntEnv(process.env.FALLBACK_AUDIO_OFFSET_MS, 0),
+    // How much the relay delays OBS audio to match video (milliseconds). The video
+    // picks up real latency that audio does not (decode -> NVENC re-encode -> 1s-GOP
+    // fragmentation), so without this audio leads the picture by ~a second. If audio
+    // still plays AHEAD of the lips, raise this; if it lags BEHIND, lower it.
+    FALLBACK_AUDIO_OFFSET_MS: parseIntEnv(process.env.FALLBACK_AUDIO_OFFSET_MS, 1500),
     FALLBACK_FRAGMENT_DURATION_MS: parseIntEnv(process.env.FALLBACK_FRAGMENT_DURATION_MS, 500),
     MAX_FALLBACK_VIEWERS: parseIntEnv(process.env.MAX_FALLBACK_VIEWERS, 50),
     FALLBACK_RESTART_CAP: parseIntEnv(process.env.FALLBACK_RESTART_CAP, 5),
