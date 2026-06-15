@@ -231,6 +231,33 @@ async function getOutputSettings(sendRequest, outputName) {
     return response.responseData?.outputSettings || {};
 }
 
+/**
+ * Find the name of OBS's streaming output. The internal name varies by OBS
+ * version and output mode (and isn't always one of the legacy adv_stream/
+ * simple_stream), so ask OBS via GetOutputList and match the streaming output by
+ * kind (whip/rtmp/ftl/mpegts) or name, before falling back to the legacy probes.
+ */
+async function findStreamOutputName(sendRequest) {
+    const listResponse = await sendRequest('GetOutputList');
+    if (listResponse.requestStatus?.result === true) {
+        const outputs = listResponse.responseData?.outputs || [];
+        const isStreamKind = (kind) => /whip|rtmp|ftl|mpegts|stream/i.test(String(kind || ''));
+        const match = outputs.find((o) => isStreamKind(o.outputKind))
+            || outputs.find((o) => /stream/i.test(String(o.outputName || '')));
+        if (match?.outputName) {
+            return match.outputName;
+        }
+    }
+
+    // Fallback: probe the legacy fixed names directly.
+    for (const candidate of ['adv_stream', 'simple_stream']) {
+        if (await getOutputSettings(sendRequest, candidate) !== null) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
 const STREAM_OUTPUT_ENCODER_KEYS = new Set([
     'bitrate',
     'rate_control',
@@ -389,14 +416,12 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             await setAndVerifyProfile(sendRequest, 'Audio', 'SampleRate', '48000');
             await setAndVerifyProfile(sendRequest, 'Stream1', 'IgnoreRecommended', 'true');
 
-            let streamOutputName = null;
-            if (await getOutputSettings(sendRequest, 'adv_stream') !== null) {
-                streamOutputName = 'adv_stream';
-            } else if (await getOutputSettings(sendRequest, 'simple_stream') !== null) {
-                streamOutputName = 'simple_stream';
-            }
+            const streamOutputName = await findStreamOutputName(sendRequest);
+            // Not fatal: the encoder is configured via the profile parameters above,
+            // which apply on the next stream start. The live-output patch below is
+            // only a best-effort supplement for an already-running output.
             if (!streamOutputName) {
-                warnings.push('could not find OBS stream output for live encoder settings');
+                console.debug('[OBS] No queryable stream output found; relying on profile-parameter settings only.');
             }
 
             const liveOutputPatch = buildLiveOutputPatch({
