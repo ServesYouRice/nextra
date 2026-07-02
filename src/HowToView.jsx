@@ -50,10 +50,10 @@ export default function HowToView() {
                 <p>
                     Go to <code>{appOrigin}</code>, then open <strong>Host</strong>.
                 </p>
-                <div style={{ backgroundColor: 'var(--surface-3)', padding: '1rem', marginTop: '0.5rem', borderRadius: '4px', fontSize: '0.9rem', borderLeft: '3px solid var(--accent-1)' }}>
+                <div className="callout callout-accent">
                     <strong>Important:</strong>
-                    <ul style={{ margin: '0.5rem 0 0 1rem', padding: 0 }}>
-                        <li style={{ marginBottom: '0.5rem' }}>
+                    <ul>
+                        <li>
                             Allow firewall access for Node.js when prompted, or viewers may not connect.
                         </li>
                         <li>Use the local host page from this machine when capturing a browser screen.</li>
@@ -130,9 +130,9 @@ export default function HowToView() {
                 </p>
             </div>
 
-            <div style={{ backgroundColor: 'var(--surface-3)', padding: '1rem', marginTop: '0.5rem', borderRadius: '4px', fontSize: '0.9rem', borderLeft: '3px solid var(--accent-1)' }}>
+            <div className="callout callout-accent">
                 <strong>OBS settings applied automatically:</strong>
-                <ul style={{ margin: '0.5rem 0 0 1rem', padding: 0 }}>
+                <ul>
                     <li>Output mode: Advanced</li>
                     <li>Video encoder: best available H.264 or AV1 hardware encoder for the selected room mode</li>
                     <li>Keyframe interval: 2 seconds</li>
@@ -170,6 +170,17 @@ export default function HowToView() {
                 <p>
                     If the host enabled it, you can send Play/Pause commands from the viewer page.
                     This sends a media key to the host machine. It does not grant keyboard control.
+                </p>
+            </div>
+
+            <div className="article-step">
+                <strong>4. External players (WHEP)</strong>
+                <p>
+                    When WHEP egress is enabled on the server, each room also exposes a standards-based
+                    WHEP playback URL at <code>{appOrigin}/whep/watch/&lt;ROOM-CODE&gt;</code>.
+                    The host page shows a copyable link for it while streaming. Any WHEP-compatible
+                    player (GStreamer, web-based WHEP players, custom WebRTC clients) can watch the room
+                    without opening the Nextra viewer page.
                 </p>
             </div>
 
@@ -230,7 +241,7 @@ export default function HowToView() {
                 If you enable Cloudflare TURN autofill, the long-lived API token stays on the server and the browser only receives short-lived TURN credentials.
             </p>
 
-            <div style={{ marginTop: '3rem', textAlign: 'center' }}>
+            <div className="article-cta">
                 <a href="#host" className="btn btn-primary">Start a stream now -&gt;</a>
             </div>
         </div>

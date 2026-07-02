@@ -1490,6 +1490,32 @@ input.select-input {
   margin-top: 0.5rem;
 }
 
+.obs-retry-row {
+  margin-bottom: 0.75rem;
+}
+
+.obs-connection-status {
+  margin-top: 0.5rem;
+}
+
+.input-textarea {
+  min-height: 6rem;
+  resize: vertical;
+  padding-block: 0.85rem;
+  text-align: left;
+  text-align-last: left;
+}
+
+.modal-inline-row {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.article-cta {
+  margin-top: 3rem;
+  text-align: center;
+}
+
 /* ========== JOIN FORM ========== */
 .join-form {
   display: flex;
