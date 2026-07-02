@@ -1183,8 +1183,6 @@ export default function WatchView({ initialCode = '' }) {
                     ? 'OBS WebRTC mode active (lowest latency).'
                     : 'WebRTC mode active (lowest latency).'
                 : '';
-    const renderLegacyStatusBlocks = false;
-
     return (
         <div className="view-container">
             <div className="view-header">
@@ -1192,7 +1190,7 @@ export default function WatchView({ initialCode = '' }) {
                 <p className="subtitle">Join a room to watch a stream</p>
             </div>
 
-            {error && <div className="alert alert-error">{error}</div>}
+            {error && <div className="alert alert-error" role="alert">{error}</div>}
 
             {!joined ? (
                 <div className="join-form">
@@ -1250,13 +1248,13 @@ export default function WatchView({ initialCode = '' }) {
 
                         {hostReconnectingReason && !hostDisconnected && (
                             <div className="video-overlay">
-                                <p style={{ fontSize: '1.1rem' }}>{hostReconnectingReason}</p>
+                                <p>{hostReconnectingReason}</p>
                             </div>
                         )}
 
                         {hostDisconnected && (
                             <div className="video-overlay">
-                                <p className="host-ended" style={{ fontSize: '1.2rem' }}>
+                                <p className="host-ended">
                                     Host has ended the stream
                                 </p>
                             </div>
@@ -1264,13 +1262,13 @@ export default function WatchView({ initialCode = '' }) {
                     </div>
 
                     {whipReconnecting && (
-                        <div style={{ padding: '0.5rem 1rem', background: '#2a2a00', borderRadius: '4px', fontSize: '0.85rem', color: '#ffcc00', marginTop: '0.5rem' }}>
+                        <div className="alert alert-warning" role="status">
                             OBS disconnected — waiting for reconnection...
                         </div>
                     )}
 
                     {ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported && (
-                        <div style={{ padding: '0.75rem 1rem', background: '#3a1a1a', border: '1px solid #662222', borderRadius: '4px', fontSize: '0.85rem', color: '#ff8888', marginTop: '0.5rem' }}>
+                        <div className="alert alert-error" role="alert">
                             Your browser does not support AV1 playback. The host is streaming in AV1. Fallback playback is not available in this browser.
                         </div>
                     )}
@@ -1327,26 +1325,10 @@ export default function WatchView({ initialCode = '' }) {
 
                     </div>
 
-                    {renderLegacyStatusBlocks && fallbackMode && (
-                            <div className="media-status">
-                                <span>Relay Mode ({fallbackCodec || 'unknown'}) — {fallbackState || 'initializing'}</span>
-                            </div>
-                        )}
-
-                    {renderLegacyStatusBlocks && watching && playbackMode === 'relay' && (
-                        <div className="media-status">Compatibility relay mode active (higher latency).</div>
-                    )}
-
-                    {renderLegacyStatusBlocks && watching && !fallbackMode && playbackMode === 'mediasoup' && (
-                        <div className="media-status">
-                            {ingestMode === 'obs' ? 'OBS WebRTC mode active (lowest latency).' : 'WebRTC mode active (lowest latency).'}
-                        </div>
-                    )}
-
-                    {playbackStatus && <div className="media-status">{playbackStatus}</div>}
+                    {playbackStatus && <div className="media-status" role="status">{playbackStatus}</div>}
 
                     {mediaControlStatus && (
-                        <div className="media-status">{mediaControlStatus}</div>
+                        <div className="media-status" role="status">{mediaControlStatus}</div>
                     )}
                 </>
             )}

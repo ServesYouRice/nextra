@@ -2,6 +2,9 @@ import React, { useState, useRef, useEffect, useCallback, useContext } from 'rea
 import { SocketContext } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { configureObsStream, stopObsStream } from './lib/obsWebSocket';
+import CopyField from './components/CopyField';
+import StatusPill from './components/StatusPill';
+import Modal from './components/Modal';
 
 const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 5_000 };
 const OBS_MAX_BITRATE_KBPS = 45_000;
@@ -387,8 +390,8 @@ export default function HostView() {
     const [relayMaxChunkSize, setRelayMaxChunkSize] = useState(4 * 1024 * 1024);
     const [relayViewerCount, setRelayViewerCount] = useState(0);
     const [error, setError] = useState('');
-    const [copied, setCopied] = useState(false);
     const [status, setStatus] = useState('idle');
+    const [whepEnabled, setWhepEnabled] = useState(false);
     const [qualityProfile, setQualityProfile] = useState(() => {
         const h = window.screen.height * (window.devicePixelRatio || 1);
         if (h >= 2160) return '4k';
@@ -539,17 +542,24 @@ export default function HostView() {
         }
     }, [ingestMode, obsTryAv1]);
 
+    // WHEP enablement is only exposed via the HTTP config endpoint (the
+    // socket server-config payload does not include it), so probe it once.
     useEffect(() => {
-        if (!showByokTurnModal) return undefined;
-        const onKeyDown = (event) => {
-            if (event.key === 'Escape') {
-                setShowByokTurnModal(false);
-            }
-        };
-        window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
-    }, [showByokTurnModal]);
-
+        const controller = new AbortController();
+        fetch('/api/config', {
+            headers: { accept: 'application/json' },
+            credentials: 'same-origin',
+            signal: controller.signal,
+        })
+            .then((response) => (response.ok ? response.json() : null))
+            .then((data) => {
+                if (data && typeof data.whepEnabled === 'boolean') {
+                    setWhepEnabled(data.whepEnabled);
+                }
+            })
+            .catch(() => { });
+        return () => controller.abort();
+    }, []);
 
     useEffect(() => {
         if (!roomCode) return undefined;
@@ -1233,17 +1243,6 @@ export default function HostView() {
         cleanup();
     }, [socket, cleanup, ingestMode, obsPassword]);
 
-    const handleCopyCode = useCallback(async (text) => {
-        const toCopy = text || roomCode;
-        try {
-            await navigator.clipboard.writeText(toCopy);
-        } catch {
-            console.warn('[Nextra] Clipboard API unavailable');
-        }
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-    }, [roomCode]);
-
     const handleObsTryAv1Change = useCallback((enabled) => {
         setObsTryAv1(enabled);
         if (enabled) {
@@ -1265,6 +1264,11 @@ export default function HostView() {
                 ? `Public link unavailable on this machine. ${publicShareError || 'Built-in tunnel startup failed.'}`
                 : 'Public link unavailable on this machine. Share the local link or room code instead.';
     const formattedRoomCode = roomCode ? `${roomCode.slice(0, 3)}-${roomCode.slice(3)}` : '';
+    const whepBaseUrl = shareBaseUrl || lanBaseUrl;
+    const whepPlaybackUrl = whepEnabled && roomCode && whepBaseUrl
+        ? `${whepBaseUrl}/whep/watch/${roomCode}`
+        : '';
+    const totalViewers = viewerCount + whepViewerCount;
 
     return (
         <div className="view-container">
@@ -1285,10 +1289,10 @@ export default function HostView() {
                         {isSharing && ingestMode === 'obs' && (
                             <div className="video-overlay">
                                 <p>Streaming via OBS</p>
-                                <p style={{ fontSize: '0.8rem', color: 'var(--text-3)', marginTop: '0.25rem' }}>
+                                <p className="video-overlay-sub">
                                     {whipConnected ? 'OBS connected' : 'Waiting for OBS...'}
                                     {obsVideoCodec ? ` \u00B7 ${obsVideoCodec.toUpperCase()}` : ''}
-                                    {(viewerCount + whepViewerCount) > 0 ? ` \u00B7 ${viewerCount + whepViewerCount} viewer${(viewerCount + whepViewerCount) !== 1 ? 's' : ''}` : ''}
+                                    {totalViewers > 0 ? ` \u00B7 ${totalViewers} viewer${totalViewers !== 1 ? 's' : ''}` : ''}
                                 </p>
                             </div>
                         )}
@@ -1370,8 +1374,8 @@ export default function HostView() {
                                     </span>
                                 </label>
                             </div>
-                            <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
-                                <label htmlFor="qualityProfile" className="setting-row-label" style={{ minWidth: '140px' }}>
+                            <div className="setting-row setting-row-inline">
+                                <label htmlFor="qualityProfile" className="setting-row-label">
                                     Resolution
                                 </label>
                                 <select
@@ -1385,8 +1389,8 @@ export default function HostView() {
                                     ))}
                                 </select>
                             </div>
-                            <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
-                                <label htmlFor="frameRate" className="setting-row-label" style={{ minWidth: '140px' }}>
+                            <div className="setting-row setting-row-inline">
+                                <label htmlFor="frameRate" className="setting-row-label">
                                     Frame rate
                                 </label>
                                 <select
@@ -1466,8 +1470,8 @@ export default function HostView() {
                                             </span>
                                         </label>
                                     </div>
-                                    <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
-                                        <label htmlFor="obsPassword" className="setting-row-label" style={{ minWidth: '90px', flexShrink: 0 }}>
+                                    <div className="setting-row setting-row-inline">
+                                        <label htmlFor="obsPassword" className="setting-row-label">
                                             WS password
                                         </label>
                                         <input
@@ -1483,69 +1487,51 @@ export default function HostView() {
                         </div>
                     )}
 
-                    {error && <div className="alert alert-error">{error}</div>}
-                    {bandwidthWarning && <div className="alert alert-warning">{bandwidthWarning}</div>}
+                    {error && <div className="alert alert-error" role="alert">{error}</div>}
+                    {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
 
                     {roomCode && (
                         <div className={ingestMode === 'obs' ? 'streaming-info-row' : ''}>
                         <div className="room-info">
                             <div className="room-code-display">
-                                <span className="room-code-label">Room Code</span>
-                                <span className="room-code" onClick={() => handleCopyCode(formattedRoomCode)} title="Click to copy">
-                                    {formattedRoomCode}
-                                </span>
+                                <CopyField label="Room Code" value={formattedRoomCode} strong />
 
-                                <div style={{ display: 'flex', gap: '2rem', marginTop: '1rem', flexWrap: 'wrap' }}>
-                                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                        <span className="room-code-label">Local Link</span>
-                                        <span
-                                            className="room-link"
-                                            onClick={() => handleCopyCode(localWatchLink)}
-                                            title="Click to copy local link"
-                                        >
-                                            {localWatchLink}
-                                        </span>
-                                    </div>
+                                <div className="room-links-row">
+                                    <CopyField label="Local Link" value={localWatchLink} />
                                     {showPublicLink && (
-                                        <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                            <span className="room-code-label">Public Link</span>
-                                            <span
-                                                className="room-link"
-                                                onClick={() => handleCopyCode(publicWatchLink)}
-                                                title="Click to copy public link"
-                                            >
-                                                {publicWatchLink}
-                                            </span>
-                                        </div>
+                                        <CopyField label="Public Link" value={publicWatchLink} />
+                                    )}
+                                    {whepPlaybackUrl && (
+                                        <CopyField label="External Player (WHEP)" value={whepPlaybackUrl} />
                                     )}
                                 </div>
 
                                 {!showPublicLink && (
-                                    <span className="copy-hint" style={{ marginTop: '0.5rem' }}>
-                                        {publicLinkHint}
+                                    <span className="copy-hint">{publicLinkHint}</span>
+                                )}
+                                {whepPlaybackUrl && (
+                                    <span className="copy-hint">
+                                        The WHEP link plays in GStreamer and other WHEP-compatible players.
                                     </span>
                                 )}
-
-                                <span className="copy-hint" style={{ marginTop: '0.75rem' }}>
-                                    {copied ? 'Copied!' : 'Click any link above to copy'}
-                                </span>
                             </div>
                             <div className="viewer-count">
-                                <span className="viewer-icon" style={{ fontSize: '1.2rem', marginRight: '0.2rem' }}>&bull;</span>
-                                <span>{viewerCount + whepViewerCount} viewer{(viewerCount + whepViewerCount) !== 1 ? 's' : ''}</span>
+                                <StatusPill tone={totalViewers > 0 ? 'ok' : undefined} pulse={totalViewers > 0}>
+                                    {totalViewers} viewer{totalViewers !== 1 ? 's' : ''}
+                                </StatusPill>
                                 {whepViewerCount > 0 && (
-                                    <span className="copy-hint" style={{ marginLeft: '0.5rem', fontSize: '0.8rem' }}>
-                                        ({viewerCount} WebRTC · {whepViewerCount} WHEP)
+                                    <span className="room-meta">
+                                        {viewerCount} WebRTC · {whepViewerCount} WHEP
                                     </span>
                                 )}
                             </div>
                             {roomMetrics && (
-                                <div className="copy-hint" style={{ marginTop: '0.75rem' }}>
+                                <div className="room-meta">
                                     WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0)}
                                 </div>
                             )}
                             {ingestMode === 'obs' && (
-                                <div className="copy-hint" style={{ marginTop: '0.25rem' }}>
+                                <div className="room-meta">
                                     Codec: {obsVideoCodec || 'waiting'} |{' '}
                                     {obsAv1Mode || obsVideoCodec === 'av1'
                                         ? `WebRTC-only AV1 room | TURN ${roomHasTurnServer ? 'ready' : 'missing'}`
@@ -1555,91 +1541,84 @@ export default function HostView() {
                         </div>
                     {ingestMode === 'obs' && (
                         <div className="obs-whip-setup-panel room-info">
-                            <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1rem' }}>OBS WHIP Setup</h3>
+                            <h3>OBS WHIP Setup</h3>
 
-                                    {whipHttpStatus !== 'ready' && (
-                                        <div style={{ fontSize: '0.85rem', color: '#e5a84b', marginBottom: '0.5rem' }}>
-                                            {whipHttpStatus === 'error'
-                                                ? `OBS WHIP endpoint unavailable: ${whipHttpError || 'HTTP listener failed.'}`
-                                                : 'OBS WHIP endpoint is starting...'}
-                                        </div>
-                                    )}
+                            {whipHttpStatus !== 'ready' && (
+                                <div className="obs-status-line is-warn" role="status">
+                                    {whipHttpStatus === 'error'
+                                        ? `OBS WHIP endpoint unavailable: ${whipHttpError || 'HTTP listener failed.'}`
+                                        : 'OBS WHIP endpoint is starting...'}
+                                </div>
+                            )}
 
-                                    {obsAutoStatus === 'configuring' && (
-                                        <div style={{ fontSize: '0.85rem', color: '#5b8def', marginBottom: '0.5rem' }}>
-                                            {obsAutoMessage}
-                                        </div>
-                                    )}
-                                    {obsAutoStatus === 'success' && (
-                                        <div style={{ fontSize: '0.85rem', color: '#3ccb7f', marginBottom: '0.5rem' }}>
-                                            {obsAutoMessage}
-                                        </div>
-                                    )}
-                                    {obsAutoStatus === 'error' && (
-                                        <div style={{ fontSize: '0.85rem', color: '#e5a84b', marginBottom: '0.5rem' }}>
-                                            {obsAutoMessage}
-                                        </div>
-                                    )}
+                            {obsAutoStatus === 'configuring' && (
+                                <div className="obs-status-line is-info" role="status">{obsAutoMessage}</div>
+                            )}
+                            {obsAutoStatus === 'success' && (
+                                <div className="obs-status-line is-ok" role="status">{obsAutoMessage}</div>
+                            )}
+                            {obsAutoStatus === 'error' && (
+                                <div className="obs-status-line is-warn" role="alert">{obsAutoMessage}</div>
+                            )}
 
-                                    {obsAutoStatus === 'error' && (
-                                        <div style={{ fontSize: '0.85rem', marginBottom: '0.75rem' }}>
-                                            <button
-                                                onClick={() => {
-                                                    if (whipHttpStatus !== 'ready') {
-                                                        setObsAutoStatus('error');
-                                                        setObsAutoMessage(whipHttpStatus === 'error'
-                                                            ? `OBS WHIP endpoint is unavailable: ${whipHttpError || 'HTTP listener failed.'}`
-                                                            : 'OBS WHIP endpoint is still starting. Retry in a moment.');
-                                                        socket.emit('request-server-config');
-                                                        return;
-                                                    }
-                                                    const whipUrl = buildWhipBroadcastUrl(roomCode);
-                                                    setObsAutoStatus('configuring');
-                                                    setObsAutoMessage('Connecting to OBS...');
-                                                    const retryOpts = {
-                                                        ...buildObsAutoConfig(whipUrl, hostTokenRef.current),
-                                                    };
-                                                    configureObsStream(retryOpts).then((result) => {
-                                                        setObsAutoStatus(result.success ? 'success' : 'error');
-                                                        setObsAutoMessage(result.message);
-                                                    });
-                                                }}
-                                                style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', cursor: 'pointer', borderRadius: '4px', border: '1px solid #555', background: '#2a2a3e', color: '#fff' }}
-                                            >
-                                                Retry Auto-Configure OBS
-                                            </button>
-                                        </div>
-                                    )}
+                            {obsAutoStatus === 'error' && (
+                                <div className="obs-retry-row">
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary btn-small"
+                                        onClick={() => {
+                                            if (whipHttpStatus !== 'ready') {
+                                                setObsAutoStatus('error');
+                                                setObsAutoMessage(whipHttpStatus === 'error'
+                                                    ? `OBS WHIP endpoint is unavailable: ${whipHttpError || 'HTTP listener failed.'}`
+                                                    : 'OBS WHIP endpoint is still starting. Retry in a moment.');
+                                                socket.emit('request-server-config');
+                                                return;
+                                            }
+                                            const whipUrl = buildWhipBroadcastUrl(roomCode);
+                                            setObsAutoStatus('configuring');
+                                            setObsAutoMessage('Connecting to OBS...');
+                                            const retryOpts = {
+                                                ...buildObsAutoConfig(whipUrl, hostTokenRef.current),
+                                            };
+                                            configureObsStream(retryOpts).then((result) => {
+                                                setObsAutoStatus(result.success ? 'success' : 'error');
+                                                setObsAutoMessage(result.message);
+                                            });
+                                        }}
+                                    >
+                                        Retry Auto-Configure OBS
+                                    </button>
+                                </div>
+                            )}
 
-                                    <details style={{ fontSize: '0.85rem', marginBottom: '0.5rem' }}>
-                                        <summary style={{ cursor: 'pointer', color: '#aaa' }}>Manual setup (if auto-config fails)</summary>
-                                        <div style={{ marginTop: '0.5rem' }}>
-                                            <div style={{ marginBottom: '0.5rem' }}>
-                                                <strong>WHIP URL:</strong>
-                                                <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
-                                                    {buildWhipBroadcastUrl(roomCode)}
-                                                </code>
-                                            </div>
-                                            <div style={{ marginBottom: '0.5rem' }}>
-                                                <strong>Bearer Token:</strong>
-                                                <code style={{ display: 'block', padding: '0.5rem', background: '#0d0d1a', borderRadius: '4px', marginTop: '0.25rem', wordBreak: 'break-all', userSelect: 'all' }}>
-                                                    {hostToken}
-                                                </code>
-                                            </div>
-                                            <div style={{ color: '#aaa' }}>
-                                                In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
-                                            </div>
-                                            {(obsAv1Mode || obsVideoCodec === 'av1') && (
-                                                <div style={{ color: '#e5a84b', marginTop: '0.5rem' }}>
-                                                    Keep AV1 selected in OBS output. This room disables relay fallback and expects viewers to connect over WebRTC.
-                                                </div>
-                                            )}
-                                        </div>
-                                    </details>
-
-                                    <div style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>
-                                        Status: {whipConnected ? '\uD83D\uDFE2 OBS Connected' : '\uD83D\uDD34 Waiting for OBS...'}
+                            <details className="obs-manual-details">
+                                <summary>Manual setup (if auto-config fails)</summary>
+                                <div>
+                                    <div className="obs-manual-field">
+                                        <strong>WHIP URL:</strong>
+                                        <code className="code-block">{buildWhipBroadcastUrl(roomCode)}</code>
                                     </div>
+                                    <div className="obs-manual-field">
+                                        <strong>Bearer Token:</strong>
+                                        <code className="code-block">{hostToken}</code>
+                                    </div>
+                                    <div className="obs-manual-note">
+                                        In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
+                                    </div>
+                                    {(obsAv1Mode || obsVideoCodec === 'av1') && (
+                                        <div className="obs-av1-note">
+                                            Keep AV1 selected in OBS output. This room disables relay fallback and expects viewers to connect over WebRTC.
+                                        </div>
+                                    )}
+                                </div>
+                            </details>
+
+                            <div className="obs-connection-status">
+                                {whipConnected
+                                    ? <StatusPill tone="ok" pulse>OBS Connected</StatusPill>
+                                    : <StatusPill tone="warn">Waiting for OBS\u2026</StatusPill>}
+                            </div>
                         </div>
                     )}
                         </div>
@@ -1647,18 +1626,7 @@ export default function HostView() {
                 </div>
             </div>
             {showByokTurnModal && (
-                <div
-                    className="modal-backdrop"
-                    role="presentation"
-                    onClick={() => setShowByokTurnModal(false)}
-                >
-                    <div
-                        className="settings-modal"
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="byokTurnModalTitle"
-                        onClick={(event) => event.stopPropagation()}
-                    >
+                <Modal titleId="byokTurnModalTitle" onClose={() => setShowByokTurnModal(false)}>
                         <div className="settings-modal-head">
                             <div>
                                 <div className="settings-modal-eyebrow">AV1 WebRTC Mode</div>
@@ -1674,7 +1642,7 @@ export default function HostView() {
                             </button>
                         </div>
                         {cloudflareTurnAutofillAvailable && (
-                            <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                            <div className="modal-inline-row">
                                 <button
                                     type="button"
                                     className="btn btn-secondary"
@@ -1697,8 +1665,8 @@ export default function HostView() {
                                 Save TURN credentials for this session
                             </label>
                         </div>
-                        <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
-                            <label htmlFor="byokTurnUrls" className="setting-row-label" style={{ minWidth: '110px', flexShrink: 0 }}>
+                        <div className="setting-row setting-row-inline">
+                            <label htmlFor="byokTurnUrls" className="setting-row-label">
                                 TURN URLs
                             </label>
                             <textarea
@@ -1706,12 +1674,11 @@ export default function HostView() {
                                 value={byokTurnUrls}
                                 onChange={(e) => setByokTurnUrls(e.target.value)}
                                 placeholder={'turn:turn.example.com:3478?transport=udp\nturns:turn.example.com:5349?transport=tcp'}
-                                className="select-input"
-                                style={{ minHeight: '6rem', resize: 'vertical', paddingTop: '0.85rem', paddingBottom: '0.85rem' }}
+                                className="select-input input-textarea"
                             />
                         </div>
-                        <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
-                            <label htmlFor="byokTurnAuthType" className="setting-row-label" style={{ minWidth: '110px', flexShrink: 0 }}>
+                        <div className="setting-row setting-row-inline">
+                            <label htmlFor="byokTurnAuthType" className="setting-row-label">
                                 Auth mode
                             </label>
                             <select
@@ -1725,8 +1692,8 @@ export default function HostView() {
                             </select>
                         </div>
                         {byokTurnAuthType === 'secret' ? (
-                            <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
-                                <label htmlFor="byokTurnSecret" className="setting-row-label" style={{ minWidth: '110px', flexShrink: 0 }}>
+                            <div className="setting-row setting-row-inline">
+                                <label htmlFor="byokTurnSecret" className="setting-row-label">
                                     TURN secret
                                 </label>
                                 <input
@@ -1740,8 +1707,8 @@ export default function HostView() {
                             </div>
                         ) : (
                             <>
-                                <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
-                                    <label htmlFor="byokTurnUsername" className="setting-row-label" style={{ minWidth: '110px', flexShrink: 0 }}>
+                                <div className="setting-row setting-row-inline">
+                                    <label htmlFor="byokTurnUsername" className="setting-row-label">
                                         Username
                                     </label>
                                     <input
@@ -1753,8 +1720,8 @@ export default function HostView() {
                                         className="select-input"
                                     />
                                 </div>
-                                <div className="setting-row setting-row-inline" style={{ alignItems: 'center' }}>
-                                    <label htmlFor="byokTurnCredential" className="setting-row-label" style={{ minWidth: '110px', flexShrink: 0 }}>
+                                <div className="setting-row setting-row-inline">
+                                    <label htmlFor="byokTurnCredential" className="setting-row-label">
                                         Credential
                                     </label>
                                     <input
@@ -1788,8 +1755,7 @@ export default function HostView() {
                                 Done
                             </button>
                         </div>
-                    </div>
-                </div>
+                </Modal>
             )}
         </div>
     );
