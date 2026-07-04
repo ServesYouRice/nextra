@@ -1,80 +1,47 @@
-# Nextra UI Audit & Modernization Plan
+# Nextra UI Audit & Modernization Status
 
-Date: 2026-07-02
-Branch: `claude/ui-audit-modernization-5zza2b`
+Date reviewed: 2026-07-04
+Original modernization branch: `claude/ui-audit-modernization-5zza2b`
+Merged on `main`: `6c1c176`
 
-## 1. Audit summary
+This file used to describe planned UI work. The current codebase already includes the modernization work, so this document now records the completed status and remaining verification notes.
 
-### 1.1 Current UI surface
+## Completed
 
-| Route | View | State |
-|---|---|---|
-| `#` (default) | `Landing` (inline in `App.jsx`) | Sparse two-card page, no hero/branding, no feature overview |
-| `#host` | `HostView.jsx` (1,796 lines) | Feature-rich but 45 inline `style={{}}` blocks, hardcoded hex colors, ad-hoc layout |
-| `#watch` / `#watch/CODE` | `WatchView.jsx` (1,355 lines) | Works, but status/warning banners are inline-styled one-offs |
-| `#how-to` | `HowToView.jsx` | Long article; references CSS variables that do not exist (`--surface-3`, `--accent-1`) so callouts render transparent |
-| `#privacy` | `PrivacyView.jsx` | Fine content-wise, plain presentation |
-| `#copyright` | `CopyrightView.jsx` | Fine content-wise, plain presentation |
-| anything else | Falls through to `Landing` silently | No 404 page |
+| Area | Current status |
+|---|---|
+| Shell routing | `App.jsx` has hash routes for Home, How To, Host, Watch, Status, Privacy, Copyright, and a real Not Found view. |
+| Status dashboard | `StatusView.jsx` fetches `/api/metrics`, auto-refreshes every 5 seconds, and handles 401/403/unavailable states. |
+| WHEP visibility | `HostView.jsx` reads `/api/config`, shows a copyable External Player (WHEP) link when enabled, and counts WHEP viewers. |
+| Crash surface | `ErrorBoundary.jsx` wraps lazy routes and offers a reload action on render errors. |
+| Landing page | Home has brand treatment, Host/Watch entry points, and a feature grid covering browser capture, OBS/WHIP, 4K60, relay, public links, and no accounts. |
+| Shared UI primitives | `CopyField.jsx`, `StatusPill.jsx`, `Modal.jsx`, and `BrandLogo.jsx` are in place. |
+| Accessibility | Copy targets are buttons with `aria-live` feedback, status/error surfaces use roles, the BYOK TURN modal manages focus, navigation uses `aria-current`, and a skip link exists. |
+| CSS modernization | `index.css` has design tokens, `color-scheme: dark`, `100dvh`, focus-visible styles, reduced-motion handling, and article/card/status/copy/table styles. No JSX `style={{}}` blocks remain in `HostView.jsx`. |
+| Font loading | Google Fonts are loaded from preconnected `<link>` tags in `index.html` with `display=swap`; the old CSS `@import` is gone. |
+| How-to content | `HowToView.jsx` documents browser hosting, OBS/H.264, AV1 + BYOK TURN, relay behavior, public links, remote media control, and WHEP external players. |
 
-### 1.2 Implemented features with **missing pages/UI**
+## Documentation Cleanup
 
-1. **Server status & metrics — no page.** `GET /api/metrics` (server.js:693) returns active rooms, viewer/relay/WHEP counts, mediasoup consumer counts, and socket runtime metrics, with local/remote token auth. Nothing in the UI consumes it. → Add a **`#status` dashboard page** with auto-refresh and graceful handling of 401/403 for remote clients.
-2. **WHEP egress — invisible to hosts.** `/whep/watch/:roomCode` (lib/whepRoutes.js) lets external WHEP players (OBS, GStreamer, web players) watch a room; the host UI even counts WHEP viewers, but the WHEP playback URL is never shown anywhere. → Surface the **WHEP URL (with copy) in the host streaming panel** when `whepEnabled`, and document it in How-To.
-3. **No 404 page.** Unknown hash routes silently render the Landing page. → Add a **NotFound view** with links back to Home/Host/Watch.
-4. **No crash surface.** A render error white-screens the app (only chunk-load errors are recovered in `main.jsx`). → Add a top-level **React ErrorBoundary** with a reload affordance.
-5. **Landing page undersells implemented features.** OBS/WHIP, AV1, relay fallback, public tunnel links, remote media control, 4K60 — none mentioned. → Rebuild Landing as a proper hero + feature grid using README's feature list.
+The README now matches the current implementation:
 
-### 1.3 Outdated / substandard patterns to fix
+- Source setup uses `cd nextra`.
+- Playback modes include optional WHEP egress.
+- The Status dashboard is documented.
+- WHEP and metrics configuration variables are listed.
+- OBS/WHIP relay sync and bind-host settings are listed.
 
-- **Inline styling everywhere**: 45 inline style objects in `HostView` alone, one-off hex colors (`#e5a84b`, `#2a2a3e`, `#0d0d1a`, `#3a1a1a`…) bypassing the design tokens.
-- **Broken CSS variables** in `HowToView` (`var(--surface-3)`, `var(--accent-1)` are undefined).
-- **Render-blocking external font** via CSS `@import` of Google Fonts → move to preconnected `<link>` tags in `index.html` with `display=swap`.
-- **Accessibility gaps**:
-  - Copyable room code / links are plain `<span onClick>` — not focusable, no keyboard access, no `role="button"`.
-  - Status changes (`Copied!`, connect states) are not announced (`aria-live` missing).
-  - BYOK TURN modal has no focus management; nav lacks `aria-current`; no visible `:focus-visible` styles; no skip link.
-  - No `prefers-reduced-motion` handling despite pulse/slide/blur animations.
-- **Layout/CSS modernization**: `min-height: 100vh` → `100dvh`, `color-scheme: dark`, `accent-color`, logical properties for nav/footer padding, `text-wrap: balance` on headings, consistent spacing scale, mobile nav overflow.
-- **UX polish**: plain-text "Loading..." Suspense fallback → skeleton/spinner; alerts get icons + roles (`role="alert"`); consistent status pills instead of colored `<div>`s; buttons get proper disabled/loading states.
+The adjacent `.env.example` header was also updated from the old project name to Nextra.
 
-### 1.4 Explicit non-goals (risk containment)
+## Verification Notes
 
-- **No changes to the media pipeline logic**: mediasoup/WebRTC/relay/OBS-WebSocket flows in `HostView`, `WatchView`, `src/lib/*` stay behaviorally identical. Only render/JSX/presentation layers are reworked.
-- No router library swap (hash routing stays — required by share links `/#watch/CODE`).
-- No server behavior changes; only read-only consumption of existing endpoints (`/api/metrics`, `/api/config`).
-- No new runtime dependencies.
+This status review was static against the current source tree. At review time, the checkout did not contain `node_modules` or `dist`, so lint/test/build verification requires installing dependencies first:
 
-## 2. Implementation approach
+```bash
+npm install
+npm run lint
+npm test
+npm run build
+```
 
-### Phase 1 — Design system refresh (`src/index.css`, `index.html`)
-- Reorganized token set (surfaces, text, semantic status colors, spacing radii, transitions), `color-scheme: dark`, focus-visible rings, reduced-motion media query, `100dvh`.
-- Replace CSS `@import` fonts with preloaded `<link>` in `index.html`.
-- New reusable primitives: status pills, copy fields, code blocks, callouts, skeleton loader, feature cards, stat cards — replacing today's one-off inline styles.
-
-### Phase 2 — Shared components (`src/components/`)
-- `CopyField.jsx` — accessible copy-to-clipboard row (button semantics, `aria-live` feedback). Replaces all click-to-copy spans.
-- `StatusPill.jsx` — semantic status indicator (ok/warn/error/info + optional pulse dot).
-- `Modal.jsx` — dialog wrapper with Escape handling, backdrop click, focus restore (used by BYOK TURN modal).
-- `ErrorBoundary.jsx` — top-level crash screen.
-
-### Phase 3 — Shell & navigation (`App.jsx`)
-- Header: `aria-current` nav, active styles, skip-to-content link, Status link.
-- Proper 404 route + `NotFound.jsx`; better Suspense fallback.
-- Rebuilt Landing: hero (brand, tagline), Host/Watch action cards, feature grid from the implemented feature set.
-
-### Phase 4 — Page remakes (presentation only)
-- **HostView**: strip all inline styles into semantic classes; restructure the streaming info area (room code, links, viewer stats, OBS WHIP setup) into cleaner card sections; add WHEP URL row (from `/api/config` `whepEnabled` + room code); keep every hook/callback/effect untouched.
-- **WatchView**: replace inline warning/status blocks with alert/pill components; tidy join form and controls; logic untouched.
-- **HowToView**: fix broken CSS vars, restyle callouts with the new system, add a short "External players (WHEP)" section.
-- **Privacy/Copyright**: adopt the refreshed article styles (no content rewrites).
-
-### Phase 5 — New Status page (`#status`)
-- `StatusView.jsx`: fetches `/api/metrics` with 5s auto-refresh; totals row (rooms, viewers, relay, WHEP, consumers), per-room table, socket runtime stats; friendly error state for remote/unauthorized clients (403/401) and unreachable server.
-
-### Phase 6 — Verification
-- `npm run lint`, `npm test`, `npm run build` all green.
-- Manual smoke pass over each route in the built app (dev server) to check layout, keyboard navigation, and reduced-motion behavior.
-
-### Commit strategy
-Small, reviewable commits per phase (plan → design system → components → shell/landing → host/watch → docs/legal → status page → fixes), pushed to the designated branch.
+No runtime dependencies were added for the modernization work.
