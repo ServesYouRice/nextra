@@ -23,6 +23,7 @@ You can grab `Nextra.exe` from [GitHub Releases](../../releases), run it, and st
 - **WebRTC + Relay playback** - browser capture and AV1 stay on WebRTC; H.264 OBS rooms can fall back to fMP4 relay
 - **Public sharing** - built-in Cloudflare quick tunnel for internet viewers with no port forwarding
 - **Remote media control** - viewers can pause/play media on the host machine when enabled by the host
+- **Status dashboard** - local server metrics for rooms, WebRTC viewers, relay viewers, WHEP viewers, and runtime counters
 - **No accounts or sign-ups** - room-code based access
 
 ---
@@ -40,7 +41,7 @@ You can grab `Nextra.exe` from [GitHub Releases](../../releases), run it, and st
 
 ```bash
 git clone <repo-url>
-cd P2Pvideo
+cd nextra
 npm install
 npm run build        # build the client (required before npm start)
 npm start
@@ -151,11 +152,13 @@ Manual WHIP setup is mainly for the H.264 path. AV1 rooms still require OBS auto
 |---|---|---|
 | **WebRTC** | Direct mediasoup playback | Browser capture, AV1 OBS rooms, and H.264 OBS rooms when the direct path works |
 | **Relay** | fMP4 over Socket.IO + MSE | H.264 OBS rooms, tunnel viewers without TURN, or manual fallback |
+| **WHEP** | Standards-based WebRTC egress | Optional external-player playback when `WHEP_ENABLED=true` |
 
 - Cloudflare quick tunnels do not carry UDP. Without TURN, public viewers prefer relay when relay is allowed.
 - AV1 OBS rooms disable relay entirely. If TURN is missing or the browser cannot play AV1, those viewers will fail instead of falling back.
 - Only H.264 OBS rooms expose the **Switch to Relay Mode** button.
 - The relay player stays near the live edge and auto-recovers from stalls.
+- When WHEP is enabled, the host page shows an **External Player (WHEP)** copy link at `/whep/watch/<room-code>` for GStreamer, web-based WHEP players, or custom WebRTC clients.
 
 ---
 
@@ -174,6 +177,14 @@ Tunnel notes:
 
 - Browser capture and OBS H.264 rooms can still serve public viewers without TURN because relay is available.
 - OBS AV1 rooms need TURN for public viewers because Cloudflare quick tunnels block UDP and AV1 rooms do not have relay fallback.
+
+---
+
+## Status Dashboard
+
+Open `http://127.0.0.1:3000/#status` on the host machine to see active rooms, WebRTC viewers, relay viewers, WHEP viewers, mediasoup consumers, relay throughput, and socket runtime counters. The page refreshes every 5 seconds and handles restricted or unavailable metrics with a friendly error state.
+
+Remote metrics are disabled by default. The in-app dashboard is intended for host/local use; if you expose `/api/metrics` for API access, use `ALLOW_REMOTE_METRICS` and `METRICS_TOKEN` deliberately, and avoid sharing room codes or runtime diagnostics with untrusted viewers.
 
 ---
 
@@ -213,10 +224,21 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 |---|---|---|
 | `WHIP_ENABLED` | `true` | Enable WHIP ingest endpoint |
 | `WHIP_HTTP_PORT` | `3001` | HTTP port for WHIP endpoint |
+| `WHIP_BIND_HOST` | `127.0.0.1` | Bind address for the WHIP HTTP endpoint |
 | `FFMPEG_PATH` | `ffmpeg` | Path to FFmpeg binary |
 | `FALLBACK_FRAGMENT_DURATION_MS` | `500` | fMP4 fragment duration in ms |
 | `FALLBACK_AUDIO_BITRATE` | `192k` | Audio bitrate for relay remux |
+| `FALLBACK_AUDIO_OFFSET_MS` | `1500` | Delay OBS relay audio to keep fMP4 playback in sync |
 | `MAX_FALLBACK_VIEWERS` | `50` | Max concurrent relay viewers |
+
+### WHEP
+
+| Variable | Default | Description |
+|---|---|---|
+| `WHEP_ENABLED` | `false` | Enable standards-based WHEP viewer egress at `/whep/watch/<room-code>` |
+| `WHEP_RATE_LIMIT_MAX` | `5` | Max WHEP session creation attempts per IP per window |
+| `WHEP_RATE_LIMIT_WINDOW_MS` | `60000` | WHEP rate-limit window in ms |
+| `WHEP_MAX_GLOBAL_SESSIONS` | `30` | Max concurrent WHEP sessions across the server |
 
 ### TURN / AV1
 
@@ -254,8 +276,13 @@ Notes:
 | `JOIN_RATE_LIMIT_MAX` | `20` | Viewer join or auto-rejoin attempts per IP per window |
 | `HOST_UPLOAD_MBPS` | `36` | Assumed host upload bandwidth |
 | `RELAY_VIDEO_BITS_PER_SECOND` | `45000000` | Max relay video bitrate ceiling |
+| `RELAY_FLUSH_INTERVAL_MS` | `300` | Relay socket flush interval in ms |
+| `RELAY_SOCKET_MAX_BUFFERED_BYTES` | `16777216` | Per-viewer relay send-buffer cap before slow viewers are skipped/kicked |
 | `MAX_CONNECTIONS_PER_IP` | `60` | Rate limit: connections per IP |
 | `SOCKET_PING_TIMEOUT_MS` | `60000` | Grace period before a quiet watcher socket is considered disconnected |
+| `METRICS_BROADCAST_INTERVAL_MS` | `5000` | Room metrics broadcast interval |
+| `ALLOW_REMOTE_METRICS` | `false` | Allow `/api/metrics` from non-local clients |
+| `METRICS_TOKEN` | - | Optional token for remote `/api/metrics` API access |
 | `MEDIA_DEBUG_LOGS` | `false` | Verbose media-pipeline logging; keep off during normal streams |
 
 See `.env.example` for the full list.
