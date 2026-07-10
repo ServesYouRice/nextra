@@ -44,6 +44,19 @@ function normalizeRoomCode(value) {
     return String(value || '').trim().toUpperCase().replace(/-/g, '');
 }
 
+// Viewers usually receive a full watch link; accept a pasted URL as well as a
+// bare code by pulling the code out of a `#watch/CODE` fragment when present.
+function extractRoomCode(value) {
+    const text = String(value || '');
+    const urlMatch = text.match(/#\/?watch\/([A-Za-z0-9-]+)/i);
+    const source = urlMatch ? urlMatch[1] : text;
+    return source.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+}
+
+function formatRoomCode(code) {
+    return code.length > 3 ? `${code.slice(0, 3)}-${code.slice(3)}` : code;
+}
+
 
 export default function WatchView({ initialCode = '' }) {
     const socket = useSocket();
@@ -57,6 +70,7 @@ export default function WatchView({ initialCode = '' }) {
     const [hasProducer, setHasProducer] = useState(false);
     const [allowMediaControl, setAllowMediaControl] = useState(true);
     const [isMuted, setIsMuted] = useState(false);
+    const [joining, setJoining] = useState(false);
     const [watchLoading, setWatchLoading] = useState(false);
     const [playbackMode, setPlaybackMode] = useState('');
     const [hasTurnServer, setHasTurnServer] = useState(false);
@@ -93,6 +107,7 @@ export default function WatchView({ initialCode = '' }) {
     const playbackModeRef = useRef('');
     const fallbackModeRef = useRef(false);
     const reconnectingRef = useRef(false);
+    const joiningRef = useRef(false);
 
     const cleanupPlayback = useCallback(() => {
         activePlaybackAttemptRef.current += 1;
@@ -664,6 +679,7 @@ export default function WatchView({ initialCode = '' }) {
         const onHostReconnected = () => {
             setHostReconnectingReason('');
             setHostDisconnected(false);
+            setError('');
         };
 
         const onNewProducer = async ({ producerId } = {}) => {
@@ -832,6 +848,7 @@ export default function WatchView({ initialCode = '' }) {
     }, [socket]);
 
     const handleJoin = useCallback(async () => {
+        if (joiningRef.current) return;
         setError('');
         setHostDisconnected(false);
         setHostReconnectingReason('');
@@ -846,15 +863,20 @@ export default function WatchView({ initialCode = '' }) {
         setWhipReconnecting(false);
 
         const code = normalizeRoomCode(codeInput);
-        if (!code) {
-            setError('Please enter a room code.');
+        if (code.length !== 6) {
+            setError(code ? 'Enter the full 6-character room code.' : 'Please enter a room code.');
             return;
         }
 
+        joiningRef.current = true;
+        setJoining(true);
         try {
             await joinRoomAndLoadDevice(code);
         } catch (err) {
             setError(err.message);
+        } finally {
+            joiningRef.current = false;
+            setJoining(false);
         }
     }, [codeInput, joinRoomAndLoadDevice]);
 
@@ -892,7 +914,11 @@ export default function WatchView({ initialCode = '' }) {
                 videoElement: videoRef.current,
                 socket,
                 roomCode,
-                onStateChange: (state) => setFallbackState(state),
+                onStateChange: (state) => {
+                    setFallbackState(state);
+                    // A stale connection error contradicts visibly-playing video.
+                    if (state === 'playing') setError('');
+                },
                 onError: (msg, err) => console.error('[WatchView] Fallback error:', msg, err),
             });
 
@@ -1201,19 +1227,24 @@ export default function WatchView({ initialCode = '' }) {
                             placeholder="XXX-XXX"
                             value={codeInput}
                             onChange={(evt) => {
-                                let raw = evt.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
-                                raw = raw.slice(0, 6);
-                                if (raw.length > 3) raw = `${raw.slice(0, 3)}-${raw.slice(3)}`;
-                                setCodeInput(raw);
+                                setCodeInput(formatRoomCode(extractRoomCode(evt.target.value)));
                             }}
                             onKeyDown={(evt) => evt.key === 'Enter' && handleJoin()}
-                            maxLength={7}
                             autoFocus
+                            aria-describedby="joinHint"
                         />
-                        <button className="btn btn-primary" onClick={handleJoin}>
-                            Join Room
+                        <button className="btn btn-primary" onClick={handleJoin} disabled={joining}>
+                            {joining ? 'Joining...' : 'Join Room'}
                         </button>
                     </div>
+                    <p className="join-hint" id="joinHint" role="status">
+                        {(() => {
+                            const codeLength = normalizeRoomCode(codeInput).length;
+                            return codeLength > 0 && codeLength < 6
+                                ? `${codeLength}/6 characters`
+                                : 'Enter the 6-character room code, or paste the watch link you were sent.';
+                        })()}
+                    </p>
                 </div>
             ) : (
                 <>
@@ -1241,7 +1272,13 @@ export default function WatchView({ initialCode = '' }) {
                                         {watchLoading ? 'Connecting...' : 'Watch Stream'}
                                     </button>
                                 ) : (
-                                    <p>Waiting for host to start sharing...</p>
+                                    <>
+                                        <p>Waiting for host to start sharing...</p>
+                                        <p className="video-overlay-sub">
+                                            You&apos;re in room {formatRoomCode(normalizeRoomCode(joinedRoomCodeRef.current || codeInput))}.
+                                            The stream starts automatically once the host begins sharing.
+                                        </p>
+                                    </>
                                 )}
                             </div>
                         )}
