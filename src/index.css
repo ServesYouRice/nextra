@@ -1519,14 +1519,29 @@ input.select-input {
 /* ========== JOIN FORM ========== */
 .join-form {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.65rem;
   margin-top: 3rem;
+}
+
+.join-hint {
+  font-size: 0.78rem;
+  color: var(--text-3);
+  text-align: center;
 }
 
 .input-group {
   display: flex;
   gap: 0.5rem;
   align-items: center;
+}
+
+.live-settings-note {
+  font-size: 0.75rem;
+  color: var(--text-3);
+  margin-top: 0.6rem;
+  line-height: 1.45;
 }
 
 /* ========== STATUS PAGE ========== */
@@ -1933,5 +1948,43 @@ input.select-input {
   .setting-row-inline {
     grid-template-columns: 1fr;
     gap: 0.65rem;
+  }
+
+  .room-links-row {
+    flex-direction: column;
+    gap: 0.85rem;
+  }
+}
+
+/* Small phones: keep the Watch flow usable at 320-400px without
+   horizontal scroll. */
+@media (max-width: 400px) {
+  .view-container {
+    padding: 0.75rem;
+  }
+
+  .input-code {
+    width: 100%;
+    font-size: 0.95rem;
+  }
+
+  .input-group {
+    align-items: stretch;
+  }
+
+  .input-group .btn {
+    width: 100%;
+  }
+
+  .copy-field-value.copy-field-strong {
+    font-size: 1.05rem;
+  }
+
+  .btn-large {
+    width: 100%;
+  }
+
+  .video-overlay {
+    font-size: 0.8rem;
   }
 }
