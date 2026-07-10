@@ -1544,6 +1544,28 @@ input.select-input {
   line-height: 1.45;
 }
 
+.advanced-settings {
+  margin-top: 0.85rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.7rem;
+}
+
+.advanced-settings summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--text-2);
+  user-select: none;
+  transition: color var(--transition);
+}
+
+.advanced-settings summary:hover {
+  color: var(--text-1);
+}
+
+.advanced-settings[open] summary {
+  margin-bottom: 0.6rem;
+}
+
 /* ========== STATUS PAGE ========== */
 .status-container {
   max-width: 960px;

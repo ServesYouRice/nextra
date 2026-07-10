@@ -402,6 +402,7 @@ export default function HostView() {
     const [frameRate, setFrameRate] = useState(30);
     const [roomMetrics, setRoomMetrics] = useState(null);
     const [ingestMode, setIngestMode] = useState('browser');
+    const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
     const [whipConnected, setWhipConnected] = useState(false);
     const [fallbackViewerCount, setFallbackViewerCount] = useState(0);
     const [obsVideoCodec, setObsVideoCodec] = useState(null);
@@ -1371,20 +1372,6 @@ export default function HostView() {
                         <div className={`settings-wrapper${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
                         <div className="settings-panel">
                             <h3>Settings</h3>
-                            <div className="setting-row setting-row-toggle">
-                                <input
-                                    type="checkbox"
-                                    id="allowMediaControl"
-                                    checked={allowMediaControl}
-                                    onChange={(evt) => setAllowMediaControl(evt.target.checked)}
-                                />
-                                <label htmlFor="allowMediaControl">
-                                    Allow viewers to pause/play media
-                                    <span className="setting-hint">
-                                        Viewers can remotely press Play/Pause on your keyboard
-                                    </span>
-                                </label>
-                            </div>
                             <div className="setting-row setting-row-inline">
                                 <label htmlFor="qualityProfile" className="setting-row-label">
                                     Resolution
@@ -1414,20 +1401,41 @@ export default function HostView() {
                                     <option value={30}>30 fps</option>
                                 </select>
                             </div>
-                            <div className="setting-row setting-row-toggle">
-                                <input
-                                    type="checkbox"
-                                    id="obsMode"
-                                    checked={ingestMode === 'obs'}
-                                    onChange={(e) => setIngestMode(e.target.checked ? 'obs' : 'browser')}
-                                />
-                                <label htmlFor="obsMode">
-                                    Use OBS (WHIP ingest)
-                                    <span className="setting-hint">
-                                        Stream via OBS instead of browser screen capture
-                                    </span>
-                                </label>
-                            </div>
+                            <details
+                                className="advanced-settings"
+                                open={advancedSettingsOpen}
+                                onToggle={(evt) => setAdvancedSettingsOpen(evt.currentTarget.open)}
+                            >
+                                <summary>Advanced settings</summary>
+                                <div className="setting-row setting-row-toggle">
+                                    <input
+                                        type="checkbox"
+                                        id="allowMediaControl"
+                                        checked={allowMediaControl}
+                                        onChange={(evt) => setAllowMediaControl(evt.target.checked)}
+                                    />
+                                    <label htmlFor="allowMediaControl">
+                                        Allow viewers to pause/play media
+                                        <span className="setting-hint">
+                                            Viewers can remotely press Play/Pause on your keyboard
+                                        </span>
+                                    </label>
+                                </div>
+                                <div className="setting-row setting-row-toggle">
+                                    <input
+                                        type="checkbox"
+                                        id="obsMode"
+                                        checked={ingestMode === 'obs'}
+                                        onChange={(e) => setIngestMode(e.target.checked ? 'obs' : 'browser')}
+                                    />
+                                    <label htmlFor="obsMode">
+                                        Use OBS (WHIP ingest)
+                                        <span className="setting-hint">
+                                            Stream via OBS instead of browser screen capture
+                                        </span>
+                                    </label>
+                                </div>
+                            </details>
                         </div>
                             <div
                                 className="settings-panel obs-config-panel"
