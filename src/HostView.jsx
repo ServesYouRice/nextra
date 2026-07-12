@@ -1617,7 +1617,7 @@ export default function HostView() {
                             <div className="obs-connection-status">
                                 {whipConnected
                                     ? <StatusPill tone="ok" pulse>OBS Connected</StatusPill>
-                                    : <StatusPill tone="warn">Waiting for OBS\u2026</StatusPill>}
+                                    : <StatusPill tone="warn">Waiting for OBS...</StatusPill>}
                             </div>
                         </div>
                     )}
