@@ -114,7 +114,8 @@ test('bitrate defaults reflect the finalized H.264 plan', () => {
 });
 
 test('production safety limits include room creation throttles', () => {
-    assert.equal(config.MAX_ACTIVE_ROOMS, 100);
+    assert.equal(config.MAX_ACTIVE_ROOMS, 10);
+    assert.equal(config.MAX_VIEWERS_PER_ROOM, 10);
     assert.equal(config.CREATE_ROOM_RATE_LIMIT_MAX, 10);
     assert.equal(config.CREATE_ROOM_RATE_LIMIT_WINDOW_MS, 60000);
     assert.equal(config.JOIN_RATE_LIMIT_MAX, 20);

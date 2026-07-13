@@ -10,7 +10,9 @@ import {
 } from './obsOutputModel.mjs';
 
 const OBS_WS_PORT = 4455;
-const OBS_WS_TIMEOUT = 5000;
+const OBS_WS_CONNECT_TIMEOUT = 5000;
+const OBS_WS_REQUEST_TIMEOUT = 5000;
+const OBS_WS_TRANSACTION_TIMEOUT = 30000;
 
 async function sha256Base64(input) {
     const encoder = new TextEncoder();
@@ -23,38 +25,79 @@ async function sha256Base64(input) {
  * Connect to OBS WebSocket, authenticate, and run a callback with the ws + a request helper.
  * @returns {Promise<{ success: boolean, message: string }>}
  */
-function withObsConnection(password, callback) {
+export function withObsConnection(password, callback, {
+    WebSocketImpl = globalThis.WebSocket,
+    connectTimeoutMs = OBS_WS_CONNECT_TIMEOUT,
+    requestTimeoutMs = OBS_WS_REQUEST_TIMEOUT,
+    transactionTimeoutMs = OBS_WS_TRANSACTION_TIMEOUT,
+} = {}) {
     return new Promise((resolve) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${OBS_WS_PORT}`);
+        if (typeof WebSocketImpl !== 'function') {
+            resolve({ success: false, message: 'WebSocket is unavailable in this browser.' });
+            return;
+        }
+
+        const ws = new WebSocketImpl(`ws://127.0.0.1:${OBS_WS_PORT}`);
         let identified = false;
         let settled = false;
+        let connectTimeout = null;
+        let transactionTimeout = null;
+        const pendingRequests = new Map();
+        let reqCounter = 0;
+
+        const rejectPendingRequests = (error) => {
+            for (const pending of pendingRequests.values()) {
+                clearTimeout(pending.timeout);
+                pending.reject(error);
+            }
+            pendingRequests.clear();
+        };
 
         const done = (result) => {
             if (settled) return;
             settled = true;
-            clearTimeout(timeout);
+            clearTimeout(connectTimeout);
+            clearTimeout(transactionTimeout);
+            rejectPendingRequests(new Error(result?.message || 'OBS WebSocket transaction ended.'));
             try { ws.close(); } catch {}
             resolve(result);
         };
 
-        const timeout = setTimeout(() => {
+        connectTimeout = setTimeout(() => {
             done({
                 success: false,
                 message: 'OBS WebSocket connection timed out. Make sure OBS is running and WebSocket server is enabled (Tools > WebSocket Server Settings).',
             });
-        }, OBS_WS_TIMEOUT);
-
-        const pendingRequests = new Map();
-        let reqCounter = 0;
+        }, connectTimeoutMs);
 
         function sendRequest(requestType, requestData) {
-            return new Promise((reqResolve) => {
+            return new Promise((reqResolve, reqReject) => {
+                if (settled || !identified) {
+                    reqReject(new Error('OBS WebSocket is not connected.'));
+                    return;
+                }
+
                 const requestId = `req-${++reqCounter}`;
-                pendingRequests.set(requestId, reqResolve);
-                ws.send(JSON.stringify({
-                    op: 6,
-                    d: { requestType, requestId, ...(requestData ? { requestData } : {}) },
-                }));
+                const requestTimeout = setTimeout(() => {
+                    pendingRequests.delete(requestId);
+                    reqReject(new Error(`OBS request ${requestType} timed out after ${requestTimeoutMs}ms.`));
+                }, requestTimeoutMs);
+                pendingRequests.set(requestId, {
+                    resolve: reqResolve,
+                    reject: reqReject,
+                    timeout: requestTimeout,
+                });
+
+                try {
+                    ws.send(JSON.stringify({
+                        op: 6,
+                        d: { requestType, requestId, ...(requestData ? { requestData } : {}) },
+                    }));
+                } catch (error) {
+                    clearTimeout(requestTimeout);
+                    pendingRequests.delete(requestId);
+                    reqReject(error);
+                }
             });
         }
 
@@ -68,13 +111,13 @@ function withObsConnection(password, callback) {
         };
 
         ws.onclose = (event) => {
-            if (!identified) {
-                let msg = 'OBS WebSocket connection closed before setup completed.';
-                if (event.code === 4005) msg = 'OBS WebSocket authentication failed. Please check your password.';
-                else if (event.code === 4006) msg = 'OBS WebSocket payload was invalid.';
-                else if (event.code === 4009) msg = 'OBS WebSocket authentication required but none provided.';
-                done({ success: false, message: msg });
-            }
+            let msg = identified
+                ? 'OBS WebSocket disconnected before setup completed.'
+                : 'OBS WebSocket connection closed before setup completed.';
+            if (event.code === 4005) msg = 'OBS WebSocket authentication failed. Please check your password.';
+            else if (event.code === 4006) msg = 'OBS WebSocket payload was invalid.';
+            else if (event.code === 4009) msg = 'OBS WebSocket authentication required but none provided.';
+            done({ success: false, message: msg });
         };
 
         ws.onmessage = async (event) => {
@@ -105,16 +148,30 @@ function withObsConnection(password, callback) {
             }
 
             if (op === 2) {
+                if (identified) return;
                 identified = true;
-                callback(sendRequest, done);
+                clearTimeout(connectTimeout);
+                transactionTimeout = setTimeout(() => {
+                    done({
+                        success: false,
+                        message: `OBS setup timed out after ${transactionTimeoutMs}ms.`,
+                    });
+                }, transactionTimeoutMs);
+                Promise.resolve()
+                    .then(() => callback(sendRequest, done))
+                    .catch((error) => done({
+                        success: false,
+                        message: error instanceof Error ? error.message : String(error),
+                    }));
             }
 
             if (op === 7) {
                 const reqId = msg.d?.requestId;
-                const handler = pendingRequests.get(reqId);
-                if (handler) {
+                const pending = pendingRequests.get(reqId);
+                if (pending) {
                     pendingRequests.delete(reqId);
-                    handler(msg.d);
+                    clearTimeout(pending.timeout);
+                    pending.resolve(msg.d);
                 }
             }
         };
@@ -302,6 +359,128 @@ async function setAndVerifyOutputSettings(sendRequest, outputName, patch) {
     return { wrote: true, verified, actual };
 }
 
+function successfulResponse(response) {
+    return response?.requestStatus?.result === true;
+}
+
+/**
+ * Wrap mutating OBS requests with a snapshot of the value they replace. The
+ * resulting rollback runs successful mutations in reverse order and deliberately
+ * uses the raw request function so rollback operations are not recorded again.
+ */
+export function createObsConfigurationTransaction(sendRequest) {
+    const rollbackSteps = [];
+    let finished = false;
+
+    async function snapshotMutation(requestType, requestData) {
+        if (requestType === 'SetStreamServiceSettings') {
+            const previous = await sendRequest('GetStreamServiceSettings');
+            if (!successfulResponse(previous)) return null;
+            return {
+                requestType: 'SetStreamServiceSettings',
+                requestData: {
+                    streamServiceType: previous.responseData?.streamServiceType,
+                    streamServiceSettings: previous.responseData?.streamServiceSettings || {},
+                },
+            };
+        }
+
+        if (requestType === 'SetVideoSettings') {
+            const previous = await sendRequest('GetVideoSettings');
+            if (!successfulResponse(previous)) return null;
+            return {
+                requestType: 'SetVideoSettings',
+                requestData: previous.responseData || {},
+            };
+        }
+
+        if (requestType === 'SetProfileParameter') {
+            const identity = {
+                parameterCategory: requestData?.parameterCategory,
+                parameterName: requestData?.parameterName,
+            };
+            const previous = await sendRequest('GetProfileParameter', identity);
+            if (!successfulResponse(previous)) return null;
+            return {
+                requestType: 'SetProfileParameter',
+                requestData: {
+                    ...identity,
+                    parameterValue: String(previous.responseData?.parameterValue ?? ''),
+                },
+            };
+        }
+
+        if (requestType === 'SetOutputSettings') {
+            const outputName = requestData?.outputName;
+            const previous = await sendRequest('GetOutputSettings', { outputName });
+            if (!successfulResponse(previous)) return null;
+            return {
+                requestType: 'SetOutputSettings',
+                requestData: {
+                    outputName,
+                    outputSettings: previous.responseData?.outputSettings || {},
+                },
+            };
+        }
+
+        return undefined;
+    }
+
+    async function request(requestType, requestData) {
+        if (finished) {
+            throw new Error('OBS configuration transaction is already complete.');
+        }
+
+        const inverse = await snapshotMutation(requestType, requestData);
+        if (inverse === null) {
+            return {
+                requestStatus: {
+                    result: false,
+                    comment: `Could not snapshot OBS state before ${requestType}.`,
+                },
+            };
+        }
+
+        const response = await sendRequest(requestType, requestData);
+        if (!successfulResponse(response)) return response;
+
+        if (inverse) {
+            rollbackSteps.push(inverse);
+        } else if (requestType === 'StopStream') {
+            rollbackSteps.push({ requestType: 'StartStream' });
+        } else if (requestType === 'StartStream') {
+            rollbackSteps.push({ requestType: 'StopStream' });
+        }
+        return response;
+    }
+
+    async function rollback() {
+        if (finished) return [];
+        finished = true;
+        const failures = [];
+        for (const step of rollbackSteps.reverse()) {
+            try {
+                const response = await sendRequest(step.requestType, step.requestData);
+                if (!successfulResponse(response)) {
+                    failures.push(`${step.requestType}: ${response?.requestStatus?.comment || 'rejected'}`);
+                }
+            } catch (error) {
+                failures.push(`${step.requestType}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+        rollbackSteps.length = 0;
+        return failures;
+    }
+
+    function commit() {
+        if (finished) return;
+        finished = true;
+        rollbackSteps.length = 0;
+    }
+
+    return { request, rollback, commit };
+}
+
 /**
  * Auto-configure OBS stream settings via obs-websocket v5.
  *
@@ -314,14 +493,35 @@ async function setAndVerifyOutputSettings(sendRequest, outputName, patch) {
  * @param {object} [opts.encoderSettings] - { bitrateKbps, keyframeIntervalSec, preset, encoder }
  */
 export async function configureObsStream({ whipUrl, bearerToken, password = '', autoStart = false, videoSettings = null, encoderSettings = null }) {
-    return withObsConnection(password, async (sendRequest, done) => {
+    return withObsConnection(password, async (rawSendRequest, done) => {
+        const transaction = createObsConfigurationTransaction(rawSendRequest);
+        const sendRequest = transaction.request;
+        let finishing = false;
+        const finish = async (result) => {
+            if (finishing) return;
+            finishing = true;
+            if (result.success) {
+                transaction.commit();
+            } else {
+                const rollbackFailures = await transaction.rollback();
+                if (rollbackFailures.length) {
+                    result = {
+                        ...result,
+                        message: `${result.message} Rollback incomplete: ${rollbackFailures.join('; ')}`,
+                    };
+                }
+            }
+            done(result);
+        };
+
+        try {
         const applied = [];
         const warnings = [];
 
         if (autoStart) {
             const stopResult = await stopActiveStream(sendRequest);
             if (!stopResult.ok) {
-                done({
+                await finish({
                     success: false,
                     message: `OBS is still streaming to a previous target and could not be stopped: ${stopResult.message}`,
                 });
@@ -341,7 +541,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         });
 
         if (setResult.requestStatus?.result !== true) {
-            done({ success: false, message: `Failed to set OBS stream settings: ${setResult.requestStatus?.comment || 'unknown error'}` });
+            await finish({ success: false, message: `Failed to set OBS stream settings: ${setResult.requestStatus?.comment || 'unknown error'}` });
             return;
         }
         applied.push('WHIP URL + token');
@@ -373,7 +573,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
                 obsEncoderId,
             });
             if (encoderRequest.error) {
-                done({
+                await finish({
                     success: false,
                     message: encoderRequest.error,
                 });
@@ -400,7 +600,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             const encoderKind = getEncoderKind(selectedEncoderId);
 
             if (!selectedEncoderId) {
-                done({
+                await finish({
                     success: false,
                     message: `Failed to set OBS stream encoder. Tried: ${encoderCandidates.map(formatEncoderLabel).join(', ')}`,
                 });
@@ -499,7 +699,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
                 applied.push(`${bitrateKbps} kbps`);
             } else if (encoderKind === 'x264') {
                 if (selectedVideoCodec !== 'h264') {
-                    done({
+                    await finish({
                         success: false,
                         message: 'x264 cannot be used for AV1 output.',
                     });
@@ -535,7 +735,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             if (startResult.requestStatus?.result === true) {
                 applied.push('streaming started');
             } else {
-                done({
+                await finish({
                     success: false,
                     message: `OBS configured, but auto-start failed: ${startResult.requestStatus?.comment || 'unknown error'}`,
                 });
@@ -545,7 +745,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             await delay(750);
             const streamStatus = await getStreamStatus(sendRequest);
             if (streamStatus && !streamStatus.outputActive && !streamStatus.outputReconnecting) {
-                done({
+                await finish({
                     success: false,
                     message: 'OBS configured, but streaming stopped immediately. Check the WHIP URL and local Nextra server status.',
                 });
@@ -554,7 +754,13 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         }
 
         const msg = `OBS configured: ${applied.join(', ')}${warnings.length ? '. Warnings: ' + warnings.join(', ') : ''}${!autoStart ? '. Click "Start Streaming" in OBS.' : ''}`;
-        done({ success: true, message: msg });
+        await finish({ success: true, message: msg });
+        } catch (error) {
+            await finish({
+                success: false,
+                message: error instanceof Error ? error.message : String(error),
+            });
+        }
     });
 }
 

@@ -21,14 +21,8 @@ if errorlevel 1 (
 if exist "%SCRIPT_DIR%cloudflared.exe" (
     set "CLOUDFLARED_PATH=%SCRIPT_DIR%cloudflared.exe"
 )
-set "ALLOW_LOCAL_CLOUDFLARED=1"
-
-echo [1/2] Building client bundle...
-call npm.cmd run build --silent
-if errorlevel 1 goto :fail
-
-echo [2/2] Packaging Nextra.exe...
-call node scripts\package-app.js
+echo Running the complete release gate and packaging Nextra.exe...
+call npm.cmd run package
 if errorlevel 1 goto :fail
 
 echo.

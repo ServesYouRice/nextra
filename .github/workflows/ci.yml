@@ -10,10 +10,41 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: npm
       - run: npm ci
       - run: npm run release:prep
+
+  windows-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run release:prep
+      - run: npm run package:artifact
+      - name: Smoke-test packaged executable
+        shell: powershell
+        run: |
+          $env:AUTO_PUBLIC_TUNNEL = 'false'
+          $env:OPEN_BROWSER = 'false'
+          $process = Start-Process -FilePath .\Nextra.exe -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 40; $attempt++) {
+              Start-Sleep -Milliseconds 500
+              try {
+                $response = Invoke-RestMethod -Uri http://127.0.0.1:3000/readyz -TimeoutSec 2
+                if ($response.status -eq 'ready') { $ready = $true; break }
+              } catch {}
+            }
+            if (-not $ready) { throw 'Packaged executable did not become ready.' }
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
