@@ -58,6 +58,7 @@ export default function WatchView({ initialCode = '' }) {
     const [allowMediaControl, setAllowMediaControl] = useState(true);
     const [isMuted, setIsMuted] = useState(false);
     const [watchLoading, setWatchLoading] = useState(false);
+    const [joining, setJoining] = useState(false);
     const [playbackMode, setPlaybackMode] = useState('');
     const [hasTurnServer, setHasTurnServer] = useState(false);
     const [roomHasTurnServer, setRoomHasTurnServer] = useState(false);
@@ -851,12 +852,19 @@ export default function WatchView({ initialCode = '' }) {
             return;
         }
 
+        // Guard against double-submit (button double-click or Enter+click): a second
+        // join-room while the first is in flight previously surfaced a misleading
+        // "Already in a room" error. joinRoomAndLoadDevice is async (join + device load).
+        if (joining) return;
+        setJoining(true);
         try {
             await joinRoomAndLoadDevice(code);
         } catch (err) {
             setError(err.message);
+        } finally {
+            setJoining(false);
         }
-    }, [codeInput, joinRoomAndLoadDevice]);
+    }, [codeInput, joinRoomAndLoadDevice, joining]);
 
     const enterFallbackMode = useCallback(() => {
         if (fmp4PlayerRef.current || isEnteringFallbackRef.current) return;
@@ -1206,12 +1214,24 @@ export default function WatchView({ initialCode = '' }) {
                                 if (raw.length > 3) raw = `${raw.slice(0, 3)}-${raw.slice(3)}`;
                                 setCodeInput(raw);
                             }}
-                            onKeyDown={(evt) => evt.key === 'Enter' && handleJoin()}
+                            onPaste={(evt) => {
+                                // Viewers are handed a link, not a bare code — if a
+                                // full "…/#watch/CODE" URL is pasted, pull the code out
+                                // instead of stripping the URL down to its first 6 chars.
+                                const text = evt.clipboardData?.getData('text') || '';
+                                const match = text.match(/watch\/([A-Za-z0-9-]{6,9})/i);
+                                if (!match) return;
+                                evt.preventDefault();
+                                const code = normalizeRoomCode(match[1]).slice(0, 6);
+                                setCodeInput(code.length > 3 ? `${code.slice(0, 3)}-${code.slice(3)}` : code);
+                            }}
+                            onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
                             maxLength={7}
                             autoFocus
+                            disabled={joining}
                         />
-                        <button className="btn btn-primary" onClick={handleJoin}>
-                            Join Room
+                        <button className="btn btn-primary" onClick={handleJoin} disabled={joining}>
+                            {joining ? 'Joining...' : 'Join Room'}
                         </button>
                     </div>
                 </div>
@@ -1241,7 +1261,12 @@ export default function WatchView({ initialCode = '' }) {
                                         {watchLoading ? 'Connecting...' : 'Watch Stream'}
                                     </button>
                                 ) : (
-                                    <p>Waiting for host to start sharing...</p>
+                                    <>
+                                        <p>Waiting for host to start sharing...</p>
+                                        {codeInput && (
+                                            <p className="video-overlay-sub">Room {codeInput}</p>
+                                        )}
+                                    </>
                                 )}
                             </div>
                         )}
