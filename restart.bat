@@ -1,4 +1,4 @@
 @echo off
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :3000 ^| findstr LISTENING') do taskkill /F /PID %%a 2>nul
-timeout /t 1 /nobreak >nul
+setlocal
+echo Starting Nextra. If port 3000 is occupied, Nextra will identify an existing instance or exit safely.
 node server.js

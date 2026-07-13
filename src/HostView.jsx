@@ -374,12 +374,14 @@ export default function HostView() {
     const [isSharing, setIsSharing] = useState(false);
     const [viewerCount, setViewerCount] = useState(0);
     const contentMode = 'motion';
-    const [allowMediaControl, setAllowMediaControl] = useState(true);
+    const [allowMediaControl, setAllowMediaControl] = useState(false);
+    const [remoteMediaControlEnabled, setRemoteMediaControlEnabled] = useState(false);
     const [hostUploadMbps, setHostUploadMbps] = useState(20);
     const [lanBaseUrl, setLanBaseUrl] = useState(window.location.origin);
     const [shareBaseUrl, setShareBaseUrl] = useState('');
     const [publicShareStatus, setPublicShareStatus] = useState('disabled');
     const [publicShareError, setPublicShareError] = useState('');
+    const [publicAv1Supported, setPublicAv1Supported] = useState(false);
     const [hasTurnServer, setHasTurnServer] = useState(false);
     const [whipHttpHost, setWhipHttpHost] = useState('127.0.0.1');
     const [whipHttpPort, setWhipHttpPort] = useState(3001);
@@ -431,6 +433,8 @@ export default function HostView() {
     const streamRef = useRef(null);
     const mediaRecorderRef = useRef(null);
     const videoProducerRef = useRef(null);
+    const audioProducerRef = useRef(null);
+    const sendTransportRef = useRef(null);
     const heartbeatRef = useRef(null);
     const safetyFlushIntervalRef = useRef(null);
     const audioCtxRef = useRef(null);
@@ -555,8 +559,13 @@ export default function HostView() {
         })
             .then((response) => (response.ok ? response.json() : null))
             .then((data) => {
-                if (data && typeof data.whepEnabled === 'boolean') {
-                    setWhepEnabled(data.whepEnabled);
+                if (data) {
+                    if (typeof data.whepEnabled === 'boolean') setWhepEnabled(data.whepEnabled);
+                    if (typeof data.remoteMediaControlEnabled === 'boolean') {
+                        setRemoteMediaControlEnabled(data.remoteMediaControlEnabled);
+                        if (!data.remoteMediaControlEnabled) setAllowMediaControl(false);
+                    }
+                    if (typeof data.publicAv1Supported === 'boolean') setPublicAv1Supported(data.publicAv1Supported);
                 }
             })
             .catch(() => { });
@@ -740,6 +749,19 @@ export default function HostView() {
     const cleanup = useCallback(() => {
         stopRelayRecorder();
 
+        if (videoProducerRef.current) {
+            try { videoProducerRef.current.close(); } catch { }
+            videoProducerRef.current = null;
+        }
+        if (audioProducerRef.current) {
+            try { audioProducerRef.current.close(); } catch { }
+            audioProducerRef.current = null;
+        }
+        if (sendTransportRef.current) {
+            try { sendTransportRef.current.close(); } catch { }
+            sendTransportRef.current = null;
+        }
+
         if (streamRef.current) {
             streamRef.current.getTracks().forEach((track) => track.stop());
             streamRef.current = null;
@@ -759,7 +781,6 @@ export default function HostView() {
         setRoomCode(null);
         setHostToken('');
         hostTokenRef.current = null;
-        videoProducerRef.current = null;
         setViewerCount(0);
         setWhepViewerCount(0);
         setRelayViewerCount(0);
@@ -775,6 +796,18 @@ export default function HostView() {
         setStatus('idle');
         resetDevice();
     }, [stopRelayRecorder]);
+
+    useEffect(() => {
+        const closeHostSession = () => {
+            socket.emit('host-stopped');
+            cleanup();
+        };
+        window.addEventListener('pagehide', closeHostSession);
+        return () => {
+            window.removeEventListener('pagehide', closeHostSession);
+            closeHostSession();
+        };
+    }, [socket, cleanup]);
 
     useEffect(() => {
         const onReconnect = async () => {
@@ -897,23 +930,19 @@ export default function HostView() {
         void applyQualityProfileToLiveStream(qualityProfile, frameRate);
     }, [isSharing, qualityProfile, frameRate, applyQualityProfileToLiveStream]);
 
-    // Relay recorder membership. Restart only when a NEW relay viewer joins —
-    // a joiner can only decode from a fresh WebM init segment, so that restart
-    // is load-bearing — or when the recorder should be running but isn't.
-    // A viewer leaving must NOT restart the recorder: that used to re-init the
-    // stream (and glitch playback) for every remaining viewer.
+    // Keep one recorder generation alive while relay is needed. The server caches
+    // initialization/media for late joiners, so viewer churn does not restart the
+    // encoder or disrupt viewers already watching.
     useEffect(() => {
         if (!isSharing) {
             prevRelayViewerCountRef.current = 0;
             return;
         }
 
-        const previousCount = prevRelayViewerCountRef.current;
         prevRelayViewerCountRef.current = relayViewerCount;
 
         if (relayViewerCount > 0 || shouldPrewarmRelay) {
-            if (relayViewerCount > previousCount || !mediaRecorderRef.current) {
-                stopRelayRecorder();
+            if (!mediaRecorderRef.current) {
                 startRelayRecorder();
             }
         } else {
@@ -945,6 +974,9 @@ export default function HostView() {
         try {
             let roomTurnConfig = null;
             if (obsAv1Mode) {
+                if ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported) {
+                    throw new Error('Public AV1 is unavailable because this server has no publicly reachable media address. Use H.264 relay mode or configure PUBLIC_IP and RTC_LISTEN_IP.');
+                }
                 try {
                     roomTurnConfig = buildByokTurnConfig({
                         urlsInput: byokTurnUrls,
@@ -1036,6 +1068,7 @@ export default function HostView() {
                     ...params,
                     iceServers,
                 });
+                sendTransportRef.current = sendTransport;
 
                 sendTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
                     try {
@@ -1076,7 +1109,7 @@ export default function HostView() {
 
                 const audioTracks = streamRef.current.getAudioTracks();
                 if (audioTracks.length > 0) {
-                    await sendTransport.produce({
+                    audioProducerRef.current = await sendTransport.produce({
                         track: audioTracks[0],
                         codecOptions: AUDIO_CODEC_OPTIONS,
                     });
@@ -1137,6 +1170,8 @@ export default function HostView() {
         byokTurnCredential,
         obsApplySettings,
         obsAv1Mode,
+        publicShareStatus,
+        publicAv1Supported,
         whipHttpStatus,
         whipHttpError,
     ]);
@@ -1146,7 +1181,7 @@ export default function HostView() {
         setCloudflareTurnAutofillLoading(true);
         try {
             const response = await fetch('/api/cloudflare-turn-credentials', {
-                method: 'GET',
+                method: 'POST',
                 headers: {
                     accept: 'application/json',
                 },
@@ -1435,12 +1470,15 @@ export default function HostView() {
                                         type="checkbox"
                                         id="allowMediaControl"
                                         checked={allowMediaControl}
+                                        disabled={!remoteMediaControlEnabled}
                                         onChange={(evt) => setAllowMediaControl(evt.target.checked)}
                                     />
                                     <label htmlFor="allowMediaControl">
                                         Allow viewers to pause/play media
                                         <span className="setting-hint">
-                                            Viewers can remotely press Play/Pause on your keyboard
+                                            {remoteMediaControlEnabled
+                                                ? 'Viewers can remotely press Play/Pause on your keyboard'
+                                                : 'Disabled by the server operator'}
                                         </span>
                                     </label>
                                 </div>
@@ -1486,7 +1524,7 @@ export default function HostView() {
                                             type="checkbox"
                                             id="obsTryAv1"
                                             checked={obsTryAv1}
-                                            disabled={!gpuInfo.av1Supported}
+                                            disabled={!gpuInfo.av1Supported || ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported)}
                                             onChange={(e) => handleObsTryAv1Change(e.target.checked)}
                                         />
                                         <label htmlFor="obsTryAv1">
@@ -1495,6 +1533,11 @@ export default function HostView() {
                                             {!gpuInfo.av1Supported && (
                                                 <span className="setting-hint">
                                                     Disabled: AV1 encode was not detected on this host GPU.
+                                                </span>
+                                            )}
+                                            {gpuInfo.av1Supported && (publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported && (
+                                                <span className="setting-hint">
+                                                    Disabled for public sharing: configure a reachable public media address first.
                                                 </span>
                                             )}
                                         </label>

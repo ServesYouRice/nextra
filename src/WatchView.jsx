@@ -68,7 +68,7 @@ export default function WatchView({ initialCode = '' }) {
     const [hostReconnectingReason, setHostReconnectingReason] = useState('');
     const [mediaControlStatus, setMediaControlStatus] = useState('');
     const [hasProducer, setHasProducer] = useState(false);
-    const [allowMediaControl, setAllowMediaControl] = useState(true);
+    const [allowMediaControl, setAllowMediaControl] = useState(false);
     const [isMuted, setIsMuted] = useState(false);
     const [joining, setJoining] = useState(false);
     const [watchLoading, setWatchLoading] = useState(false);
@@ -224,19 +224,28 @@ export default function WatchView({ initialCode = '' }) {
 
         if (activePlaybackAttemptRef.current !== attemptId) return;
 
-        consumersRef.current.push(consumer);
-
-        const existingTracks = mediaStreamRef.current ? mediaStreamRef.current.getTracks() : [];
-        const newStream = new MediaStream([...existingTracks, consumer.track]);
-        mediaStreamRef.current = newStream;
-
         try {
             await socketRequest(socket, 'consumer-resume', { consumerId: consumer.id });
         } catch (err) {
             try { consumer.close(); } catch { }
-            consumersRef.current = consumersRef.current.filter((c) => c.id !== consumer.id);
             throw err;
         }
+
+        // Replace the prior consumer/track of the same kind atomically. OBS may
+        // reconnect with a new producer before the old close event arrives.
+        const replaced = consumersRef.current.filter((item) => item.kind === consumer.kind);
+        replaced.forEach((item) => {
+            try { item.close(); } catch { }
+            try { item.track?.stop(); } catch { }
+        });
+        consumersRef.current = consumersRef.current.filter((item) => item.kind !== consumer.kind);
+        consumersRef.current.push(consumer);
+
+        const existingTracks = mediaStreamRef.current
+            ? mediaStreamRef.current.getTracks().filter((track) => track.kind !== consumer.kind && track.readyState !== 'ended')
+            : [];
+        const newStream = new MediaStream([...existingTracks, consumer.track]);
+        mediaStreamRef.current = newStream;
         await playVideoElement(newStream);
     }, [socket, playVideoElement]);
 
@@ -406,6 +415,7 @@ export default function WatchView({ initialCode = '' }) {
         };
 
         let enqueueCount = 0;
+        let failRelayGeneration = null;
         const enqueueChunk = (buf) => {
             const uint = toUint8ArraySync(buf);
             if (!uint?.byteLength) {
@@ -423,13 +433,15 @@ export default function WatchView({ initialCode = '' }) {
             chunkQueueRef.current.push(uint);
             queuedBytesRef.current += uint.byteLength;
 
-            while (
+            if (
                 chunkQueueRef.current.length > MAX_QUEUE_CHUNKS
                 || queuedBytesRef.current > MAX_QUEUE_BYTES
             ) {
-                const dropped = chunkQueueRef.current.shift();
-                if (!dropped) break;
-                queuedBytesRef.current -= dropped.byteLength;
+                const failure = new Error('Relay playback fell behind and must be restarted.');
+                chunkQueueRef.current.length = 0;
+                queuedBytesRef.current = 0;
+                failRelayGeneration?.(failure);
+                return;
             }
 
             if (
@@ -514,6 +526,14 @@ export default function WatchView({ initialCode = '' }) {
                 safetyInterval = null;
             }
             settleFirstBuffered(new Error('Relay playback was cleaned up before media buffered.'));
+        };
+        failRelayGeneration = (failure) => {
+            cleanupRelayAttempt();
+            relaySubscribedRef.current = false;
+            socket.emit('relay-consume-stop');
+            setFallbackState('error');
+            setError(failure.message);
+            settleFirstBuffered(failure);
         };
         relayCleanupRef.current = cleanupRelayAttempt;
 
@@ -704,8 +724,17 @@ export default function WatchView({ initialCode = '' }) {
 
         const onProducerClosed = ({ consumerId }) => {
             console.log('Producer closed for consumer:', consumerId);
+            const closed = consumersRef.current.find((consumer) => consumer.id === consumerId);
+            if (!closed) return;
+            try { closed.close(); } catch { }
+            try { closed.track?.stop(); } catch { }
+            consumersRef.current = consumersRef.current.filter((consumer) => consumer.id !== consumerId);
+            if (mediaStreamRef.current) {
+                const remainingTracks = mediaStreamRef.current.getTracks().filter((track) => track !== closed.track && track.readyState !== 'ended');
+                mediaStreamRef.current = new MediaStream(remainingTracks);
+                if (videoRef.current) videoRef.current.srcObject = mediaStreamRef.current;
+            }
         };
-
         const onWhipStatus = ({ reconnecting }) => setWhipReconnecting(!!reconnecting);
         const onFallbackError = ({ message }) => {
             console.error('[WatchView] Fallback worker failed:', message);
@@ -815,18 +844,6 @@ export default function WatchView({ initialCode = '' }) {
     const joinRoomAndLoadDevice = useCallback(async (roomCode) => {
         const cleanCode = normalizeRoomCode(roomCode);
         const response = await socketRequest(socket, 'join-room', { code: cleanCode });
-        joinedRoomCodeRef.current = cleanCode;
-        setJoined(true);
-        setHasProducer(response.hasProducer || false);
-        setAllowMediaControl(response.allowMediaControl !== false);
-
-        if (response.ingestMode) setIngestMode(response.ingestMode);
-        if (typeof response.relayAllowed === 'boolean') setRelayAllowed(response.relayAllowed);
-        if (typeof response.hasRoomTurnServer === 'boolean') setRoomHasTurnServer(response.hasRoomTurnServer);
-        if (typeof response.obsVideoCodec === 'string') setObsVideoCodec(response.obsVideoCodec);
-        if (response.fallbackCodec) setFallbackCodec(response.fallbackCodec);
-        setWhipReconnecting(!!response.whipReconnecting);
-
         const av1Supported = typeof MediaSource !== 'undefined'
             && MediaSource.isTypeSupported('video/mp4; codecs="av01.0.08M.08"');
         const av1Unsupported = isAv1PlaybackUnsupported({
@@ -844,6 +861,17 @@ export default function WatchView({ initialCode = '' }) {
             await device.load({ routerRtpCapabilities: rtpCapabilities });
         }
         deviceRef.current = device;
+
+        joinedRoomCodeRef.current = cleanCode;
+        setJoined(true);
+        setHasProducer(response.hasProducer || false);
+        setAllowMediaControl(response.allowMediaControl === true);
+        if (response.ingestMode) setIngestMode(response.ingestMode);
+        if (typeof response.relayAllowed === 'boolean') setRelayAllowed(response.relayAllowed);
+        if (typeof response.hasRoomTurnServer === 'boolean') setRoomHasTurnServer(response.hasRoomTurnServer);
+        if (typeof response.obsVideoCodec === 'string') setObsVideoCodec(response.obsVideoCodec);
+        if (response.fallbackCodec) setFallbackCodec(response.fallbackCodec);
+        setWhipReconnecting(!!response.whipReconnecting);
         return response;
     }, [socket]);
 
@@ -878,12 +906,17 @@ export default function WatchView({ initialCode = '' }) {
         try {
             await joinRoomAndLoadDevice(code);
         } catch (err) {
+            try {
+                await socketRequest(socket, 'leave-room', {}, { timeoutMs: 3000, maxAttempts: 1 });
+            } catch { }
+            joinedRoomCodeRef.current = '';
+            setJoined(false);
             setError(err.message);
         } finally {
             joiningRef.current = false;
             setJoining(false);
         }
-    }, [codeInput, joinRoomAndLoadDevice]);
+    }, [codeInput, joinRoomAndLoadDevice, socket]);
 
     const enterFallbackMode = useCallback(() => {
         if (fmp4PlayerRef.current || isEnteringFallbackRef.current) return;

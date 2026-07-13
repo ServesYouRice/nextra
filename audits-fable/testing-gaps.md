@@ -1,93 +1,74 @@
 # Testing Gaps
 
-Assessment of the existing test suite and the surfaces it does **not** cover. Severity here reflects *risk introduced by the absence of a test*, not a defect in the code.
+Revalidated against the current working tree on 2026-07-13. This file describes missing confidence, not known production defects.
 
-## What exists (credit where due)
+## Existing coverage
 
-Tests run via `node --test` (`package.json` `"test": "node --test"`) and are wired into CI through `release:prep` (`lint && test && build && oss:check && audit:prod`, `.github/workflows/ci.yml`). There are **15 test files**, all unit-level and focused on the server media/utility libs:
+The 15 Node test files currently contain 82 passing tests and provide a solid unit foundation for:
 
-| Test file | Covers |
-|---|---|
-| `tests/rooms.test.js` | Room create/join/reclaim/remove/destroy lifecycle, ICE refresh, cleanup. |
-| `tests/config.test.js` | Env parsing, TURN config normalization, ICE server building. |
-| `tests/network.test.js` | IP normalization, forwarded-header trust logic. |
-| `tests/portResolver.test.js` | Free-port resolution. |
-| `tests/cloudflareTurn.test.js` | Cloudflare TURN credential fetch/shape. |
-| `tests/whip.test.js`, `whipRoutes.test.js` | SDP offer parse, codec validation, WHIP route behavior. |
-| `tests/whep.test.js` | WHEP viewer offer/answer, capability filtering, session cleanup paths. |
-| `tests/fmp4Parser.test.js`, `h264Depacketizer.test.js`, `h264Sprop.test.js` | Media byte-level parsing/depacketization. |
-| `tests/ffmpegRelay.test.js` | Relay arg building / lifecycle (without spawning real FFmpeg where possible). |
-| `tests/socketTransportRecovery.test.js` | `handleViewerTransportFailure` recovery branch (via `__testing` export). |
-| `tests/obsOutputModel.test.js`, `watchPlaybackMode.test.js` | OBS encoder model + client playback-mode decision (`.mjs` pure logic). |
+- room, configuration, network, port, and TURN helpers;
+- WHIP/WHEP SDP and selected route behavior;
+- fMP4/H.264 parsing and depacketization;
+- FFmpeg argument construction and basic relay state;
+- one viewer transport-recovery branch;
+- pure client decision modules for OBS output and playback-mode selection.
 
-This is a **genuinely good unit foundation** for the parsing/lifecycle logic — the hardest-to-reason-about byte-level code is tested, and pure decision functions (`watchPlaybackMode`, `obsOutputModel`) were deliberately extracted into `.mjs` for testability. Credit.
+The suite runs in the Linux and Windows CI jobs before build/package checks.
 
 ---
 
 ## Gaps
 
-### T-1 🟠 No tests for `server.js` (routing, auth gating, IP/trust derivation, startup)
+### T-1 🟠 No integration tests for `server.js`
 
 - **Risk:** High
-- **Location:** `server.js` (1250 lines) — 0% covered.
 
-The most security-relevant logic is untested: `/api/config` payload (incl. the TURN-credential exposure in `security-issues.md` S-1), `/api/metrics` auth gating and sensitive-field stripping (`:693-730`), `/api/cloudflare-turn-credentials` local-only gate (`:666`), `getClientIpFromHeaders` / `shouldTrustRequestForwardedHeaders` composition, `isKnownPublicShareRequest`, the SPA catch-all, and the rate-limit tracker (`:1157-1174`). Several audit findings (S-1, S-4, L-3, L-8) live in exactly this untested code.
+There is no test that boots the real server composition and exercises HTTP routing, origin/trust composition, Socket.IO admission, metrics authorization, health/readiness transitions, SPA/API 404 behavior, or shutdown. Pure network helpers and individual WHIP routes are tested, but that does not verify how `server.js` wires them together.
 
-**Recommend:** Extract the pure helpers (origin/IP/trust functions are already mostly pure) and unit-test them; add supertest-style HTTP tests for `/api/config` (asserting TURN creds are *not* leaked once fixed), `/api/metrics` (local vs remote vs token), and the 404 behavior.
+**Recommend:** Make startup injectable/exportable, bind an ephemeral port, and add HTTP tests for the public configuration shape, local/remote metrics access, health/readiness, trust/origin cases, payload/rate limits, and unknown API routes.
 
-### T-2 🟠 No integration test for the Socket.IO signaling surface
+### T-2 🟠 No Socket.IO signaling integration suite
 
 - **Risk:** High
-- **Location:** `lib/socket.js` (2137 lines) — only one branch (`handleViewerTransportFailure`) is unit-tested via `__testing`.
 
-The core real-time flows — `create-room` → `create-send-transport` → `produce`, `join-room` → `create-recv-transport` → `consume` → `consumer-resume`, relay start/stop, host disconnect grace + `reclaim-host`, the fallback-relay start **race (L-1)** — have no automated coverage. These are where the highest-severity logical bugs live.
+`lib/socket.js` owns room creation/join/retry/leave, transport creation, production/consumption, relay demand, fallback startup, reclaim, and disconnect cleanup. Only `handleViewerTransportFailure` is directly unit-tested.
 
-**Recommend:** Add integration tests using a real `socket.io`/`socket.io-client` pair against a test server with a mocked or real mediasoup router. At minimum, regression-test: (a) double `fallback-consume-start` does not create two workers (L-1), (b) re-joining an already-joined socket is idempotent (L-4), (c) host-disconnect → reclaim within grace restores the room, (d) leaving a relay viewer updates demand correctly.
+**Recommend:** Use a real `socket.io-client` against an ephemeral test server with injectable mediasoup/FFmpeg adapters. Cover duplicate acknowledgements, idempotent join, concurrent fallback starts, transport replacement, reclaim within grace, leave/disconnect, and resource cleanup after injected failures.
 
-### T-3 🟠 Zero coverage of any React client code
+### T-3 🟠 No React component, retry-helper, or MSE-player tests
 
-- **Risk:** High (the client holds the most complex state machines)
-- **Location:** `src/HostView.jsx`, `src/WatchView.jsx`, `src/lib/fmp4RelayPlayer.js`, `src/lib/mediasoupClient.js`, all components.
+- **Risk:** High
 
-None of the client is tested. The riskiest client logic is untested: the fMP4 player's generation/cleanup handling (leak **L-5**), `socketRequest` retry semantics (hazard **L-4**), the WatchView reconnect/transport-failed recovery state machine (hundreds of lines, 4 duplicated reset blocks), and the WebM relay MSE append/queue path.
+The complex client surfaces remain untested: `HostView`, `WatchView`, `mediasoupClient.socketRequest`, `fmp4RelayPlayer`, and the WebM relay queue/lifecycle.
 
-**Recommend:** The pure-ish modules are the cheapest wins: unit-test `mediasoupClient.socketRequest` (retry/idempotency, transient-error classification) with a fake socket, and `fmp4RelayPlayer` queue/generation logic with a mocked `MediaSource`/`SourceBuffer`. Add React Testing Library smoke tests for HostView/WatchView happy paths and the join-double-click case (U-2/L-4). `watchPlaybackMode.mjs` shows the team already knows how to factor logic out for testing — apply the same to the recovery decisions.
+**Recommend:** Test the retry helper with delayed/lost acknowledgements; test fMP4 generation cleanup with mocked `MediaSource`/`SourceBuffer`; add component tests for join guards, unmount/pagehide cleanup, reconnect, producer replacement, and fallback overflow recovery.
 
-### T-4 🟡 No end-to-end / browser test of the actual media flows
+### T-4 🟡 No end-to-end browser test of a media flow
 
 - **Risk:** Medium
-- Playwright + Chromium is available in the environment (per project setup), and the two flows (browser-capture host, viewer join) are automatable with fake media devices (`--use-fake-device-for-media-stream`). There is currently no e2e verifying a viewer can actually see a host's stream, which is the product's single most important behavior.
 
-**Recommend:** One Playwright e2e that starts the server, opens a host tab (fake capture), opens a viewer tab, and asserts the video element receives frames. This would catch whole-flow regressions the unit tests can't.
+There is no browser-level test proving that a host can create a room and a viewer can join and receive media.
 
-### T-5 🟡 FFmpeg / mediasoup lifecycle is only lightly exercised; no failure-injection
+**Recommend:** Add a Playwright (or equivalent) suite with deterministic fake media devices. Keep topology-specific real-media tests separate from fast UI lifecycle tests.
+
+### T-5 🟡 Limited failure injection for FFmpeg, mediasoup, WHIP, and WHEP lifecycles
 
 - **Risk:** Medium
-- `ffmpegRelay.test.js` covers arg building and lifecycle logic, but the restart-budget/cap behavior (`ffmpegRelay.js:498-518`), stdin-backpressure drop + `video-gap` (`:410-446`), and init-segment recovery are not failure-injected. The worker-death auto-restart (`server.js:1049`) and its crash-loop guard (`MIN_UPTIME_SECONDS`) are untested.
 
-**Recommend:** Simulate FFmpeg exit codes/signals and assert restart vs. no-restart decisions; simulate worker `'died'` and assert the uptime-gated restart logic.
+Current FFmpeg tests focus on arguments and simple state. They do not inject a failure after each fallback allocation, exercise restart-budget/backpressure behavior, or prove every timer/transport/consumer/process is released. Worker-death restart behavior and concurrent WHIP/WHEP admission/teardown also lack race-focused tests.
 
-### T-6 🟢 No coverage measurement or threshold in CI
+**Recommend:** Add deterministic allocation-by-allocation failure tests and parallel admission tests. Assert zero remaining children, transports, consumers, timers, listeners, reservations, and buffered bytes after each case.
+
+### T-6 🟢 No coverage reporting or threshold
 
 - **Risk:** Low
-- CI runs the suite but there's no `--experimental-test-coverage` gate or coverage report, so regressions in coverage are invisible and the (large) untested surface isn't quantified.
 
-**Recommend:** Enable Node's built-in coverage in CI and surface the number; optionally set a floor for the `lib/` modules that are already well-covered so they don't regress.
+CI runs the tests but does not publish coverage or enforce a floor.
+
+**Recommend:** Add coverage reporting after the higher-value integration tests exist. Use focused thresholds for lifecycle/state-machine modules rather than optimizing a repository-wide percentage first.
 
 ---
 
-## Coverage summary
+## Priority
 
-| Area | Status |
-|---|---|
-| Media byte parsing (fmp4/h264/sprop) | ✅ Good |
-| Rooms / config / network / port / TURN helpers | ✅ Good |
-| WHIP/WHEP route logic | ✅ Reasonable |
-| `server.js` HTTP routes & trust/IP logic | ❌ None (T-1) |
-| Socket.IO signaling integration | ❌ Almost none (T-2) |
-| React client (Host/Watch/players) | ❌ None (T-3) |
-| End-to-end media flow | ❌ None (T-4) |
-| Failure injection (ffmpeg/worker death) | ⚠️ Partial (T-5) |
-| Coverage reporting | ❌ None (T-6) |
-
-**Priority:** T-2 (signaling integration, to lock down the L-1 race regression) and T-1 (`/api/config` credential-leak regression) first — they guard the highest-severity findings. Then T-3 pure-module client tests, then T-4 e2e.
+T-1 and T-2 provide the highest value because they verify the real server composition and signaling lifecycle. T-3 and T-5 protect the most stateful cleanup paths. T-4 adds product-level confidence; T-6 should follow meaningful coverage expansion.

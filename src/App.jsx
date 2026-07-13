@@ -124,11 +124,11 @@ const FEATURES = [
     },
     {
         title: 'Public links, no port forwarding',
-        text: 'A built-in Cloudflare tunnel gives internet viewers a link that just works.',
+        text: 'A built-in Cloudflare Quick Tunnel provides a convenient best-effort link for personal sharing.',
     },
     {
         title: 'No accounts',
-        text: 'Room-code access, end-to-end encrypted media in transit, nothing stored by Nextra.',
+        text: 'Room-code access, media encrypted in transit, nothing stored by Nextra.',
     },
 ];
 
@@ -170,7 +170,7 @@ function Landing() {
 
                 <div className="landing-footer">
                     <p className="footer-note">
-                        End-to-end encrypted media over WebRTC/TURN. Media is not stored by Nextra.
+                        Media is encrypted in transit over WebRTC/TURN. Media is not stored by Nextra.
                     </p>
                 </div>
             </div>

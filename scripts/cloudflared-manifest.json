@@ -1,0 +1,7 @@
+{
+  "version": "2026.7.1",
+  "assets": {
+    "cloudflared-windows-amd64.exe": "ccb0756de288d3c2c076d19764ca53e0849a10f2dd9c23f8656ac42bdeb45001",
+    "cloudflared-windows-386.exe": "627fe6e42c5e92e42de962afec19bcbf14a60d43c352dbe4b605f1e3246462ed"
+  }
+}
