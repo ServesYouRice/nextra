@@ -46,3 +46,5 @@ cloudflared
 *.md
 !README.md
 !SENATE3.md
+!audits-codex/
+!audits-codex/*.md

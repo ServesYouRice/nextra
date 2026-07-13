@@ -2,6 +2,21 @@
 
 Findings on the user interface, flows, accessibility, responsive behavior, and visual consistency. Severity legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low · 🔵 Nice-to-have.
 
+> **Resolution status (2026-07-10):** All findings addressed on branch `claude/audits-fable-ui-issues-3zii2c`.
+>
+> - **U-1** ✅ Ellipsis literal replaced with plain dots (`HostView.jsx`).
+> - **U-2** ✅ `joining` state disables the Join button and guards re-entry.
+> - **U-3** ✅ "Live Settings" panel while streaming: live resolution change for browser ingest, explicit "stop to change" hints otherwise.
+> - **U-4** ✅ Stop Sharing now confirms via the shared `Modal` when viewers are connected.
+> - **U-5** ✅ `Modal` traps Tab/Shift+Tab; verified focus cannot escape.
+> - **U-6** ✅ Room links stack at ≤640px; new ≤400px breakpoint; verified no horizontal scroll at 320/360px.
+> - **U-7** ✅ Meta copy aligned to 4K and "no install for viewers".
+> - **U-8** ✅ Errors clear on host reconnect and when fallback playback reaches `playing`.
+> - **U-9** ✅ Host idle overlay explains the flow; viewer wait screen echoes the room code.
+> - **U-10** ✅ Hidden OBS panel gets `inert` (React 19), leaving the tab order.
+> - **U-11** ✅ Pasted watch URLs are parsed for the code (the `maxLength` attribute, which truncated pastes before JS ran, was removed); live n/6 counter added.
+> - **U-12** ✅ Media-control and OBS toggles moved behind an "Advanced settings" disclosure so first-run hosts see quality → Start.
+
 The app has a **solid a11y baseline** worth acknowledging up front: a skip link (`App.jsx:54`), `:focus-visible` styling and a `prefers-reduced-motion` block (`index.css:109,143`), `aria-current` on active nav (`App.jsx:69`), `role="alert"`/`role="status"` on messages, an `ErrorBoundary` (`components/ErrorBoundary.jsx`), and a `Modal` that closes on Escape/backdrop and restores focus (`components/Modal.jsx`). Findings below are where it falls short of production polish.
 
 ---
