@@ -1,0 +1,48 @@
+name: Signed Windows Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  package-sign:
+    runs-on: windows-latest
+    env:
+      RELEASE_VERSION: ${{ github.ref_name }}
+      SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
+      SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run package
+      - name: Authenticode sign and timestamp
+        shell: powershell
+        run: |
+          if (-not $env:SIGNING_PFX_BASE64 -or -not $env:SIGNING_PFX_PASSWORD) {
+            throw 'Signing secrets are required for tagged releases.'
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'nextra-signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object FullName -Match '\\x64\\' | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe was not found.' }
+          & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 .\Nextra.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed.' }
+          $signature = Get-AuthenticodeSignature .\Nextra.exe
+          if ($signature.Status -ne 'Valid') { throw "Invalid signature: $($signature.Status)" }
+          $hash = (Get-FileHash .\Nextra.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash *Nextra.exe" | Set-Content .\Nextra.exe.sha256 -Encoding ascii
+          Remove-Item $pfx -Force
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Nextra-${{ github.ref_name }}-windows
+          path: |
+            Nextra.exe
+            Nextra.exe.sha256
