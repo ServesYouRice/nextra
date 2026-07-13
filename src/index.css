@@ -2010,3 +2010,23 @@ input.select-input {
     font-size: 0.8rem;
   }
 }
+
+/* Very small phones: tighten padding and rein in the oversized room-code type so
+   nothing crowds the edges below ~400px. Additive to the 640px rules above. */
+@media (max-width: 400px) {
+  .view-container {
+    padding: 0.75rem;
+  }
+
+  .room-links-row {
+    gap: 1rem;
+  }
+
+  .copy-field-value.copy-field-strong {
+    font-size: 1.1rem;
+  }
+
+  .view-header h1 {
+    font-size: 1.5rem;
+  }
+}

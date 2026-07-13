@@ -112,7 +112,11 @@ function buildIceServers(turnConfig = null) {
     if (!hasUsableTurnConfig(normalized)) return servers;
 
     if (normalized.authType === 'secret') {
-        const ttl = 86400; // 24h in seconds
+        // Short-lived ephemeral credentials: fresh values are minted on every
+        // transport creation (create-send/recv-transport -> refreshRoomIceServers),
+        // so a long TTL only widens the window for credential theft without any
+        // benefit. 1h comfortably covers a session plus reconnects.
+        const ttl = 3600; // 1h in seconds
         const timestamp = Math.floor(Date.now() / 1000) + ttl;
         const username = `${timestamp}:nextra`;
         const credential = crypto

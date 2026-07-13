@@ -1237,13 +1237,20 @@ export default function HostView() {
     }, [socket, applyServerConfig]);
 
     const handleStopSharing = useCallback(() => {
+        // Guard against a misclick ending everyone's session: stopping tears down
+        // the room and disconnects every viewer, and the next share gets a NEW code.
+        const connectedViewers = viewerCount + whepViewerCount;
+        if (connectedViewers > 0
+            && !window.confirm(`Stop sharing? This will end the stream for ${connectedViewers} viewer${connectedViewers !== 1 ? 's' : ''}.`)) {
+            return;
+        }
         // Stop OBS streaming if in OBS mode
         if (ingestMode === 'obs') {
             stopObsStream({ password: obsPassword }).catch(() => {});
         }
         socket.emit('host-stopped');
         cleanup();
-    }, [socket, cleanup, ingestMode, obsPassword]);
+    }, [socket, cleanup, ingestMode, obsPassword, viewerCount, whepViewerCount]);
 
     const handleObsTryAv1Change = useCallback((enabled) => {
         setObsTryAv1(enabled);
@@ -1341,6 +1348,22 @@ export default function HostView() {
                                 >
                                     Stop Sharing
                                 </button>
+                                {/* Browser-capture resolution is applied live via
+                                    applyQualityProfileToLiveStream, so keep it
+                                    adjustable while streaming (mirrors the live fps
+                                    toggle). OBS resolution is fixed at config time. */}
+                                {ingestMode !== 'obs' && (
+                                    <select
+                                        aria-label="Resolution"
+                                        value={qualityProfile}
+                                        onChange={(evt) => setQualityProfile(evt.target.value)}
+                                        className="select-input"
+                                    >
+                                        {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
+                                            <option key={key} value={key}>{profile.label}</option>
+                                        ))}
+                                    </select>
+                                )}
                                 <div className="mode-toggle">
                                     <button
                                         className={frameRate === 60 ? 'active' : ''}

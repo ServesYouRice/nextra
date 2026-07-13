@@ -868,6 +868,11 @@ export default function WatchView({ initialCode = '' }) {
             return;
         }
 
+        // Guard against double-submit (button double-click or Enter+click): a second
+        // join-room while the first is in flight previously surfaced a misleading
+        // "Already in a room" error. joinRoomAndLoadDevice is async (join + device
+        // load); joiningRef (checked at the top of this callback) latches it
+        // synchronously, while the joining state drives the disabled/label UI.
         joiningRef.current = true;
         setJoining(true);
         try {
@@ -1229,9 +1234,10 @@ export default function WatchView({ initialCode = '' }) {
                             onChange={(evt) => {
                                 setCodeInput(formatRoomCode(extractRoomCode(evt.target.value)));
                             }}
-                            onKeyDown={(evt) => evt.key === 'Enter' && handleJoin()}
+                            onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
                             autoFocus
                             aria-describedby="joinHint"
+                            disabled={joining}
                         />
                         <button className="btn btn-primary" onClick={handleJoin} disabled={joining}>
                             {joining ? 'Joining...' : 'Join Room'}
