@@ -391,6 +391,7 @@ export default function HostView() {
     const [relayViewerCount, setRelayViewerCount] = useState(0);
     const [error, setError] = useState('');
     const [status, setStatus] = useState('idle');
+    const [showStopConfirm, setShowStopConfirm] = useState(false);
     const [whepEnabled, setWhepEnabled] = useState(false);
     const [qualityProfile, setQualityProfile] = useState(() => {
         const h = window.screen.height * (window.devicePixelRatio || 1);
@@ -401,6 +402,7 @@ export default function HostView() {
     const [frameRate, setFrameRate] = useState(30);
     const [roomMetrics, setRoomMetrics] = useState(null);
     const [ingestMode, setIngestMode] = useState('browser');
+    const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
     const [whipConnected, setWhipConnected] = useState(false);
     const [fallbackViewerCount, setFallbackViewerCount] = useState(0);
     const [obsVideoCodec, setObsVideoCodec] = useState(null);
@@ -1291,6 +1293,10 @@ export default function HostView() {
                         {status === 'idle' && (
                             <div className="video-overlay">
                                 <p>No screen shared yet</p>
+                                <p className="video-overlay-sub">
+                                    Pick your quality in Settings, then press Start Sharing.
+                                    You&apos;ll get a room code and link to send to viewers.
+                                </p>
                             </div>
                         )}
                         {isSharing && ingestMode === 'obs' && (
@@ -1333,7 +1339,13 @@ export default function HostView() {
                             </>
                         ) : (
                             <>
-                                <button className="btn btn-danger" onClick={handleStopSharing}>
+                                <button
+                                    className="btn btn-danger"
+                                    onClick={() => {
+                                        if (totalViewers > 0) setShowStopConfirm(true);
+                                        else handleStopSharing();
+                                    }}
+                                >
                                     Stop Sharing
                                 </button>
                                 {/* Browser-capture resolution is applied live via
@@ -1383,20 +1395,6 @@ export default function HostView() {
                         <div className={`settings-wrapper${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
                         <div className="settings-panel">
                             <h3>Settings</h3>
-                            <div className="setting-row setting-row-toggle">
-                                <input
-                                    type="checkbox"
-                                    id="allowMediaControl"
-                                    checked={allowMediaControl}
-                                    onChange={(evt) => setAllowMediaControl(evt.target.checked)}
-                                />
-                                <label htmlFor="allowMediaControl">
-                                    Allow viewers to pause/play media
-                                    <span className="setting-hint">
-                                        Viewers can remotely press Play/Pause on your keyboard
-                                    </span>
-                                </label>
-                            </div>
                             <div className="setting-row setting-row-inline">
                                 <label htmlFor="qualityProfile" className="setting-row-label">
                                     Resolution
@@ -1426,25 +1424,46 @@ export default function HostView() {
                                     <option value={30}>30 fps</option>
                                 </select>
                             </div>
-                            <div className="setting-row setting-row-toggle">
-                                <input
-                                    type="checkbox"
-                                    id="obsMode"
-                                    checked={ingestMode === 'obs'}
-                                    onChange={(e) => setIngestMode(e.target.checked ? 'obs' : 'browser')}
-                                />
-                                <label htmlFor="obsMode">
-                                    Use OBS (WHIP ingest)
-                                    <span className="setting-hint">
-                                        Stream via OBS instead of browser screen capture
-                                    </span>
-                                </label>
-                            </div>
+                            <details
+                                className="advanced-settings"
+                                open={advancedSettingsOpen}
+                                onToggle={(evt) => setAdvancedSettingsOpen(evt.currentTarget.open)}
+                            >
+                                <summary>Advanced settings</summary>
+                                <div className="setting-row setting-row-toggle">
+                                    <input
+                                        type="checkbox"
+                                        id="allowMediaControl"
+                                        checked={allowMediaControl}
+                                        onChange={(evt) => setAllowMediaControl(evt.target.checked)}
+                                    />
+                                    <label htmlFor="allowMediaControl">
+                                        Allow viewers to pause/play media
+                                        <span className="setting-hint">
+                                            Viewers can remotely press Play/Pause on your keyboard
+                                        </span>
+                                    </label>
+                                </div>
+                                <div className="setting-row setting-row-toggle">
+                                    <input
+                                        type="checkbox"
+                                        id="obsMode"
+                                        checked={ingestMode === 'obs'}
+                                        onChange={(e) => setIngestMode(e.target.checked ? 'obs' : 'browser')}
+                                    />
+                                    <label htmlFor="obsMode">
+                                        Use OBS (WHIP ingest)
+                                        <span className="setting-hint">
+                                            Stream via OBS instead of browser screen capture
+                                        </span>
+                                    </label>
+                                </div>
+                            </details>
                         </div>
                             <div
                                 className="settings-panel obs-config-panel"
                                 aria-hidden={ingestMode !== 'obs'}
-                                inert={ingestMode !== 'obs' ? true : undefined}
+                                inert={ingestMode !== 'obs' || undefined}
                             >
                                     <h3>OBS Configuration</h3>
                                     <div className="setting-row setting-row-toggle">
@@ -1508,6 +1527,41 @@ export default function HostView() {
                                         />
                                     </div>
                                 </div>
+                        </div>
+                    )}
+
+                    {isSharing && (
+                        <div className="settings-panel">
+                            <h3>Live Settings</h3>
+                            {ingestMode === 'browser' ? (
+                                <>
+                                    <div className="setting-row setting-row-inline">
+                                        <label htmlFor="liveQualityProfile" className="setting-row-label">
+                                            Resolution
+                                        </label>
+                                        <select
+                                            id="liveQualityProfile"
+                                            value={qualityProfile}
+                                            onChange={(evt) => setQualityProfile(evt.target.value)}
+                                            className="select-input"
+                                        >
+                                            {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
+                                                <option key={key} value={key}>{profile.label}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <p className="live-settings-note">
+                                        Resolution and frame rate apply to the live stream immediately.
+                                    </p>
+                                </>
+                            ) : (
+                                <p className="live-settings-note">
+                                    Video quality is controlled by OBS while streaming.
+                                </p>
+                            )}
+                            <p className="live-settings-note">
+                                Stop sharing to change other settings (OBS mode, viewer media control).
+                            </p>
                         </div>
                     )}
 
@@ -1779,6 +1833,39 @@ export default function HostView() {
                                 Done
                             </button>
                         </div>
+                </Modal>
+            )}
+            {showStopConfirm && (
+                <Modal titleId="stopSharingConfirmTitle" onClose={() => setShowStopConfirm(false)}>
+                    <div className="settings-modal-head">
+                        <div>
+                            <h3 id="stopSharingConfirmTitle">Stop sharing?</h3>
+                            <p>
+                                {totalViewers} viewer{totalViewers !== 1 ? 's are' : ' is'} currently watching.
+                                Stopping ends the stream for everyone and retires this room code —
+                                sharing again creates a new code you&apos;ll need to send out.
+                            </p>
+                        </div>
+                    </div>
+                    <div className="settings-modal-actions">
+                        <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={() => setShowStopConfirm(false)}
+                        >
+                            Keep Sharing
+                        </button>
+                        <button
+                            type="button"
+                            className="btn btn-danger"
+                            onClick={() => {
+                                setShowStopConfirm(false);
+                                handleStopSharing();
+                            }}
+                        >
+                            Stop Sharing
+                        </button>
+                    </div>
                 </Modal>
             )}
         </div>

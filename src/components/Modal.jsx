@@ -1,8 +1,15 @@
 import React, { useEffect, useRef } from 'react';
 
+const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+function getFocusable(dialog) {
+    return Array.from(dialog?.querySelectorAll(FOCUSABLE_SELECTOR) || [])
+        .filter((el) => !el.disabled && el.offsetParent !== null);
+}
+
 /**
  * Dialog wrapper: closes on Escape or backdrop click, moves focus into the
- * dialog on open and restores it on close.
+ * dialog on open, traps Tab within it, and restores focus on close.
  */
 export default function Modal({ titleId, onClose, children, className = 'settings-modal' }) {
     const dialogRef = useRef(null);
@@ -10,38 +17,29 @@ export default function Modal({ titleId, onClose, children, className = 'setting
     useEffect(() => {
         const previouslyFocused = document.activeElement;
         const dialog = dialogRef.current;
-        const firstFocusable = dialog?.querySelector(
-            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-        );
+        const [firstFocusable] = getFocusable(dialog);
         (firstFocusable || dialog)?.focus?.();
-
-        const focusableSelector = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
         const onKeyDown = (event) => {
             if (event.key === 'Escape') {
                 onClose();
                 return;
             }
+            if (event.key !== 'Tab' || !dialog) return;
 
-            // Focus trap: keep Tab / Shift+Tab cycling within the dialog so focus
-            // can't escape to the (aria-hidden) page behind an aria-modal dialog.
-            if (event.key !== 'Tab') return;
-            const focusable = Array.from(
-                dialog?.querySelectorAll(focusableSelector) || [],
-            ).filter((el) => !el.disabled && el.offsetParent !== null);
+            const focusable = getFocusable(dialog);
             if (focusable.length === 0) {
                 event.preventDefault();
-                dialog?.focus?.();
+                dialog.focus();
                 return;
             }
-
             const first = focusable[0];
             const last = focusable[focusable.length - 1];
             const active = document.activeElement;
-            if (event.shiftKey && (active === first || !dialog?.contains(active))) {
+            if (event.shiftKey && (active === first || !dialog.contains(active))) {
                 event.preventDefault();
                 last.focus();
-            } else if (!event.shiftKey && active === last) {
+            } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
                 event.preventDefault();
                 first.focus();
             }
