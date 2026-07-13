@@ -39,7 +39,14 @@ export function createFmp4RelayPlayer(opts) {
     let state = 'stopped';
     let mimeType = null;
     let queueBytes = 0;
+    // Persistent teardown (socket subscriptions) — registered in start(), cleared
+    // only in stop(); must survive generation changes.
     let cleanupFns = [];
+    // Per-generation teardown (SourceBuffer + video-element listeners, object URL)
+    // — registered in setupMediaSource, cleared in cleanupMediaSource on EVERY
+    // MediaSource rebuild so listeners/URLs don't accumulate across relay
+    // generations and recovery resets.
+    let mediaSourceCleanupFns = [];
     let consecutiveDrops = 0;
     const MAX_CONSECUTIVE_DROPS = 15;
     let liveSeekTimer = null;
@@ -520,7 +527,7 @@ export function createFmp4RelayPlayer(opts) {
                 videoElement.addEventListener('playing', onPlaybackReady);
                 videoElement.addEventListener('waiting', onPlaybackWaiting);
                 videoElement.addEventListener('stalled', onPlaybackWaiting);
-                cleanupFns.push(() => {
+                mediaSourceCleanupFns.push(() => {
                     try { currentSourceBuffer.removeEventListener('updateend', onUpdateEnd); } catch { }
                     try { currentSourceBuffer.removeEventListener('error', onSourceBufferError); } catch { }
                     try { videoElement.removeEventListener('loadeddata', onPlaybackReady); } catch { }
@@ -546,7 +553,7 @@ export function createFmp4RelayPlayer(opts) {
         };
 
         mediaSource.addEventListener('sourceopen', onSourceOpen);
-        cleanupFns.push(() => {
+        mediaSourceCleanupFns.push(() => {
             mediaSource.removeEventListener('sourceopen', onSourceOpen);
             URL.revokeObjectURL(objectUrl);
         });
@@ -558,6 +565,12 @@ export function createFmp4RelayPlayer(opts) {
         appendQueue = [];
         queueBytes = 0;
         isAppending = false;
+
+        // Run and clear per-generation teardown (video-element listeners + object
+        // URL) so a generation change / recovery reset doesn't leave stale
+        // listeners firing on the shared <video> or leak the previous blob URL.
+        mediaSourceCleanupFns.forEach((fn) => { try { fn(); } catch { } });
+        mediaSourceCleanupFns = [];
 
         if (sourceBuffer) {
             try {
