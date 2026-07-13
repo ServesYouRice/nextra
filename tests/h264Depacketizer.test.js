@@ -6,10 +6,13 @@ const { H264Depacketizer } = require('../lib/h264Depacketizer');
 const START = Buffer.from([0x00, 0x00, 0x00, 0x01]);
 
 // Build a minimal 12-byte RTP header (no padding/extension/CSRC) with a marker bit option.
-function rtp(payload, { marker = false } = {}) {
+function rtp(payload, { marker = false, sequence = 0, timestamp = 0, ssrc = 1 } = {}) {
     const head = Buffer.alloc(12);
     head[0] = 0x80;
     head[1] = (marker ? 0x80 : 0) | 102;
+    head.writeUInt16BE(sequence, 2);
+    head.writeUInt32BE(timestamp, 4);
+    head.writeUInt32BE(ssrc, 8);
     return Buffer.concat([head, payload]);
 }
 
@@ -55,11 +58,29 @@ test('FU-A fragments are reassembled into one NAL', () => {
     const mid = Buffer.concat([Buffer.from([0x7c, 0x00 | 1]), body.subarray(2, 4)]);
     const end = Buffer.concat([Buffer.from([0x7c, 0x40 | 1]), body.subarray(4)]); // E=1
 
-    assert.equal(d.push(rtp(start)).length, 0);
-    assert.equal(d.push(rtp(mid)).length, 0);
-    const out = d.push(rtp(end));
+    assert.equal(d.push(rtp(start, { sequence: 10, timestamp: 9000 })).length, 0);
+    assert.equal(d.push(rtp(mid, { sequence: 11, timestamp: 9000 })).length, 0);
+    const out = d.push(rtp(end, { sequence: 12, timestamp: 9000, marker: true }));
     assert.deepEqual(out.subarray(0, 4), START);
     assert.deepEqual(out.subarray(4), Buffer.concat([Buffer.from([0x61]), body]));
+});
+
+test('FU-A assembly is discarded when an RTP packet is lost', () => {
+    const d = new H264Depacketizer();
+    const start = Buffer.from([0x7c, 0x81, 0xaa]);
+    const end = Buffer.from([0x7c, 0x41, 0xcc]);
+    assert.equal(d.push(rtp(start, { sequence: 20, timestamp: 12000 })).length, 0);
+    assert.equal(d.push(rtp(end, { sequence: 22, timestamp: 12000, marker: true })).length, 0);
+});
+
+test('FU-A assembly is discarded across timestamp or SSRC changes', () => {
+    const d = new H264Depacketizer();
+    const start = Buffer.from([0x7c, 0x81, 0xaa]);
+    const end = Buffer.from([0x7c, 0x41, 0xcc]);
+    assert.equal(d.push(rtp(start, { sequence: 30, timestamp: 15000, ssrc: 1 })).length, 0);
+    assert.equal(d.push(rtp(end, { sequence: 31, timestamp: 18000, ssrc: 1, marker: true })).length, 0);
+    assert.equal(d.push(rtp(start, { sequence: 40, timestamp: 21000, ssrc: 1 })).length, 0);
+    assert.equal(d.push(rtp(end, { sequence: 41, timestamp: 21000, ssrc: 2, marker: true })).length, 0);
 });
 
 test('SPS/PPS are cached and injected before each IDR', () => {

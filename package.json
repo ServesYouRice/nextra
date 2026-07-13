@@ -1,7 +1,7 @@
 {
   "name": "nextra",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.1",
   "description": "Self-hosted low-latency screen sharing with browser capture, OBS WHIP ingest, mediasoup, and relay fallback.",
   "license": "GPL-3.0-only",
   "author": "ServesYouRice",
@@ -24,9 +24,10 @@
     "start": "node server.js",
     "lint": "eslint .",
     "test": "node --test",
-    "package": "npm run build && node scripts/package-app.js",
+    "package": "npm run release:prep && node scripts/package-app.js",
+    "package:artifact": "node scripts/package-app.js",
     "oss:check": "node scripts/opensource-preflight.js",
-    "audit:prod": "npm audit --omit=dev",
+    "audit:prod": "npm audit --omit=dev && npm --prefix poc-mediasoup audit --omit=dev",
     "release:prep": "npm run lint && npm test && npm run build && npm run oss:check && npm run audit:prod"
   },
   "dependencies": {
@@ -35,12 +36,8 @@
     "express": "^5.2.1",
     "helmet": "^8.1.0",
     "mediasoup": "^3.19.17",
-    "mediasoup-client": "^3.18.7",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
     "selfsigned": "^5.5.0",
-    "socket.io": "^4.8.3",
-    "socket.io-client": "^4.8.3"
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
@@ -53,7 +50,11 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
+    "mediasoup-client": "^3.18.7",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
     "rcedit": "^5.0.2",
+    "socket.io-client": "^4.8.3",
     "vite": "^7.3.1"
   },
   "overrides": {

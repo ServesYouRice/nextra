@@ -9,7 +9,10 @@ const fs = require('fs');
 const { Server } = require('socket.io');
 const helmet = require('helmet');
 const compression = require('compression');
+const { monitorEventLoopDelay } = require('perf_hooks');
 const config = require('./config');
+const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+eventLoopDelay.enable();
 
 // Resolved run mode. Development origins (the Vite dev server on :5173) are
 // opt-in via the --dev flag (npm run dev:server) or NODE_ENV/APP_ENV=development.
@@ -27,13 +30,14 @@ const {
 } = require('./lib/socket');
 const { startRoomCleanup, stopRoomCleanup, getAllRoomStats } = require('./lib/rooms');
 const { getOrCreateCert } = require('./lib/https');
-const { startCloudflareQuickTunnel } = require('./lib/tunnel');
+const { startCloudflareTunnel } = require('./lib/tunnel');
 const { fetchCloudflareTurnCredentials } = require('./lib/cloudflareTurn');
 const {
     normalizeIp,
     parseForwardedFirst,
     isLocalHostname,
     isLocalClientIp,
+    isLoopbackIp,
     shouldTrustForwardedHeaders,
     getTrustedForwardedClientIp,
 } = require('./lib/network');
@@ -62,12 +66,17 @@ const app = express();
 let runtimeShareBaseUrl = '';
 let stopPublicTunnel = null;
 let ioServer = null;
-let publicShareStatus = normalizeBaseUrl(config.SHARE_BASE_URL) ? 'manual' : (config.AUTO_PUBLIC_TUNNEL ? 'starting' : 'disabled');
+let publicShareStatus = config.CLOUDFLARED_TUNNEL_TOKEN
+    ? 'starting'
+    : (normalizeBaseUrl(config.SHARE_BASE_URL) ? 'manual' : (config.AUTO_PUBLIC_TUNNEL ? 'starting' : 'disabled'));
 let publicShareError = '';
 let runtimeWhipHttpPort = config.WHIP_HTTP_PORT;
 let whipHttpStatus = config.WHIP_ENABLED ? 'starting' : 'disabled';
 let whipHttpError = '';
 let whipHttpServer = null;
+let serviceReady = false;
+let tunnelRestartTimer = null;
+let tunnelRestartAttempts = 0;
 
 function getLocalProtocol() {
     return config.LOCAL_HTTPS ? 'https' : 'http';
@@ -112,8 +121,8 @@ app.use(helmet({
         directives: {
             defaultSrc: ["'self'"],
             scriptSrc: ["'self'", (_req, res) => `'nonce-${res.locals.cspNonce}'`],
-            styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-            fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+            styleSrc: ["'self'", "'unsafe-inline'"],
+            fontSrc: ["'self'"],
             connectSrc: ["'self'", 'ws:', 'wss:'],
             imgSrc: ["'self'", 'data:', 'blob:'],
             mediaSrc: ["'self'", 'blob:'],
@@ -228,7 +237,7 @@ function shouldTrustRequestForwardedHeaders(headers = {}, remoteAddress = '', en
         return true;
     }
 
-    return isLocalClientIp(remoteAddress)
+    return isLoopbackIp(remoteAddress)
         && isKnownPublicShareRequest(headers, encrypted);
 }
 
@@ -270,10 +279,7 @@ function shouldExposeLanUrl(req) {
 }
 
 function getHasTurnServer() {
-    return config.getIceServers().some((server) => {
-        const urls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
-        return urls.some((url) => typeof url === 'string' && url.trim().toLowerCase().startsWith('turn:'));
-    });
+    return config.iceServersIncludeTurn(config.getIceServers());
 }
 
 function isAllowedSocketOrigin(origin) {
@@ -594,6 +600,8 @@ function buildSocketConfigPayload(socket) {
         shareBaseUrl: getShareBaseUrlForSocket(socket),
         lanUrl: shouldExposeLanForSocket(socket) ? getLocalBaseUrl() : '',
         hasTurnServer: getHasTurnServer(),
+        remoteMediaControlEnabled: config.ALLOW_REMOTE_MEDIA_CONTROL,
+        publicAv1Supported: config.RTC_LISTEN_IP !== '127.0.0.1' && !!config.PUBLIC_IP,
         cloudflareTurnAutofillAvailable: config.hasCloudflareTurnCredentialSource(),
         mediaMaxChunkSize: config.MEDIA_MAX_CHUNK_SIZE,
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
@@ -630,10 +638,6 @@ function extractMetricsToken(req) {
         ? req.headers['x-metrics-token'].trim()
         : '';
     if (headerToken) return headerToken;
-
-    if (typeof req.query?.token === 'string') {
-        return req.query.token.trim();
-    }
 
     return '';
 }
@@ -694,7 +698,11 @@ app.get('/api/config', (req, res) => {
     });
 });
 
-app.get('/api/cloudflare-turn-credentials', async (req, res) => {
+let cachedCloudflareTurnCredentials = null;
+let cachedCloudflareTurnCredentialsExpiresAt = 0;
+const cloudflareTurnMintByIp = new Map();
+
+app.post('/api/cloudflare-turn-credentials', async (req, res) => {
     if (!isLocalClientIp(getRequestClientIp(req))) {
         res.status(403).json({ error: 'Cloudflare TURN autofill is only available to local or LAN hosts.' });
         return;
@@ -705,14 +713,39 @@ app.get('/api/cloudflare-turn-credentials', async (req, res) => {
         return;
     }
 
+    const requestOrigin = normalizeOrigin(req.headers.origin || '');
+    if (!requestOrigin || !isAllowedSocketOrigin(requestOrigin)) {
+        res.status(403).json({ error: 'A trusted same-origin request is required.' });
+        return;
+    }
+
+    const clientIp = getRequestClientIp(req);
+    const now = Date.now();
+    const previousMint = cloudflareTurnMintByIp.get(clientIp) || 0;
+    if (now - previousMint < 10_000) {
+        res.status(429).json({ error: 'TURN credentials were requested too recently.' });
+        return;
+    }
+
+    if (cachedCloudflareTurnCredentials && now < cachedCloudflareTurnCredentialsExpiresAt) {
+        res.set('Cache-Control', 'no-store');
+        res.json(cachedCloudflareTurnCredentials);
+        return;
+    }
+
+    cloudflareTurnMintByIp.set(clientIp, now);
+
     try {
         const result = await loadCloudflareTurnCredentials();
-        res.set('Cache-Control', 'no-store');
-        res.json({
+        const payload = {
             provider: 'cloudflare',
             ttlSeconds: result.ttlSeconds,
             turnConfig: result.turnConfig,
-        });
+        };
+        cachedCloudflareTurnCredentials = payload;
+        cachedCloudflareTurnCredentialsExpiresAt = now + Math.max(0, (result.ttlSeconds - 60) * 1000);
+        res.set('Cache-Control', 'no-store');
+        res.json(payload);
     } catch (err) {
         const statusCode = err?.name === 'AbortError' ? 504 : 502;
         res.status(statusCode).json({
@@ -747,6 +780,15 @@ app.get('/api/metrics', (req, res) => {
     res.json({
         generatedAt: new Date().toISOString(),
         runtimeShareBaseUrl,
+        process: {
+            uptimeSec: Math.floor(process.uptime()),
+            memory: process.memoryUsage(),
+            eventLoopDelayMs: {
+                mean: Number.isFinite(eventLoopDelay.mean) ? eventLoopDelay.mean / 1e6 : 0,
+                p95: eventLoopDelay.percentile(95) / 1e6,
+                max: eventLoopDelay.max / 1e6,
+            },
+        },
         rooms: {
             active: rooms.length,
             totalViewers,
@@ -757,6 +799,20 @@ app.get('/api/metrics', (req, res) => {
             sensitiveFieldsIncluded: includeSensitiveRoomFields,
         },
         sockets: getSocketRuntimeMetrics(),
+    });
+});
+
+app.get('/healthz', (_req, res) => {
+    res.set('Cache-Control', 'no-store').json({ status: 'ok' });
+});
+
+app.get('/readyz', (_req, res) => {
+    const ready = serviceReady && !!worker && !!ioServer;
+    res.set('Cache-Control', 'no-store').status(ready ? 200 : 503).json({
+        status: ready ? 'ready' : 'not-ready',
+        mediaWorker: !!worker,
+        socketServer: !!ioServer,
+        whip: whipHttpStatus,
     });
 });
 
@@ -805,6 +861,17 @@ app.use('/api', (req, res) => {
     res.status(404).json({ error: 'Not found' });
 });
 app.get('/{*splat}', (req, res) => {
+    const requestPath = req.path || '';
+    if (
+        requestPath === '/api' || requestPath.startsWith('/api/')
+        || requestPath === '/whip' || requestPath.startsWith('/whip/')
+        || requestPath === '/whep' || requestPath.startsWith('/whep/')
+        || requestPath === '/assets' || requestPath.startsWith('/assets/')
+        || /\/[^/]+\.[A-Za-z0-9]{1,12}$/.test(requestPath)
+    ) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+    }
     const html = getIndexHtml(res.locals.cspNonce);
     res.set('Cache-Control', 'no-store, max-age=0');
     res.set('Pragma', 'no-cache');
@@ -869,13 +936,15 @@ async function detectPublicIpIfEnabled() {
 }
 
 async function maybeStartPublicTunnel() {
-    if (normalizeBaseUrl(config.SHARE_BASE_URL)) {
+    const configuredShareBaseUrl = normalizeBaseUrl(config.SHARE_BASE_URL);
+    const namedTunnelConfigured = !!config.CLOUDFLARED_TUNNEL_TOKEN;
+    if (configuredShareBaseUrl && !namedTunnelConfigured) {
         publicShareStatus = 'manual';
         publicShareError = '';
         return;
     }
 
-    if (!config.AUTO_PUBLIC_TUNNEL) {
+    if (!config.AUTO_PUBLIC_TUNNEL && !namedTunnelConfigured) {
         publicShareStatus = 'disabled';
         publicShareError = '';
         return;
@@ -894,18 +963,21 @@ async function maybeStartPublicTunnel() {
     emitServerConfigToAll(ioServer);
 
     try {
-        const tunnel = await startCloudflareQuickTunnel({
+        const tunnel = await startCloudflareTunnel({
             port: config.PORT,
             localProtocol: getLocalProtocol(),
             explicitPath: config.CLOUDFLARED_PATH,
             timeoutMs: config.PUBLIC_TUNNEL_TIMEOUT_MS,
             noTlsVerify: config.PUBLIC_TUNNEL_NO_TLS_VERIFY,
+            tunnelToken: config.CLOUDFLARED_TUNNEL_TOKEN,
+            baseUrl: configuredShareBaseUrl,
         });
 
         runtimeShareBaseUrl = normalizeBaseUrl(tunnel.baseUrl);
         stopPublicTunnel = tunnel.stop;
         publicShareStatus = 'active';
         publicShareError = '';
+        tunnelRestartAttempts = 0;
         console.log(`Public tunnel active: ${runtimeShareBaseUrl}`);
         emitServerConfigToAll(ioServer);
 
@@ -918,6 +990,14 @@ async function maybeStartPublicTunnel() {
             publicShareStatus = 'error';
             publicShareError = 'Built-in public tunnel closed.';
             emitServerConfigToAll(ioServer);
+            if (serviceReady && (config.AUTO_PUBLIC_TUNNEL || config.CLOUDFLARED_TUNNEL_TOKEN) && !tunnelRestartTimer) {
+                const delay = Math.min(60_000, 1_000 * (2 ** Math.min(tunnelRestartAttempts, 6)));
+                tunnelRestartAttempts += 1;
+                tunnelRestartTimer = setTimeout(() => {
+                    tunnelRestartTimer = null;
+                    void maybeStartPublicTunnel();
+                }, delay);
+            }
         });
     } catch (err) {
         publicShareStatus = 'error';
@@ -932,6 +1012,11 @@ let worker = null;
 let connectionCleanupInterval = null;
 
 function cleanupGlobalResources() {
+    serviceReady = false;
+    if (tunnelRestartTimer) {
+        clearTimeout(tunnelRestartTimer);
+        tunnelRestartTimer = null;
+    }
     stopRoomCleanup();
     stopJoinCleanup();
     if (connectionCleanupInterval) {
@@ -956,7 +1041,9 @@ function cleanupGlobalResources() {
 
     ioServer = null;
     runtimeShareBaseUrl = '';
-    publicShareStatus = normalizeBaseUrl(config.SHARE_BASE_URL) ? 'manual' : (config.AUTO_PUBLIC_TUNNEL ? 'starting' : 'disabled');
+    publicShareStatus = config.CLOUDFLARED_TUNNEL_TOKEN
+        ? 'starting'
+        : (normalizeBaseUrl(config.SHARE_BASE_URL) ? 'manual' : (config.AUTO_PUBLIC_TUNNEL ? 'starting' : 'disabled'));
     publicShareError = '';
     runtimeWhipHttpPort = config.WHIP_HTTP_PORT;
     whipHttpStatus = config.WHIP_ENABLED ? 'starting' : 'disabled';
@@ -1074,7 +1161,7 @@ async function startWhipHttpServer(whipRouter) {
         console.log('Public IP: not set (use SHARE_BASE_URL or enable AUTO_DETECT_PUBLIC_IP)');
     }
     if (config.TRUST_X_FORWARDED_HEADERS) {
-        console.log('Forwarded header trust: enabled for local/private proxy peers only.');
+        console.log('Forwarded header trust: enabled for loopback proxy peers only.');
     }
 
     let appServer = null;
@@ -1242,6 +1329,7 @@ async function startWhipHttpServer(whipRouter) {
     });
 
     appServer.listen(config.PORT, config.BIND_HOST, () => {
+        serviceReady = true;
         console.log(`\nNextra running (${getLocalProtocol().toUpperCase()}):`);
         console.log(`   Bind:    ${config.BIND_HOST}:${config.PORT}`);
         console.log(`   Mode:    ${isDevMode ? 'development (Vite dev origins enabled)' : 'production'}`);
@@ -1249,7 +1337,9 @@ async function startWhipHttpServer(whipRouter) {
         console.log(`   Local:   ${getLocalProtocol()}://127.0.0.1:${config.PORT}`);
         console.log(`   Access:  ${getLocalBaseUrl()}`);
         const manualShareBase = normalizeBaseUrl(config.SHARE_BASE_URL);
-        if (manualShareBase) {
+        if (config.CLOUDFLARED_TUNNEL_TOKEN) {
+            console.log(`   Public:  starting named cloudflared tunnel for ${manualShareBase}...`);
+        } else if (manualShareBase) {
             console.log(`   Public:  ${manualShareBase}`);
         } else if (config.PUBLIC_IP && config.PUBLIC_IP !== config.LAN_IP) {
             console.log(`   Public:  ${getLocalProtocol()}://${config.PUBLIC_IP}:${config.PORT}`);
@@ -1269,6 +1359,7 @@ async function startWhipHttpServer(whipRouter) {
 
     async function shutdown(signal) {
         isShuttingDown = true;
+        serviceReady = false;
         console.log(`\n${signal} received. Shutting down gracefully...`);
         cleanupGlobalResources();
 

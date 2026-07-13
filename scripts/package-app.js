@@ -4,6 +4,7 @@ const https = require('https');
 const crypto = require('crypto');
 const os = require('os');
 const { spawnSync } = require('child_process');
+const cloudflaredManifest = require('./cloudflared-manifest.json');
 
 const projectRoot = path.resolve(__dirname, '..');
 const stageDir = path.join(projectRoot, '.caxa-stage');
@@ -18,6 +19,10 @@ const sourceEntries = [
     'config.js',
     'package.json',
     'package-lock.json',
+    'LICENSE',
+    'README.md',
+    'SOURCE.md',
+    'THIRD_PARTY_NOTICES.md',
     'lib',
     'dist',
 ];
@@ -57,6 +62,26 @@ function run(command, args, options = {}) {
 
 function installProductionDependencies() {
     run('npm', ['ci', '--omit=dev', '--no-audit', '--no-fund'], { cwd: stageDir });
+}
+
+function prepareStageManifest() {
+    const manifestPath = path.join(stageDir, 'package.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    delete manifest.devDependencies;
+    delete manifest.scripts;
+    fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+}
+
+function writeSbom() {
+    const result = spawnSync('npm', ['sbom', '--omit=dev', '--sbom-format', 'cyclonedx'], {
+        cwd: stageDir,
+        encoding: 'utf8',
+        shell: process.platform === 'win32',
+    });
+    if (result.status !== 0 || !result.stdout) {
+        throw new Error(`npm sbom failed: ${(result.stderr || '').trim()}`);
+    }
+    fs.writeFileSync(path.join(stageDir, 'SBOM.cdx.json'), result.stdout, 'utf8');
 }
 
 function findCloudflaredOnPath() {
@@ -143,6 +168,17 @@ function getFileSha256(filePath) {
     return hash.digest('hex');
 }
 
+function verifyCloudflared(filePath, expectedSha256) {
+    const actualSha256 = getFileSha256(filePath);
+    if (actualSha256 !== expectedSha256) return false;
+    if (process.platform !== 'win32') return true;
+    const signature = spawnSync('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `(Get-AuthenticodeSignature -LiteralPath '${filePath.replace(/'/g, "''")}').Status`,
+    ], { encoding: 'utf8', windowsHide: true });
+    return signature.status === 0 && signature.stdout.trim() === 'Valid';
+}
+
 function hashPathRecursive(hash, fullPath, relativePath) {
     const normalizedRelativePath = relativePath.split(path.sep).join('/');
     const stats = fs.statSync(fullPath);
@@ -193,6 +229,8 @@ function writeReleaseChecksum() {
 }
 
 function getPackageVersion() {
+    const releaseVersion = String(process.env.RELEASE_VERSION || '').trim().replace(/^v/, '');
+    if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(releaseVersion)) return releaseVersion;
     const packageJsonPath = path.join(projectRoot, 'package.json');
     try {
         const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
@@ -265,10 +303,16 @@ async function bundleCloudflared() {
     const stageBinCloudflaredPath = path.join(stageDir, 'node_modules', '.bin', bundledName);
     const allowLocalCloudflared = process.env.ALLOW_LOCAL_CLOUDFLARED === '1';
     const explicitCloudflaredPath = (process.env.CLOUDFLARED_PATH || '').trim();
+    const assetName = getCloudflaredAssetName();
+    const expectedSha256 = cloudflaredManifest.assets[assetName];
+    if (!expectedSha256) throw new Error(`No pinned cloudflared checksum for ${assetName}.`);
 
     if (explicitCloudflaredPath) {
         if (!fs.existsSync(explicitCloudflaredPath)) {
             throw new Error(`CLOUDFLARED_PATH does not exist: ${explicitCloudflaredPath}`);
+        }
+        if (!verifyCloudflared(explicitCloudflaredPath, expectedSha256)) {
+            throw new Error(`CLOUDFLARED_PATH is not the signed, pinned cloudflared ${cloudflaredManifest.version} asset.`);
         }
         copyCloudflaredToStage(explicitCloudflaredPath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
         console.log(`Bundled cloudflared from CLOUDFLARED_PATH: ${explicitCloudflaredPath}`);
@@ -284,6 +328,7 @@ async function bundleCloudflared() {
     if (allowLocalCloudflared) {
         for (const candidate of localCandidates) {
             if (!fs.existsSync(candidate)) continue;
+            if (!verifyCloudflared(candidate, expectedSha256)) continue;
             copyCloudflaredToStage(candidate, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
             console.log(`Bundled cloudflared from project file: ${path.basename(candidate)}`);
             return;
@@ -296,33 +341,18 @@ async function bundleCloudflared() {
     }
 
     const pathCandidate = findCloudflaredOnPath();
-    if (pathCandidate && fs.existsSync(pathCandidate)) {
+    if (pathCandidate && fs.existsSync(pathCandidate) && verifyCloudflared(pathCandidate, expectedSha256)) {
         copyCloudflaredToStage(pathCandidate, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
         console.log(`Bundled cloudflared from PATH: ${pathCandidate}`);
         return;
     }
 
-    const allowDownload = process.env.ALLOW_CLOUDFLARED_DOWNLOAD === '1';
-    if (!allowDownload) {
-        throw new Error(
-            'No trusted cloudflared binary found locally. Install cloudflared or set CLOUDFLARED_PATH/PATH. '
-            + 'To allow downloading, set ALLOW_CLOUDFLARED_DOWNLOAD=1 and CLOUDFLARED_DOWNLOAD_SHA256.'
-        );
-    }
-
-    const expectedSha256 = (process.env.CLOUDFLARED_DOWNLOAD_SHA256 || '').trim().toLowerCase();
-    if (!/^[a-f0-9]{64}$/.test(expectedSha256)) {
-        throw new Error('CLOUDFLARED_DOWNLOAD_SHA256 must be set to the expected 64-char SHA-256 hash.');
-    }
-
-    const assetName = getCloudflaredAssetName();
-    const downloadUrl = `https://github.com/cloudflare/cloudflared/releases/latest/download/${assetName}`;
+    const downloadUrl = `https://github.com/cloudflare/cloudflared/releases/download/${cloudflaredManifest.version}/${assetName}`;
     console.log(`Downloading cloudflared for packaging: ${downloadUrl}`);
     await downloadFileWithRedirects(downloadUrl, stageCloudflaredPath);
-    const actualSha256 = getFileSha256(stageCloudflaredPath);
-    if (actualSha256 !== expectedSha256) {
+    if (!verifyCloudflared(stageCloudflaredPath, expectedSha256)) {
         try { fs.unlinkSync(stageCloudflaredPath); } catch { }
-        throw new Error(`cloudflared checksum mismatch (expected ${expectedSha256}, got ${actualSha256}).`);
+        throw new Error('Downloaded cloudflared failed pinned checksum or Authenticode verification.');
     }
     copyCloudflaredToStage(stageCloudflaredPath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
     console.log('Bundled cloudflared via verified download.');
@@ -335,7 +365,9 @@ async function main() {
 
     try {
         sourceEntries.forEach(copyEntry);
+        prepareStageManifest();
         installProductionDependencies();
+        writeSbom();
         await bundleCloudflared();
         const buildIdentifier = getBuildIdentifier();
         iconStub = await prepareWindowsCaxaStub();

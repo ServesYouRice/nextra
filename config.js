@@ -4,6 +4,7 @@
 // explicit fixture env rather than the developer's local .env file.
 const os = require('os');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 const {
     DEFAULT_CLOUDFLARE_TURN_BASE_URL,
     DEFAULT_CLOUDFLARE_TURN_TTL_SECONDS,
@@ -12,11 +13,41 @@ const {
 
 function getLanIp() {
     const ifaces = os.networkInterfaces();
-    for (const name of Object.keys(ifaces)) {
-        for (const iface of ifaces[name] || []) {
-            if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+    let defaultRouteIp = '';
+    if (process.platform === 'win32') {
+        try {
+            const routeOutput = execFileSync('route.exe', ['print', '-4', '0.0.0.0'], {
+                encoding: 'utf8',
+                timeout: 1500,
+                windowsHide: true,
+                stdio: ['ignore', 'pipe', 'ignore'],
+            });
+            const defaultRoutes = routeOutput
+                .split(/\r?\n/)
+                .map((line) => line.trim().match(/^0\.0\.0\.0\s+0\.0\.0\.0\s+\S+\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+)$/))
+                .filter(Boolean)
+                .map((match) => ({ address: match[1], metric: Number(match[2]) }))
+                .sort((left, right) => left.metric - right.metric);
+            defaultRouteIp = defaultRoutes[0]?.address || '';
+        } catch {
+            // Fall back to scored interface discovery below.
         }
     }
+    const candidates = [];
+    for (const [name, addresses] of Object.entries(ifaces)) {
+        for (const iface of addresses || []) {
+            if (iface.family !== 'IPv4' || iface.internal || /^169\.254\./.test(iface.address)) continue;
+            const normalizedName = name.toLowerCase();
+            let score = 0;
+            if (iface.address === defaultRouteIp) score += 1000;
+            if (/ethernet|wi-?fi|wlan|en\d|eth\d/.test(normalizedName)) score += 20;
+            if (/docker|hyper-v|vethernet|virtual|vmware|vpn|tailscale|loopback|wsl/.test(normalizedName)) score -= 50;
+            if (/^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(iface.address)) score += 5;
+            candidates.push({ address: iface.address, score, name });
+        }
+    }
+    candidates.sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
+    if (candidates.length > 0) return candidates[0].address;
     return '127.0.0.1';
 }
 
@@ -147,7 +178,7 @@ function iceServersIncludeTurn(servers = []) {
     });
 }
 
-module.exports = {
+const config = {
     // Server
     PORT: parseIntEnv(process.env.PORT, 3000),
     BIND_HOST: bindHost,
@@ -170,6 +201,7 @@ module.exports = {
     AUTO_PUBLIC_TUNNEL: parseBoolEnv(process.env.AUTO_PUBLIC_TUNNEL, isPackagedRuntime),
     PUBLIC_TUNNEL_PROVIDER: (process.env.PUBLIC_TUNNEL_PROVIDER || 'cloudflared').trim().toLowerCase(),
     CLOUDFLARED_PATH: (process.env.CLOUDFLARED_PATH || '').trim(),
+    CLOUDFLARED_TUNNEL_TOKEN: (process.env.CLOUDFLARED_TUNNEL_TOKEN || '').trim(),
     PUBLIC_TUNNEL_NO_TLS_VERIFY: parseBoolEnv(process.env.PUBLIC_TUNNEL_NO_TLS_VERIFY, true),
     PUBLIC_TUNNEL_TIMEOUT_MS: parseIntEnv(process.env.PUBLIC_TUNNEL_TIMEOUT_MS, 20000),
 
@@ -269,12 +301,13 @@ module.exports = {
     HOST_UPLOAD_MBPS: parseFloatEnv(process.env.HOST_UPLOAD_MBPS, 36),
 
     // Room limits
-    MAX_VIEWERS_PER_ROOM: parseIntEnv(process.env.MAX_VIEWERS_PER_ROOM, 20),
-    MAX_ACTIVE_ROOMS: parseIntEnv(process.env.MAX_ACTIVE_ROOMS, 100),
+    MAX_VIEWERS_PER_ROOM: parseIntEnv(process.env.MAX_VIEWERS_PER_ROOM, 10),
+    MAX_ACTIVE_ROOMS: parseIntEnv(process.env.MAX_ACTIVE_ROOMS, 10),
 
     // Rate limits
     MEDIA_TOGGLE_COOLDOWN_MS: 1000,
     MEDIA_TOGGLE_VIEWER_COOLDOWN_MS: parseIntEnv(process.env.MEDIA_TOGGLE_VIEWER_COOLDOWN_MS, 3000),
+    ALLOW_REMOTE_MEDIA_CONTROL: parseBoolEnv(process.env.ALLOW_REMOTE_MEDIA_CONTROL, false),
     CREATE_ROOM_RATE_LIMIT_MAX: parseIntEnv(process.env.CREATE_ROOM_RATE_LIMIT_MAX, 10),
     CREATE_ROOM_RATE_LIMIT_WINDOW_MS: parseIntEnv(process.env.CREATE_ROOM_RATE_LIMIT_WINDOW_MS, 60000),
     JOIN_RATE_LIMIT_MAX: parseIntEnv(process.env.JOIN_RATE_LIMIT_MAX, 20),
@@ -328,6 +361,7 @@ module.exports = {
     FALLBACK_AUDIO_OFFSET_MS: parseIntEnv(process.env.FALLBACK_AUDIO_OFFSET_MS, 1500),
     FALLBACK_FRAGMENT_DURATION_MS: parseIntEnv(process.env.FALLBACK_FRAGMENT_DURATION_MS, 500),
     MAX_FALLBACK_VIEWERS: parseIntEnv(process.env.MAX_FALLBACK_VIEWERS, 50),
+    MAX_FALLBACK_PIPELINES: parseIntEnv(process.env.MAX_FALLBACK_PIPELINES, 2),
     FALLBACK_RESTART_CAP: parseIntEnv(process.env.FALLBACK_RESTART_CAP, 5),
     WHIP_GRACE_TIMEOUT_MS: parseIntEnv(process.env.WHIP_GRACE_TIMEOUT_MS, 15000),
     // ── WHEP ──
@@ -337,3 +371,55 @@ module.exports = {
     WHEP_MAX_GLOBAL_SESSIONS: parseIntEnv(process.env.WHEP_MAX_GLOBAL_SESSIONS, 30),
     WHIP_HEARTBEAT_INTERVAL_MS: parseIntEnv(process.env.WHIP_HEARTBEAT_INTERVAL_MS, 5000),
 };
+
+function assertNumberInRange(name, value, min, max) {
+    if (!Number.isFinite(value) || value < min || value > max) {
+        throw new Error(`Invalid ${name}: expected a number from ${min} to ${max}, received ${value}.`);
+    }
+}
+
+function validateConfig(value) {
+    assertNumberInRange('PORT', value.PORT, 1, 65535);
+    assertNumberInRange('WHIP_HTTP_PORT', value.WHIP_HTTP_PORT, 1, 65535);
+    assertNumberInRange('RTC_MIN_PORT', value.RTC_MIN_PORT, 1, 65534);
+    assertNumberInRange('RTC_MAX_PORT', value.RTC_MAX_PORT, 2, 65535);
+    if (value.RTC_MIN_PORT > value.RTC_MAX_PORT) {
+        throw new Error(`Invalid RTC port range: RTC_MIN_PORT (${value.RTC_MIN_PORT}) exceeds RTC_MAX_PORT (${value.RTC_MAX_PORT}).`);
+    }
+    if (value.PUBLIC_IP && value.RTC_MIN_PORT + 1 > value.RTC_MAX_PORT) {
+        throw new Error('Invalid RTC port range: public and LAN candidates require at least two ports.');
+    }
+    if (value.CLOUDFLARED_TUNNEL_TOKEN && !value.SHARE_BASE_URL) {
+        throw new Error('Invalid tunnel configuration: SHARE_BASE_URL is required with CLOUDFLARED_TUNNEL_TOKEN.');
+    }
+
+    [
+        ['HOST_UPLOAD_MBPS', value.HOST_UPLOAD_MBPS, 0.1, 100000],
+        ['MAX_VIEWERS_PER_ROOM', value.MAX_VIEWERS_PER_ROOM, 1, 1000],
+        ['MAX_ACTIVE_ROOMS', value.MAX_ACTIVE_ROOMS, 1, 1000],
+        ['MAX_FALLBACK_VIEWERS', value.MAX_FALLBACK_VIEWERS, 1, 1000],
+        ['MAX_FALLBACK_PIPELINES', value.MAX_FALLBACK_PIPELINES, 1, 100],
+        ['MAX_CONNECTIONS_PER_IP', value.MAX_CONNECTIONS_PER_IP, 1, 100000],
+        ['SOCKET_MAX_HTTP_BUFFER_SIZE', value.SOCKET_MAX_HTTP_BUFFER_SIZE, 1024, 1024 * 1024 * 1024],
+        ['MEDIA_MAX_CHUNK_SIZE', value.MEDIA_MAX_CHUNK_SIZE, 1024, 1024 * 1024 * 1024],
+        ['RELAY_SOCKET_MAX_BUFFERED_BYTES', value.RELAY_SOCKET_MAX_BUFFERED_BYTES, 1024, 1024 * 1024 * 1024],
+    ].forEach(([name, number, min, max]) => assertNumberInRange(name, number, min, max));
+
+    [
+        'PUBLIC_TUNNEL_TIMEOUT_MS', 'MEDIA_TOGGLE_VIEWER_COOLDOWN_MS',
+        'CREATE_ROOM_RATE_LIMIT_MAX', 'CREATE_ROOM_RATE_LIMIT_WINDOW_MS',
+        'JOIN_RATE_LIMIT_MAX', 'JOIN_RATE_LIMIT_WINDOW_MS', 'ROOM_STALE_TIMEOUT_MS',
+        'SOCKET_PING_INTERVAL_MS', 'SOCKET_PING_TIMEOUT_MS', 'CONNECTION_WINDOW_MS',
+        'RELAY_FLUSH_INTERVAL_MS', 'RELAY_VIDEO_BITS_PER_SECOND',
+        'HOST_RECONNECT_GRACE_MS', 'METRICS_BROADCAST_INTERVAL_MS',
+        'FALLBACK_FRAGMENT_DURATION_MS', 'WHIP_GRACE_TIMEOUT_MS',
+        'WHEP_RATE_LIMIT_MAX', 'WHEP_RATE_LIMIT_WINDOW_MS',
+        'WHEP_MAX_GLOBAL_SESSIONS', 'WHIP_HEARTBEAT_INTERVAL_MS',
+    ].forEach((name) => assertNumberInRange(name, value[name], 1, Number.MAX_SAFE_INTEGER));
+
+    assertNumberInRange('FALLBACK_AUDIO_OFFSET_MS', value.FALLBACK_AUDIO_OFFSET_MS, 0, 60_000);
+    assertNumberInRange('FALLBACK_RESTART_CAP', value.FALLBACK_RESTART_CAP, 0, 100);
+}
+
+validateConfig(config);
+module.exports = config;

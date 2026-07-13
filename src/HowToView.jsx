@@ -197,8 +197,8 @@ export default function HowToView() {
             <div className="article-step">
                 <strong>AV1 room will not start or viewers cannot join?</strong>
                 <p>
-                    AV1 mode requires an AV1-capable GPU, a valid TURN config, and OBS auto-configuration.
-                    If you are using a public Cloudflare link, remember that AV1 rooms do not have relay fallback.
+                    AV1 mode requires an AV1-capable GPU, OBS auto-configuration, and a publicly reachable mediasoup media address for internet viewers.
+                    A generic TURN service cannot expose a server media listener bound only to loopback, and AV1 rooms do not have relay fallback.
                     Switch back to H.264 if you cannot provide TURN or if the viewers are on older browsers.
                 </p>
             </div>

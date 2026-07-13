@@ -21,7 +21,7 @@ You can grab `Nextra.exe` from [GitHub Releases](../../releases), run it, and st
 - **BYOK TURN for AV1** - room-scoped TURN credentials, optional session-only storage, and optional Cloudflare TURN autofill
 - **Up to 4K @ 60 fps** - quality profiles adapt to host upload and viewer count
 - **WebRTC + Relay playback** - browser capture and AV1 stay on WebRTC; H.264 OBS rooms can fall back to fMP4 relay
-- **Public sharing** - built-in Cloudflare quick tunnel for internet viewers with no port forwarding
+- **Personal public sharing** - built-in Cloudflare Quick Tunnel for convenient, best-effort links; not a production availability contract
 - **Remote media control** - viewers can pause/play media on the host machine when enabled by the host
 - **Status dashboard** - local server metrics for rooms, WebRTC viewers, relay viewers, WHEP viewers, and runtime counters
 - **No accounts or sign-ups** - room-code based access
@@ -93,7 +93,7 @@ Use OBS Studio instead of browser screen capture for higher quality, custom scen
 | **OBS AV1 + BYOK TURN** | Capable GPUs and browsers, lowest-latency OBS playback | No | Required |
 
 - H.264 rooms can still use direct WebRTC when it works, and viewers can switch into relay mode when needed.
-- AV1 rooms are WebRTC-only. Every viewer needs TURN-reachable connectivity and AV1 playback support in the browser.
+- AV1 rooms are WebRTC-only. Every viewer needs AV1 playback support and the server must expose a reachable media plane (`PUBLIC_IP` plus non-loopback `RTC_LISTEN_IP`). A generic external TURN service does not make a loopback-only mediasoup listener public.
 - Room-scoped TURN credentials override any global TURN setting for that room only and are cleared when the room ends.
 
 ### How It Works
@@ -166,17 +166,20 @@ Manual WHIP setup is mainly for the H.264 path. AV1 rooms still require OBS auto
 
 Packaged `Nextra.exe` automatically starts a Cloudflare quick tunnel and shows a **Public Link** once ready.
 
+Quick Tunnels are a convenience path for personal/testing use: URLs change, availability is not guaranteed, and Cloudflare documents a concurrent-request limit. Production deployments should configure a named tunnel or reverse proxy for HTTP plus a separately reachable WebRTC media plane, or use H.264 relay-only public playback.
+
 For source/dev:
 
 - Set `AUTO_PUBLIC_TUNNEL=true` if you want the app to create a Cloudflare tunnel automatically.
 - Ensure the `cloudflared` binary is in the project root or on PATH. Download it from [Cloudflare](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+- For a stable named tunnel, set both `CLOUDFLARED_TUNNEL_TOKEN` and `SHARE_BASE_URL`; configure the tunnel's public hostname to forward to Nextra. The token is passed to `cloudflared` through its environment, not its command line.
 - Or set `SHARE_BASE_URL` if you already have your own reverse proxy or public domain.
 - Without either, the app stays local/LAN only.
 
 Tunnel notes:
 
 - Browser capture and OBS H.264 rooms can still serve public viewers without TURN because relay is available.
-- OBS AV1 rooms need TURN for public viewers because Cloudflare quick tunnels block UDP and AV1 rooms do not have relay fallback.
+- OBS AV1 rooms require a publicly reachable mediasoup media address; TURN credentials alone cannot expose a loopback-only media listener. The UI disables public AV1 when that topology is not configured.
 
 ---
 
@@ -230,6 +233,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 | `FALLBACK_AUDIO_BITRATE` | `192k` | Audio bitrate for relay remux |
 | `FALLBACK_AUDIO_OFFSET_MS` | `1500` | Delay OBS relay audio to keep fMP4 playback in sync |
 | `MAX_FALLBACK_VIEWERS` | `50` | Max concurrent relay viewers |
+| `MAX_FALLBACK_PIPELINES` | `2` | Max simultaneous FFmpeg fallback pipelines on one server |
 
 ### WHEP
 
@@ -263,15 +267,16 @@ Notes:
 | Variable | Default | Description |
 |---|---|---|
 | `AUTO_PUBLIC_TUNNEL` | `false` from source, `true` in packaged `Nextra.exe` | Auto-start Cloudflare tunnel |
-| `SHARE_BASE_URL` | - | Your own public URL (skips tunnel) |
+| `CLOUDFLARED_TUNNEL_TOKEN` | - | Run a stable named Cloudflare tunnel; requires `SHARE_BASE_URL` |
+| `SHARE_BASE_URL` | - | Public URL for a named tunnel or your own reverse proxy |
 | `PUBLIC_TUNNEL_PROVIDER` | `cloudflared` | Tunnel provider |
 
 ### Rooms & Limits
 
 | Variable | Default | Description |
 |---|---|---|
-| `MAX_VIEWERS_PER_ROOM` | `20` | Max WebRTC viewers per room |
-| `MAX_ACTIVE_ROOMS` | `100` | Max active rooms before new hosts are rejected |
+| `MAX_VIEWERS_PER_ROOM` | `10` | Conservative direct WebRTC viewer limit; raise only after load testing |
+| `MAX_ACTIVE_ROOMS` | `10` | Conservative single-worker room limit; raise only after load testing |
 | `CREATE_ROOM_RATE_LIMIT_MAX` | `10` | Room creation attempts per IP per window |
 | `JOIN_RATE_LIMIT_MAX` | `20` | Viewer join or auto-rejoin attempts per IP per window |
 | `HOST_UPLOAD_MBPS` | `36` | Assumed host upload bandwidth |
@@ -281,8 +286,9 @@ Notes:
 | `MAX_CONNECTIONS_PER_IP` | `60` | Rate limit: connections per IP |
 | `SOCKET_PING_TIMEOUT_MS` | `60000` | Grace period before a quiet watcher socket is considered disconnected |
 | `METRICS_BROADCAST_INTERVAL_MS` | `5000` | Room metrics broadcast interval |
+| `ALLOW_REMOTE_MEDIA_CONTROL` | `false` | Permit hosts to opt viewers into remote Play/Pause keyboard control |
 | `ALLOW_REMOTE_METRICS` | `false` | Allow `/api/metrics` from non-local clients |
-| `METRICS_TOKEN` | - | Optional token for remote `/api/metrics` API access |
+| `METRICS_TOKEN` | - | Optional bearer token for remote `/api/metrics` API access (send it in the `Authorization` header) |
 | `MEDIA_DEBUG_LOGS` | `false` | Verbose media-pipeline logging; keep off during normal streams |
 
 See `.env.example` for the full list.
@@ -316,11 +322,22 @@ Important limits:
 | Viewers cannot connect | Check host firewall, keep the host app running, and verify whether the room expects TURN or relay. |
 | OBS H.264 viewer is black | Try **Switch to Relay Mode** or refresh. H.264 rooms can fall back to relay. |
 | AV1 room will not start | AV1 requires an AV1-capable GPU, **Use BYOK TURN (AV1)**, a valid TURN config, and OBS auto-configuration. |
-| Public viewers cannot join an AV1 room | Cloudflare quick tunnels block UDP. AV1 rooms need TURN because relay fallback is disabled. |
+| Public viewers cannot join an AV1 room | Configure `PUBLIC_IP` and a non-loopback `RTC_LISTEN_IP`, plus suitable ICE/TURN connectivity, or use H.264 relay mode. |
 | Viewer browser says AV1 is unsupported | Use an AV1-capable browser/device or switch the host back to H.264. |
 | OBS auto-config fails | Make sure OBS is running and WebSocket is enabled in **Tools > WebSocket Server Settings**. H.264 rooms can fall back to manual WHIP; AV1 rooms cannot. |
 | Audio missing | Ensure OBS is capturing audio in the Audio Mixer. For browser capture, use Chrome or Edge. |
 | Buffering or stalls | Lower the quality profile or frame rate. H.264 rooms can use relay; AV1 rooms need a stable TURN-backed WebRTC path. |
+
+## Operations and supported scale
+
+The default limits are intentionally conservative for one desktop process: 10 rooms, 10 direct viewers per room, and 2 simultaneous FFmpeg fallback pipelines. They are safety limits, not a benchmark guarantee. Raise them only after measuring CPU, memory, relay throughput, and event-loop delay on the target host through the local `/api/metrics` endpoint.
+
+- `/healthz` is an unauthenticated process-liveness check.
+- `/readyz` returns 200 only after the HTTP, Socket.IO, and mediasoup worker layers are ready; it returns 503 during startup and shutdown.
+- An uncaught exception or mediasoup worker death terminates/restarts the process. Run production deployments under a supervisor such as Windows Service management, systemd, or a container restart policy.
+- Repeated FFmpeg failure is isolated to its room. Tunnel failures use bounded exponential restart backoff and do not stop LAN service.
+
+Tagged Windows releases run the complete gate, package the executable, require Authenticode signing secrets, timestamp the signature, regenerate the checksum, and publish the exact signed artifact. Pull-request CI also packages and smoke-tests the executable without publishing it.
 | App closes immediately | Check `%LOCALAPPDATA%\\Nextra\\logs\\startup-latest.log`. |
 | Poor quality | Lower resolution/framerate, use a wired connection, and reduce host desktop load. |
 
@@ -359,11 +376,8 @@ npm run package      # build Nextra.exe + sha256
 
 `npm run package` builds `Nextra.exe`, writes `Nextra.exe.sha256`, and bundles runtime dependencies.
 
-If `cloudflared` is not available locally, secure download fallback is disabled by default. To allow it for packaging:
-
-```bash
-ALLOW_CLOUDFLARED_DOWNLOAD=1
-CLOUDFLARED_DOWNLOAD_SHA256=<expected_sha256>
-```
+If `cloudflared` is not available locally, packaging downloads the exact immutable
+release declared in `scripts/cloudflared-manifest.json`. Packaging rejects the
+asset unless both its pinned SHA-256 and Authenticode signature validate.
 
 > Note: do not commit `Nextra.exe` to git. Distribute it via [GitHub Releases](../../releases).
