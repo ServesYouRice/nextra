@@ -42,6 +42,22 @@ const { createWhepRouter } = require('./lib/whepRoutes');
 const { findAvailablePort } = require('./lib/portResolver');
 const { execFile, execFileSync } = require('child_process');
 
+// Process-level safety net. Without these, a single stray promise rejection or
+// uncaught exception terminates the whole process on modern Node, dropping every
+// room and viewer — and the mediasoup worker-death auto-restart below does NOT
+// cover main-process crashes. An unhandled rejection is logged but not treated as
+// fatal (much of the codebase guards with .catch(); one stray rejection should not
+// nuke unrelated rooms). An uncaught exception leaves indeterminate state, so we
+// clean up listeners/worker and exit non-zero for a supervisor to restart us.
+process.on('unhandledRejection', (reason) => {
+    console.error('[fatal-guard] Unhandled promise rejection:', reason?.stack || reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('[fatal-guard] Uncaught exception:', err?.stack || err?.message || err);
+    try { cleanupGlobalResources(); } catch { }
+    process.exit(1);
+});
+
 const app = express();
 let runtimeShareBaseUrl = '';
 let stopPublicTunnel = null;
@@ -223,7 +239,18 @@ function getClientIpFromHeaders(headers = {}, remoteAddress = '', encrypted = tr
     if (forwardedIp) return forwardedIp;
 
     if (isKnownPublicShareRequest(headers, encrypted)) {
-        return 'public-share-proxy';
+        // The built-in cloudflared tunnel proxies from loopback, so we don't trust
+        // forwarded headers for security decisions — but cloudflared does set
+        // cf-connecting-ip to the real viewer address. Fold it into a namespaced,
+        // per-viewer identity so each internet viewer gets its OWN rate-limit
+        // bucket instead of every tunnel viewer sharing 'public-share-proxy' (which
+        // let one client's traffic rate-limit everyone off the tunnel). The
+        // 'public-share:' prefix keeps this from ever matching isLocalClientIp, so
+        // LAN-URL and metrics gating are unchanged.
+        const tunnelViewerIp = parseForwardedFirst(headers['cf-connecting-ip']);
+        return tunnelViewerIp
+            ? `public-share:${normalizeIp(tunnelViewerIp)}`
+            : 'public-share-proxy';
     }
 
     return normalizedRemote;
@@ -647,7 +674,11 @@ app.get('/api/config', (req, res) => {
         lanUrl: shouldExposeLanUrl(req) ? getLocalBaseUrl() : '',
         hasTurnServer: getHasTurnServer(),
         cloudflareTurnAutofillAvailable: config.hasCloudflareTurnCredentialSource(),
-        iceServers: config.getIceServers(),
+        // NOTE: ICE servers (with ephemeral TURN credentials) are intentionally
+        // NOT exposed here. This endpoint is unauthenticated, so shipping TURN
+        // credentials would hand them to any caller. Clients receive room-scoped
+        // ICE servers via the create-send-transport / create-recv-transport socket
+        // responses (getRoomIceServers), which require room membership first.
         mediaMaxChunkSize: config.MEDIA_MAX_CHUNK_SIZE,
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
@@ -732,14 +763,22 @@ app.get('/api/metrics', (req, res) => {
 const distDir = path.join(__dirname, 'dist');
 const indexHtmlPath = path.join(distDir, 'index.html');
 let indexHtmlTemplate = null;
+let indexHtmlMtimeMs = 0;
 
 function getIndexHtml(nonce) {
-    if (!indexHtmlTemplate) {
-        try {
+    // Re-read when dist/index.html changes on disk so an in-place rebuild (which
+    // replaces the HTML and its hashed asset references) is picked up without a
+    // server restart. Otherwise a cached old HTML would reference purged asset
+    // filenames and 404 the entry chunk. The mtime stat is cheap and this path
+    // only runs on HTML navigations (static assets are served separately).
+    try {
+        const mtimeMs = fs.statSync(indexHtmlPath).mtimeMs;
+        if (!indexHtmlTemplate || mtimeMs !== indexHtmlMtimeMs) {
             indexHtmlTemplate = fs.readFileSync(indexHtmlPath, 'utf-8');
-        } catch {
-            return null;
+            indexHtmlMtimeMs = mtimeMs;
         }
+    } catch {
+        return indexHtmlTemplate ? indexHtmlTemplate.replace(/<script/g, `<script nonce="${nonce}"`) : null;
     }
     return indexHtmlTemplate.replace(/<script/g, `<script nonce="${nonce}"`);
 }
@@ -757,6 +796,14 @@ app.use(express.static(distDir, {
         }
     },
 }));
+// Unknown /api/* paths must return a JSON 404, not fall through to the SPA
+// catch-all below (which would send a 200 HTML document and break callers doing
+// res.json()). Every real /api route is registered above this point, so reaching
+// here means the path is unknown. (WHIP/WHEP routers mount later at runtime, so
+// they are deliberately NOT included here — intercepting them would break ingest.)
+app.use('/api', (req, res) => {
+    res.status(404).json({ error: 'Not found' });
+});
 app.get('/{*splat}', (req, res) => {
     const html = getIndexHtml(res.locals.cspNonce);
     res.set('Cache-Control', 'no-store, max-age=0');
