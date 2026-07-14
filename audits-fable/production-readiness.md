@@ -1,6 +1,6 @@
 # Production Readiness — Deployment, Observability & Operations
 
-Revalidated against the current working tree on 2026-07-13.
+Revalidated against commit `2ba6c09` on 2026-07-14.
 
 Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 
@@ -8,52 +8,77 @@ Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 
 ## Remaining deployment and operations findings
 
-### D-3 🟡 Server-mode logging is unstructured
+### D-3 🟡 Source/server-mode logging is unstructured
 
-The packaged runtime writes and rotates startup logs, and verbose media logs are configurable. Source/server mode still uses `console.*` without consistent levels, structured fields, request/session correlation, or a general rotation/shipping story.
+The packaged runtime writes startup logs and prunes them to ten files, while verbose media logs are configurable. Source/server mode still uses `console.*` without consistent levels, structured fields, request/session correlation, or a general shipping/rotation story.
 
-**Fix:** Introduce a small leveled logger with optional JSON output and correlation fields. Preserve the packaged log sink as an adapter.
+**Impact.** This is an operations limitation for unattended service deployments, not a blocker for the intended desktop executable.
 
-### D-4 🟡 No Prometheus/OpenMetrics export
+**Fix.** Introduce a small leveled logger with optional JSON output and correlation fields. Preserve packaged file logging as an adapter.
 
-`/api/metrics` provides useful JSON to the local Status page, including process memory, event-loop delay, room counts, consumer counts, and relay counters. There is no scrape-oriented Prometheus/OpenMetrics endpoint for operators running Nextra as a service.
+### D-4 🟢 No Prometheus/OpenMetrics export
 
-**Fix:** Add an optional token-gated exporter only if service deployments need it. This is not required for the desktop product.
+`/api/metrics` already provides JSON for the local Status page, including process memory, event-loop delay, room/resource counts, and relay counters. There is no scrape-oriented exporter.
 
-### D-5 🟡 Distribution remains Windows-only and depends on archived `caxa`
+**Impact.** Optional service-deployment feature; not required for the desktop product.
 
-The binary distribution is Windows-only and uses `caxa`, whose [upstream repository is archived](https://github.com/leafac/caxa). A migration should be evaluated, but Node 20 Single Executable Applications are still marked [active development](https://nodejs.org/download/release/latest-v20.x/docs/api/single-executable-applications.html).
+**Fix.** Add a token-gated exporter only if unattended/service deployments need it.
 
-**Fix:** Keep the current reproducible packaging path while evaluating maintained alternatives. Add macOS/Linux artifacts or a container only if those become supported product targets.
+### D-5 🟡 Windows-only binary distribution depends on archived `caxa`
 
-### D-7 🟢 CI has no coverage or browser/integration gate
+The packaged artifact is Windows-only and uses `caxa`. The [upstream caxa repository](https://github.com/leafac/caxa) is archived and read-only. Node's current [Single Executable Applications documentation](https://nodejs.org/api/single-executable-applications.html) still labels SEA active development, so migration should be evaluated rather than assumed to be a drop-in replacement.
 
-Linux runs the release gate and Windows builds and launches the packaged executable, polling `/readyz`. CI has no coverage threshold, Socket.IO/server integration suite, or browser end-to-end media test.
+**Fix.** Keep the current reproducible Windows path while evaluating maintained alternatives. Add macOS/Linux artifacts or a container only when those become supported product targets.
 
-**Fix:** Prioritize critical-path integration and browser lifecycle tests, then add coverage reporting as a regression signal. See `testing-gaps.md`.
+### D-7 🟢 CI has no coverage, server/signaling integration, or browser gate
 
-### D-8 🟢 Existing secrets and release hygiene are strong
+Linux runs `release:prep`; Windows repeats the gate, builds `Nextra.exe`, launches it, and polls `/readyz`. CI does not yet run the suites described in `testing-gaps.md` T-1 through T-6.
 
-`.env`, TLS keys, and binary artifacts are excluded; the OSS preflight scans tracked content; dependencies and GitHub Actions are pinned/updated; the Windows release workflow signs the exact release artifact. Preserve these controls.
+**Fix.** Prioritize real server/Socket.IO and browser lifecycle tests, then add coverage reporting as a regression signal.
+
+### D-8 🟢 Existing secrets and workflow hygiene are strong
+
+`.env`, TLS keys, signing material, binaries, and cloudflared executables are ignored. The OSS preflight scans tracked content. GitHub Actions are pinned to commit SHAs. The tagged workflow requires signing secrets, signs and timestamps `Nextra.exe`, verifies Authenticode, and emits a SHA-256 file.
+
+Preserve these controls.
+
+### D-9 🟢 The exact signed artifact is not smoke-tested after signing
+
+Windows CI smoke-tests an unsigned packaged executable. The tagged workflow packages, then signs and verifies the executable, but does not launch that post-signing artifact or exercise its embedded notices/SBOM/runtime behavior.
+
+**Fix.** After signing, launch the same artifact on an ephemeral port, poll readiness, fetch static assets, connect Socket.IO, terminate gracefully, and verify packaged licenses/SBOM and child-process cleanup. Do not rebuild between signing and testing.
 
 ---
 
-## Current production-readiness verdict
+## External release gates
 
-No unresolved launch blocker from the original Fable audit remains reproducible in the current tree.
+These cannot be proven from repository contents and must remain explicit before claiming a completed public signed release.
+
+### R-01 — Provision and validate trusted Windows signing
+
+The repository owner must configure `SIGNING_PFX_BASE64` and `SIGNING_PFX_PASSWORD`, then demonstrate a tagged build whose publisher chain and timestamp validate on a clean Windows machine.
+
+### R-02 — Complete distribution legal review
+
+The packaged license, dependency notices, corresponding-source instructions, SBOM, and release wording require approval by a qualified reviewer.
+
+---
+
+## Production-readiness verdict
 
 | Deployment posture | Current assessment |
 |---|---|
-| Personal/LAN or opt-in public sharing from one desktop | No blocker identified by the surviving Fable findings. |
-| Unattended service | Add operational logging/export as needed and run under the documented supervisor/restart policy. |
-| Multi-room/high-load service | Establish the measured load envelope in `performance-issues.md` before raising conservative limits or adding a worker pool. |
+| Personal desktop/LAN or opt-in public sharing | No code blocker identified by the surviving audit findings. |
+| Public signed Windows distribution | Conditional on R-01/R-02; add D-9 for stronger artifact confidence. |
+| Unattended service | Add supervisor/configuration policy and operational logging/export as required. |
+| Multi-room or higher-load service | Establish the measured load envelope before raising conservative limits or prescribing a worker pool. |
 
-The largest residual confidence gap is automated integration/browser/fault-injection coverage, not a known Tier-0 correctness or security defect.
+No persistent business state exists to back up by design. A rollback/configuration recipe would be useful deployment documentation, but its absence is not retained as a Medium production defect.
 
-## Recommended remaining order
+## Recommended order
 
-1. Add server/Socket.IO integration and browser lifecycle coverage (`testing-gaps.md`).
-2. Measure the supported load envelope (`performance-issues.md` P-1/P-2).
-3. Harden non-loopback WHIP deployment guidance (`security-issues.md` S-2).
-4. Address lifecycle/module ownership and Engine.IO compatibility hardening (`logical-issues.md`).
-5. Improve structured logging, metrics export, and packaging portability if the deployment model requires them.
+1. Satisfy the external signing and legal gates for a public distribution.
+2. Add server/Socket.IO and browser lifecycle coverage.
+3. Measure the supported load envelope.
+4. Harden non-loopback WHIP guidance.
+5. Improve logging, metrics export, signed-artifact testing, and packaging portability as the deployment model requires.

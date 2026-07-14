@@ -1,35 +1,35 @@
 # Logical & Implementation-Quality Issues
 
-Revalidated against the current working tree on 2026-07-13.
+Revalidated against commit `2ba6c09` on 2026-07-14.
 
 Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 
 ---
 
-## L-10 🟢 `getSocketBufferedBytes` reads an Engine.IO internal
+## L-10 🟢 Relay backpressure reads an Engine.IO private field
 
 - **Severity:** Low
 - **Blocker:** No
 - **Location:** `lib/socket.js` (`getSocketBufferedBytes`)
 
-**Problem.** Slow-consumer protection reads `socket.conn.writeBuffer`, which the installed Engine.IO package declares as a private field. The current implementation has the expected array shape, so the cap works today, but an Engine.IO upgrade could change it. The defensive `return 0` fallback would then disable the cap silently.
+**Problem.** Slow-consumer protection reads `socket.conn.writeBuffer`. The installed Engine.IO version currently exposes the expected array shape, so the cap works today, but this is not a public compatibility contract. If a future upgrade changes the field, the defensive `return 0` path silently disables the protection.
 
-**Fix.** Add a compatibility test for the installed Engine.IO version and log once if the expected field is absent. Longer term, prefer an application-owned byte counter or a supported transport-level signal.
+**Fix.** Add a compatibility test for the installed Engine.IO version and log once when the expected field is absent. Longer term, prefer an application-owned byte counter or a supported transport signal.
 
 ---
 
-## L-11 🟢 Circular module dependencies remain in media lifecycle cleanup
+## L-11 🟢 Media-lifecycle module ownership remains cyclic
 
 - **Severity:** Low
 - **Blocker:** No
-- **Location:** lazy `require('./whepRoutes')` calls in `lib/rooms.js` and `lib/socket.js`; `lib/whipRoutes.js` reaches relay lifecycle functions through `lib/socket.js`.
+- **Location:** lazy `require('./whepRoutes')` in `lib/rooms.js`; `lib/whipRoutes.js` reaches fallback lifecycle functions through `lib/socket.js`
 
-**Problem.** Lazy `require` calls avoid load-time cycles, but ownership of room, WHIP/WHEP, and fallback cleanup is split across mutually dependent modules. It works today, but makes lifecycle changes harder to reason about and test.
+**Problem.** `RoomMediaPipeline` now owns fallback startup generations, transports, consumers, FFmpeg, timers, and idempotent reverse-order cleanup. That materially improves lifecycle ownership. Room, WHIP/WHEP, and fallback cleanup still cross module boundaries through lazy/cyclic imports, making further changes harder to reason about and integration-test.
 
-**Fix.** Continue extracting an idempotent room-media lifecycle/controller module that owns WHIP/WHEP/fallback teardown and is depended on by the route and socket layers.
+**Fix.** Continue extracting explicit lifecycle/controller dependencies so route and socket layers depend on a shared owner rather than each other.
 
 ---
 
 ## Current assessment
 
-No launch-blocking logical defect from the original audit remains reproducible in the current tree. The two surviving items are maintainability/upgrade-hardening work, not production blockers.
+No launch-blocking logical defect remains reproducible. The previously proposed WebM-init “race” is handled as a soft wait by `WatchView`, and recorder restart on a live quality change is intentional behavior rather than a logic defect. Those items are not retained as findings.
