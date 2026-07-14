@@ -1,6 +1,6 @@
 # Nice-to-Haves
 
-Optional improvements revalidated against the current working tree on 2026-07-13.
+Optional improvements revalidated against commit `2ba6c09` on 2026-07-14. These are product or maintainability choices, not current defects.
 
 ---
 
@@ -8,15 +8,17 @@ Optional improvements revalidated against the current working tree on 2026-07-13
 
 ### N-1 Optional room passphrase or host approval
 
-The room code is intentionally the viewer credential. An optional passphrase or approval lobby would support more sensitive streams without changing the default low-friction flow.
+The room code is intentionally the viewer credential. An optional passphrase or approval lobby would support sensitive streams without changing the default low-friction flow.
 
 ### N-2 Optional host-session recovery across a full reload
 
-Socket reconnect can reclaim a room while the page remains alive, but `pagehide`/unmount intentionally closes the host session. A deliberate “resume after reload” mode would require persisting the room code/token and changing that teardown contract. Treat this as a product decision, not a missing one-line persistence fix.
+Socket reconnect can reclaim a room while the page remains alive. Full pagehide/unmount currently emits `host-stopped` and intentionally destroys the room, so persisting the room code/token alone is insufficient.
+
+A deliberate resume-after-reload feature would need to persist the credential **and** change teardown to leave the room reclaimable for a bounded grace period. It should also define browser-capture reacquisition and OBS-session behavior. Treat this as a product/lifecycle decision, not a one-line storage fix.
 
 ### N-3 QR sharing and viewer connection-quality detail
 
-The UI now explains waiting states and shows viewer counts. A QR code for the public watch link and per-viewer quality/transport detail would still improve mobile sharing and diagnosis.
+Add a locally generated QR code for the public watch link and optional per-viewer transport/quality diagnostics for mobile sharing and troubleshooting.
 
 ### N-4 Graceful server shutdown/restart signal
 
@@ -24,19 +26,19 @@ Before intentional shutdown or worker-restart recovery, emit a short client even
 
 ### N-5 Guided first-run flow
 
-Advanced settings are now disclosed, which reduces initial density. A small “Browser capture or OBS?” first-run flow or contextual links into the How-To page could further reduce onboarding friction.
+Advanced settings are already disclosed progressively. A small “Browser capture or OBS?” first-run flow or contextual How-To links could reduce onboarding friction further.
 
 ### N-6 Consistent dismissible notifications
 
-Recovery paths clear stale errors more reliably now, but feedback still uses several inline alert/status patterns. A compact toast/notification primitive would reduce layout shifts and standardize dismissal/timeout behavior.
+Feedback currently uses several inline alert/status patterns. A compact toast/notification primitive could standardize timeouts, dismissal, and layout behavior.
 
 ### N-9 Copy affordances for manual OBS credentials
 
-Room, local, public, and WHEP values already use `CopyField`. The manual OBS WHIP URL and bearer token remain good candidates for the same one-click pattern.
+Room, local, public, and WHEP values use `CopyField`; extend the same one-click affordance to the manual WHIP URL and bearer token.
 
 ### N-10 Expand host stream-health diagnostics
 
-The host already sees viewer counts, consumer count, relay bytes, codec, TURN/fallback state, and the Status page has broader runtime metrics. Consider surfacing fallback restart/error counts, dropped-chunk counts, and event-loop health when troubleshooting is enabled.
+The host already sees viewer/consumer counts, relay bytes, codec, TURN, and fallback state. Surface fallback restart/error counts, dropped-chunk counts, and event-loop health in an optional troubleshooting view.
 
 ---
 
@@ -44,11 +46,11 @@ The host already sees viewer counts, consumer count, relay bytes, codec, TURN/fa
 
 ### N-11 Break up `HostView.jsx` and `WatchView.jsx`
 
-They are currently about 1,900 and 1,400 lines and own many interdependent state atoms and cleanup paths. Extract lifecycle hooks/controllers and smaller panels around explicit `start`, `recover`, and idempotent `close` operations.
+Both large components own interdependent state atoms and cleanup paths. Extract lifecycle hooks/controllers and smaller settings, OBS, room-link, metrics, and viewer-control panels around explicit `start`, `recover`, `reset`, and idempotent `close` operations.
 
-### N-12 Break the media-lifecycle module cycle
+### N-12 Continue lifecycle-controller extraction
 
-Lazy requires between room, socket, WHIP, and WHEP cleanup hide ownership. Extract a room-media lifecycle/controller module shared by route and signaling layers.
+`RoomMediaPipeline` now owns a substantial part of fallback startup and cleanup. Continue removing lazy/cyclic ownership across room, socket, WHIP, and WHEP modules, and extend explicit controllers to host, viewer, session-registry, and tunnel lifecycle.
 
 ### N-13 Remove `registerSocketHandlers._ioRef`
 
@@ -56,48 +58,48 @@ Lazy requires between room, socket, WHIP, and WHEP cleanup hide ownership. Extra
 
 ### N-14 Structured logging
 
-Replace scattered `console.*` prefixes with a small leveled logger, optional JSON output, and room/session correlation. Preserve the packaged runtime's file rotation.
+Replace ad-hoc `console.*` prefixes with a leveled logger supporting optional JSON and correlation fields. Keep packaged file logging as an output adapter.
 
-### N-15 Make the optional media-control backend explicit
+### N-15 Clarify the optional `nut-js` dependency
 
-`@nut-tree-fork/nut-js` is dynamically required but not declared; PowerShell/xdotool is the fallback. Either declare it as an optional dependency or document the OS fallback as the supported implementation. Remote media control is now correctly disabled server-wide by default.
+`@nut-tree-fork/nut-js` is loaded dynamically but is not declared in `package.json`, so PowerShell/xdotool is the normal fallback. Either declare it as an optional dependency or document the fallback as the supported default.
 
-### N-16 Type checking for JavaScript
+### N-16 Type-checking/JSDoc enforcement
 
-The code has useful JSDoc but no `checkJs`/TypeScript gate. Incremental `// @ts-check` on pure modules and lifecycle controllers could catch shape/undefined errors without a full conversion.
+Adopt incremental `// @ts-check`/`checkJs` or TypeScript for lifecycle/state-machine modules where object shape and nullable-resource errors are costly. Resolve the current Node test runner's `MODULE_TYPELESS_PACKAGE_JSON` warning for `src/lib/obsWebSocket.js` through an explicit module boundary; changing the whole CommonJS server package to ESM is not implied.
 
 ---
 
-## Architecture and packaging options
+## Architecture and deployment options
 
-### N-17 Room-affine mediasoup worker pool, if load tests justify it
+### N-17 Measurement-gated mediasoup worker pool
 
-Measure the supported single-worker envelope first. If one worker is the limiting resource, assign independent rooms to a worker/router pool; rooms do not need cross-router consumption.
+Do not assume pooling is required solely because one worker is used. First establish the supported load envelope. If worker CPU or failure isolation is the constraint, assign each room to a worker/router and keep room media affine.
 
-### N-18 Move relay work off the main thread, if thresholds are exceeded
+### N-18 Move relay work off the signaling event loop if measured
 
-Define acceptable signaling latency/event-loop delay, load-test the two-pipeline cap, and move depacketization/parsing/fanout to workers or a relay process only if needed.
+Define an acceptable event-loop/signaling-latency threshold and test the two-pipeline worst case. Use worker threads or a relay process only if measurements justify the additional lifecycle and IPC complexity.
 
-### N-19 Persistence for a future multi-instance service
+### N-19 Optional persistence for a future multi-instance product
 
-In-memory state is correct for the current desktop product. A hosted horizontally scaled offering would need external session state and sticky/room-aware routing.
+In-memory state is correct for the current single-host application. A hosted multi-instance offering would require external session state, sticky routing, and a different operational model.
 
-### N-20 Evaluate a maintained executable packager
+### N-20 Evaluate a maintained packaging path
 
-The current Windows packaging path is tested and signed, but [`caxa` is archived](https://github.com/leafac/caxa). Evaluate maintained alternatives without assuming Node SEA is already stable: the Node 20 documentation still marks SEA as [active development](https://nodejs.org/download/release/latest-v20.x/docs/api/single-executable-applications.html).
+`caxa` is archived. Keep the verified Windows path while evaluating alternatives; Node SEA remains active development and must be proven with mediasoup/native dependencies, assets, signing, startup logging, and update behavior before migration.
 
-### N-21 Optional Docker deployment
+### N-21 Containerized service deployment
 
-A Dockerfile/Compose example with explicit UDP, reverse-proxy, and TURN guidance would help operators running Nextra on a server. It is not required for the packaged desktop use case.
+Provide a Dockerfile/Compose example with reverse-proxy and TURN guidance only if “server on a box” becomes an explicitly supported deployment target.
 
 ---
 
 ## Future roadmap ideas
 
-- opt-in recording;
-- multiple simultaneous presenters/screens;
-- room chat or reactions;
-- viewer-selectable latency/quality preferences;
-- Prometheus/OpenMetrics export;
-- internationalization;
-- a formal WCAG AA audit.
+- Opt-in recording using the existing muxed relay outputs.
+- Multiple presenters or screens per room.
+- Lightweight chat/reactions.
+- Viewer-selectable quality/latency preferences.
+- Prometheus/OpenMetrics export for service deployments.
+- Internationalized copy.
+- A formal WCAG AA accessibility assessment.
