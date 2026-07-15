@@ -110,7 +110,9 @@ function emitWithAck(socket, event, data, timeoutMs) {
                 return;
             }
 
-            reject(new Error(response.error || response.message || 'Unknown error'));
+            const error = new Error(response.error || response.message || 'Unknown error');
+            Object.assign(error, response);
+            reject(error);
         });
     });
 }

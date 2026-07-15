@@ -8,6 +8,8 @@ Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 
 ## L-10 🟢 Relay backpressure reads an Engine.IO private field
 
+**Remediated with a compatibility guard.** The assumption is now covered against a real socket from the installed Engine.IO package. Missing or changed `writeBuffer` state emits a process-wide one-time warning instead of silently disabling protection. The implementation still observes this private field because Engine.IO exposes no supported per-socket queued-byte signal; the test and warning make that remaining upgrade dependency explicit.
+
 - **Severity:** Low
 - **Blocker:** No
 - **Location:** `lib/socket.js` (`getSocketBufferedBytes`)
@@ -19,6 +21,8 @@ Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 ---
 
 ## L-11 🟢 Media-lifecycle module ownership remains cyclic
+
+**Remediated.** Protocol-specific WHIP/WHEP cleanup is registered with a shared room-lifecycle owner, and the WHIP route receives fallback operations through an explicit controller dependency. Room and Socket.IO teardown no longer lazily import route modules, and route modules no longer import Socket.IO, removing the lifecycle cycles while preserving protocol lookup-map cleanup.
 
 - **Severity:** Low
 - **Blocker:** No
@@ -32,4 +36,4 @@ Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 
 ## Current assessment
 
-No launch-blocking logical defect remains reproducible. The previously proposed WebM-init “race” is handled as a soft wait by `WatchView`, and recorder restart on a live quality change is intentional behavior rather than a logic defect. Those items are not retained as findings.
+Both retained low-severity items are remediated. The Engine.IO field remains a documented, test-covered upgrade dependency until a supported queued-byte signal exists. No launch-blocking logical defect remains reproducible. The previously proposed WebM-init “race” is handled as a soft wait by `WatchView`, and recorder restart on a live quality change is intentional behavior rather than a logic defect. Those items are not retained as findings.

@@ -5,6 +5,10 @@ import { configureObsStream, stopObsStream } from './lib/obsWebSocket';
 import CopyField from './components/CopyField';
 import StatusPill from './components/StatusPill';
 import Modal from './components/Modal';
+import FirstRunGuide from './components/FirstRunGuide';
+import HostDiagnostics from './components/HostDiagnostics';
+import RoomSharePanel from './components/RoomSharePanel';
+import { useHostSessionController } from './hooks/useHostSessionController';
 
 const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 5_000 };
 const OBS_MAX_BITRATE_KBPS = 45_000;
@@ -38,6 +42,7 @@ const OBS_TUNING_PROFILES = {
 };
 const OBS_WS_PASSWORD_STORAGE_KEY = 'nextra.obsWsPassword.v1';
 const BYOK_TURN_SESSION_STORAGE_KEY = 'nextra.byokTurnSession.v1';
+const HOST_RECOVERY_SESSION_STORAGE_KEY = 'nextra.hostRecovery.v1';
 const MEDIA_DEBUG_LOGS = (() => {
     try {
         const params = new URLSearchParams(window.location.search);
@@ -367,6 +372,22 @@ function persistByokTurnSession({ urls, authType, secret, username, credential }
     }
 }
 
+function loadHostRecoverySession() {
+    try {
+        const parsed = JSON.parse(window.sessionStorage.getItem(HOST_RECOVERY_SESSION_STORAGE_KEY) || 'null');
+        if (parsed?.code && parsed?.hostToken) return parsed;
+    } catch { }
+    return null;
+}
+
+function persistHostRecoverySession(session) {
+    try { window.sessionStorage.setItem(HOST_RECOVERY_SESSION_STORAGE_KEY, JSON.stringify(session)); } catch { }
+}
+
+function clearHostRecoverySession() {
+    try { window.sessionStorage.removeItem(HOST_RECOVERY_SESSION_STORAGE_KEY); } catch { }
+}
+
 export default function HostView() {
     const socket = useContext(SocketContext);
     const [storedByokTurnSession] = useState(() => loadStoredByokTurnSession());
@@ -375,6 +396,9 @@ export default function HostView() {
     const [viewerCount, setViewerCount] = useState(0);
     const contentMode = 'motion';
     const [allowMediaControl, setAllowMediaControl] = useState(false);
+    const [roomPassphrase, setRoomPassphrase] = useState('');
+    const [reloadRecoveryEnabled, setReloadRecoveryEnabled] = useState(false);
+    const [resumePending, setResumePending] = useState(false);
     const [remoteMediaControlEnabled, setRemoteMediaControlEnabled] = useState(false);
     const [hostUploadMbps, setHostUploadMbps] = useState(20);
     const [lanBaseUrl, setLanBaseUrl] = useState(window.location.origin);
@@ -428,6 +452,9 @@ export default function HostView() {
     const [saveByokTurnForSession, setSaveByokTurnForSession] = useState(() => storedByokTurnSession != null);
     const [showByokTurnModal, setShowByokTurnModal] = useState(false);
     const [hostToken, setHostToken] = useState('');
+    const [showFirstRun, setShowFirstRun] = useState(() => {
+        try { return window.localStorage.getItem('nextra.hostGuideSeen') !== '1'; } catch { return true; }
+    });
 
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -440,6 +467,12 @@ export default function HostView() {
     const audioCtxRef = useRef(null);
     const silentAudioTrackRef = useRef(null);
     const hostTokenRef = useRef(null);
+    const roomCodeRef = useRef(null);
+    const reloadRecoveryEnabledRef = useRef(false);
+    const ingestModeRef = useRef('browser');
+    const resumeRoomRef = useRef(null);
+    const pageHidingRef = useRef(false);
+    const hostUnmountTimerRef = useRef(null);
     const prevRelayViewerCountRef = useRef(0);
 
     const bitratePerViewer = viewerCount > 0 ? hostUploadMbps / viewerCount : hostUploadMbps;
@@ -520,6 +553,15 @@ export default function HostView() {
     useEffect(() => {
         persistObsPassword(obsPassword);
     }, [obsPassword]);
+
+    useEffect(() => {
+        roomCodeRef.current = roomCode;
+        reloadRecoveryEnabledRef.current = reloadRecoveryEnabled;
+        ingestModeRef.current = ingestMode;
+        if (isSharing && reloadRecoveryEnabled && roomCode && hostToken) {
+            persistHostRecoverySession({ code: roomCode, hostToken, ingestMode });
+        }
+    }, [roomCode, hostToken, ingestMode, isSharing, reloadRecoveryEnabled]);
 
     useEffect(() => {
         if (!saveByokTurnForSession) {
@@ -746,41 +788,14 @@ export default function HostView() {
         relayFlushIntervalMs,
     ]);
 
-    const cleanup = useCallback(() => {
-        stopRelayRecorder();
-
-        if (videoProducerRef.current) {
-            try { videoProducerRef.current.close(); } catch { }
-            videoProducerRef.current = null;
-        }
-        if (audioProducerRef.current) {
-            try { audioProducerRef.current.close(); } catch { }
-            audioProducerRef.current = null;
-        }
-        if (sendTransportRef.current) {
-            try { sendTransportRef.current.close(); } catch { }
-            sendTransportRef.current = null;
-        }
-
-        if (streamRef.current) {
-            streamRef.current.getTracks().forEach((track) => track.stop());
-            streamRef.current = null;
-        }
-
-        if (videoRef.current) {
-            videoRef.current.srcObject = null;
-        }
-
-        if (audioCtxRef.current) {
-            try { audioCtxRef.current.close(); } catch { }
-            audioCtxRef.current = null;
-        }
-        silentAudioTrackRef.current = null;
-
+    const resetHostSessionState = useCallback(() => {
         setIsSharing(false);
         setRoomCode(null);
         setHostToken('');
         hostTokenRef.current = null;
+        roomCodeRef.current = null;
+        resumeRoomRef.current = null;
+        clearHostRecoverySession();
         setViewerCount(0);
         setWhepViewerCount(0);
         setRelayViewerCount(0);
@@ -795,17 +810,53 @@ export default function HostView() {
         setShowByokTurnModal(false);
         setStatus('idle');
         resetDevice();
-    }, [stopRelayRecorder]);
+    }, []);
+
+    const cleanup = useHostSessionController({
+        stopRelayRecorder,
+        videoProducerRef,
+        audioProducerRef,
+        sendTransportRef,
+        streamRef,
+        videoRef,
+        audioCtxRef,
+        silentAudioTrackRef,
+        resetState: resetHostSessionState,
+    });
 
     useEffect(() => {
+        if (hostUnmountTimerRef.current) {
+            clearTimeout(hostUnmountTimerRef.current);
+            hostUnmountTimerRef.current = null;
+        }
         const closeHostSession = () => {
+            pageHidingRef.current = true;
+            if (reloadRecoveryEnabledRef.current && roomCodeRef.current && hostTokenRef.current) {
+                persistHostRecoverySession({
+                    code: roomCodeRef.current,
+                    hostToken: hostTokenRef.current,
+                    ingestMode: ingestModeRef.current,
+                });
+                return;
+            }
             socket.emit('host-stopped');
             cleanup();
         };
+        const onPageShow = () => { pageHidingRef.current = false; };
         window.addEventListener('pagehide', closeHostSession);
+        window.addEventListener('pageshow', onPageShow);
         return () => {
             window.removeEventListener('pagehide', closeHostSession);
-            closeHostSession();
+            window.removeEventListener('pageshow', onPageShow);
+            // Defer non-pagehide teardown by one task so React StrictMode's
+            // development-only effect setup/cleanup replay can cancel it.
+            hostUnmountTimerRef.current = setTimeout(() => {
+                hostUnmountTimerRef.current = null;
+                if (!pageHidingRef.current) {
+                    socket.emit('host-stopped');
+                    cleanup();
+                }
+            }, 0);
         };
     }, [socket, cleanup]);
 
@@ -828,6 +879,49 @@ export default function HostView() {
         socket.on('connect', onReconnect);
         return () => socket.off('connect', onReconnect);
     }, [socket, isSharing, roomCode]);
+
+    useEffect(() => {
+        const stored = loadHostRecoverySession();
+        if (!stored) return undefined;
+        let cancelled = false;
+
+        const reclaimStoredRoom = async () => {
+            try {
+                const response = await socketRequest(socket, 'reclaim-host', {
+                    ...stored,
+                    reloadRecovery: true,
+                });
+                if (cancelled) return;
+                if (response.reloadRecoveryEnabled !== true) {
+                    clearHostRecoverySession();
+                    return;
+                }
+                setRoomCode(stored.code);
+                roomCodeRef.current = stored.code;
+                setHostToken(stored.hostToken);
+                hostTokenRef.current = stored.hostToken;
+                setReloadRecoveryEnabled(true);
+                reloadRecoveryEnabledRef.current = true;
+                setIngestMode(response.ingestMode === 'obs' ? 'obs' : 'browser');
+                setObsVideoCodec(response.obsVideoCodec || null);
+                setRoomHasTurnServer(!!response.hasRoomTurnServer);
+                resumeRoomRef.current = { ...stored, ...response };
+                if (response.ingestMode === 'obs') {
+                    setIsSharing(true);
+                    setStatus('streaming');
+                    setResumePending(false);
+                } else {
+                    setResumePending(true);
+                    setStatus('idle');
+                }
+            } catch {
+                clearHostRecoverySession();
+            }
+        };
+
+        reclaimStoredRoom();
+        return () => { cancelled = true; };
+    }, [socket]);
 
     useEffect(() => {
         const onRoomMetrics = (data) => {
@@ -970,6 +1064,7 @@ export default function HostView() {
     const handleStartSharing = useCallback(async () => {
         setError('');
         setStatus('connecting');
+        const resumedRoom = resumeRoomRef.current;
 
         try {
             let roomTurnConfig = null;
@@ -1031,30 +1126,36 @@ export default function HostView() {
                 });
             }
 
-            // Best effort cleanup for stale socket room state before creating a fresh room.
-            try {
-                await socketRequest(socket, 'leave-room', {}, { timeoutMs: 5000, maxAttempts: 1 });
-            } catch { }
+            let createdRoom = resumedRoom;
+            if (!createdRoom) {
+                // Best effort cleanup for stale socket room state before creating a fresh room.
+                try {
+                    await socketRequest(socket, 'leave-room', {}, { timeoutMs: 5000, maxAttempts: 1 });
+                } catch { }
 
-            const {
-                code,
-                hostToken,
-                obsVideoCodec: createdObsVideoCodec,
-                hasRoomTurnServer: createdRoomHasTurnServer,
-            } = await socketRequest(socket, 'create-room', {
-                allowMediaControl,
-                ingestMode,
-                obsAv1Mode,
-                turnConfig: roomTurnConfig,
-                frameRate,
-                // H.264 fallback relay re-encode bitrate for the selected quality tier.
-                relayVideoKbps: Math.round(getProfileRelayBitsPerSecond(qualityProfile, frameRate) / 1000),
-            });
+                createdRoom = await socketRequest(socket, 'create-room', {
+                    allowMediaControl,
+                    ingestMode,
+                    obsAv1Mode,
+                    turnConfig: roomTurnConfig,
+                    frameRate,
+                    passphrase: roomPassphrase,
+                    reloadRecoveryEnabled,
+                    // H.264 fallback relay re-encode bitrate for the selected quality tier.
+                    relayVideoKbps: Math.round(getProfileRelayBitsPerSecond(qualityProfile, frameRate) / 1000),
+                });
+            }
+            const code = createdRoom.code;
+            const hostToken = createdRoom.hostToken;
+            const createdObsVideoCodec = createdRoom.obsVideoCodec;
+            const createdRoomHasTurnServer = createdRoom.hasRoomTurnServer;
             setRoomCode(code);
             setHostToken(hostToken || '');
             hostTokenRef.current = hostToken || null;
             setObsVideoCodec(createdObsVideoCodec || null);
             setRoomHasTurnServer(!!createdRoomHasTurnServer);
+            resumeRoomRef.current = null;
+            setResumePending(false);
 
             if (ingestMode !== 'obs') {
                 const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
@@ -1156,6 +1257,8 @@ export default function HostView() {
     }, [
         socket,
         allowMediaControl,
+        roomPassphrase,
+        reloadRecoveryEnabled,
         ingestMode,
         cleanup,
         selectedProfile,
@@ -1313,6 +1416,10 @@ export default function HostView() {
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
         : '';
     const totalViewers = viewerCount + whepViewerCount;
+    const dismissFirstRun = useCallback(() => {
+        setShowFirstRun(false);
+        try { window.localStorage.setItem('nextra.hostGuideSeen', '1'); } catch { }
+    }, []);
 
     return (
         <div className="view-container">
@@ -1320,6 +1427,13 @@ export default function HostView() {
                 <h1>Host</h1>
                 <p className="subtitle">Share your screen with viewers</p>
             </div>
+
+            {showFirstRun && !isSharing && (
+                <FirstRunGuide
+                    onChoose={(mode) => { setIngestMode(mode); dismissFirstRun(); }}
+                    onDismiss={dismissFirstRun}
+                />
+            )}
 
             <div className="host-layout">
                 <div className="host-video-section">
@@ -1354,7 +1468,7 @@ export default function HostView() {
                                     onClick={handleStartSharing}
                                     disabled={status === 'connecting'}
                                 >
-                                    {status === 'connecting' ? 'Connecting...' : 'Start Sharing'}
+                                    {status === 'connecting' ? 'Connecting...' : (resumePending ? 'Resume Sharing' : 'Start Sharing')}
                                 </button>
                                 {ingestMode === 'obs' && obsApplySettings && (
                                     <div className="mode-toggle" role="group" aria-label="OBS tuning profile">
@@ -1480,6 +1594,32 @@ export default function HostView() {
                                                 ? 'Viewers can remotely press Play/Pause on your keyboard'
                                                 : 'Disabled by the server operator'}
                                         </span>
+                                    </label>
+                                </div>
+                                <div className="setting-row">
+                                    <label htmlFor="roomPassphrase">
+                                        Optional room passphrase
+                                        <span className="setting-hint">Viewers must enter it after the room code</span>
+                                    </label>
+                                    <input
+                                        id="roomPassphrase"
+                                        type="password"
+                                        value={roomPassphrase}
+                                        maxLength={128}
+                                        autoComplete="new-password"
+                                        onChange={(evt) => setRoomPassphrase(evt.target.value)}
+                                    />
+                                </div>
+                                <div className="setting-row setting-row-toggle">
+                                    <input
+                                        type="checkbox"
+                                        id="reloadRecoveryEnabled"
+                                        checked={reloadRecoveryEnabled}
+                                        onChange={(evt) => setReloadRecoveryEnabled(evt.target.checked)}
+                                    />
+                                    <label htmlFor="reloadRecoveryEnabled">
+                                        Allow recovery after reload
+                                        <span className="setting-hint">Keeps this room reclaimable for about 30 seconds; browser capture must be selected again</span>
                                     </label>
                                 </div>
                                 <div className="setting-row setting-row-toggle">
@@ -1614,28 +1754,14 @@ export default function HostView() {
                     {roomCode && (
                         <div className={ingestMode === 'obs' ? 'streaming-info-row' : ''}>
                         <div className="room-info">
-                            <div className="room-code-display">
-                                <CopyField label="Room Code" value={formattedRoomCode} strong />
-
-                                <div className="room-links-row">
-                                    <CopyField label="Local Link" value={localWatchLink} />
-                                    {showPublicLink && (
-                                        <CopyField label="Public Link" value={publicWatchLink} />
-                                    )}
-                                    {whepPlaybackUrl && (
-                                        <CopyField label="External Player (WHEP)" value={whepPlaybackUrl} />
-                                    )}
-                                </div>
-
-                                {!showPublicLink && (
-                                    <span className="copy-hint">{publicLinkHint}</span>
-                                )}
-                                {whepPlaybackUrl && (
-                                    <span className="copy-hint">
-                                        The WHEP link plays in GStreamer and other WHEP-compatible players.
-                                    </span>
-                                )}
-                            </div>
+                            <RoomSharePanel
+                                formattedRoomCode={formattedRoomCode}
+                                localWatchLink={localWatchLink}
+                                publicWatchLink={publicWatchLink}
+                                showPublicLink={showPublicLink}
+                                publicLinkHint={publicLinkHint}
+                                whepPlaybackUrl={whepPlaybackUrl}
+                            />
                             <div className="viewer-count">
                                 <StatusPill tone={totalViewers > 0 ? 'ok' : undefined} pulse={totalViewers > 0}>
                                     {totalViewers} viewer{totalViewers !== 1 ? 's' : ''}
@@ -1651,6 +1777,7 @@ export default function HostView() {
                                     WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0)}
                                 </div>
                             )}
+                            <HostDiagnostics metrics={roomMetrics} />
                             {ingestMode === 'obs' && (
                                 <div className="room-meta">
                                     Codec: {obsVideoCodec || 'waiting'} |{' '}
@@ -1716,14 +1843,8 @@ export default function HostView() {
                             <details className="obs-manual-details">
                                 <summary>Manual setup (if auto-config fails)</summary>
                                 <div>
-                                    <div className="obs-manual-field">
-                                        <strong>WHIP URL:</strong>
-                                        <code className="code-block">{buildWhipBroadcastUrl(roomCode)}</code>
-                                    </div>
-                                    <div className="obs-manual-field">
-                                        <strong>Bearer Token:</strong>
-                                        <code className="code-block">{hostToken}</code>
-                                    </div>
+                                    <CopyField label="WHIP URL" value={buildWhipBroadcastUrl(roomCode)} />
+                                    <CopyField label="Bearer Token" value={hostToken} />
                                     <div className="obs-manual-note">
                                         In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
                                     </div>

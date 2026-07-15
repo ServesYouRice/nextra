@@ -340,6 +340,7 @@ const config = {
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     ALLOW_REMOTE_METRICS: parseBoolEnv(process.env.ALLOW_REMOTE_METRICS, false),
     METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),
+    ENABLE_OPENMETRICS: parseBoolEnv(process.env.ENABLE_OPENMETRICS, false),
     MEDIA_DEBUG_LOGS: parseBoolEnv(process.env.MEDIA_DEBUG_LOGS, false),
     // Public share URL (recommended when using a tunnel/reverse proxy)
     SHARE_BASE_URL: (process.env.SHARE_BASE_URL || '').trim(),
@@ -352,6 +353,9 @@ const config = {
     WHIP_ENABLED: parseBoolEnv(process.env.WHIP_ENABLED, true),
     WHIP_HTTP_PORT: parseIntEnv(process.env.WHIP_HTTP_PORT, 3001),
     WHIP_BIND_HOST: (process.env.WHIP_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1',
+    // The OBS-compatible listener is plain HTTP. Widening it beyond loopback
+    // exposes bearer credentials unless a VPN or TLS reverse proxy protects it.
+    WHIP_ALLOW_INSECURE_REMOTE: parseBoolEnv(process.env.WHIP_ALLOW_INSECURE_REMOTE, false),
     FFMPEG_PATH: (process.env.FFMPEG_PATH || 'ffmpeg').trim(),
     FALLBACK_AUDIO_BITRATE: (process.env.FALLBACK_AUDIO_BITRATE || '192k').trim(),
     // How much the relay delays OBS audio to match video (milliseconds). The video
@@ -391,6 +395,16 @@ function validateConfig(value) {
     }
     if (value.CLOUDFLARED_TUNNEL_TOKEN && !value.SHARE_BASE_URL) {
         throw new Error('Invalid tunnel configuration: SHARE_BASE_URL is required with CLOUDFLARED_TUNNEL_TOKEN.');
+    }
+    const whipBindHost = String(value.WHIP_BIND_HOST || '').toLowerCase().replace(/^\[|\]$/g, '');
+    const whipIsLoopback = whipBindHost === 'localhost'
+        || whipBindHost === '::1'
+        || /^127\.\d+\.\d+\.\d+$/.test(whipBindHost);
+    if (value.WHIP_ENABLED && !whipIsLoopback && !value.WHIP_ALLOW_INSECURE_REMOTE) {
+        throw new Error(
+            `Refusing plaintext WHIP listener on non-loopback host ${value.WHIP_BIND_HOST}. `
+            + 'Keep WHIP_BIND_HOST on loopback, or set WHIP_ALLOW_INSECURE_REMOTE=1 only behind an encrypted VPN/TLS proxy.'
+        );
     }
 
     [
