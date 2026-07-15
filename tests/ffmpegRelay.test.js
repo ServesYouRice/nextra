@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { FFmpegRelay } = require('../lib/ffmpegRelay');
+const { FFmpegRelay, getNvencProbeStatus } = require('../lib/ffmpegRelay');
 
 function createRelay(videoCodec, opts = {}) {
     return new FFmpegRelay({
@@ -44,6 +44,15 @@ test('FFmpeg relay omits the audio input when there is no audio', () => {
 
 test('FFmpeg relay rejects non-H.264 input', () => {
     assert.throws(() => createRelay('av1'), /H\.264 input/i);
+});
+
+test('NVENC probe diagnostics have a stable serializable shape', () => {
+    const status = getNvencProbeStatus();
+    assert.equal(status.state, 'not-started');
+    assert.equal(status.startedAt, null);
+    assert.equal(status.completedAt, null);
+    assert.equal(status.durationMs, null);
+    assert.doesNotThrow(() => JSON.stringify(status));
 });
 
 test('writeVideo returns false when the relay is not running', () => {
