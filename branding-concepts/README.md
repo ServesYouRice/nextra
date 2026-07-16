@@ -23,5 +23,16 @@ A second, more experimental batch pushes further from the plain letterform:
 | 9 | `concept-9-quick-tunnel.svg` | **Quick Tunnel** — no letter at all: nested screen frames receding toward a point of light, the tunnel between your screen and everyone watching. |
 | 10 | `concept-10-neon-marquee.svg` | **Neon Marquee** — the N as a glowing neon sign on a dark tile: "we're live" movie-night energy, with the glow baked into the SVG. |
 
+A third batch spans five deliberately different style lanes (typographic, mascot,
+retro palette, ultra-minimal, premium dimensional) to find the right direction:
+
+| # | File | Idea |
+|---|------|------|
+| 11 | `concept-11-blockcut-wordmark.svg` | **Blockcut Wordmark** — type-first: NEXTRA in heavy angular stencil letterforms with the ✕ as the accent; the ✕ alone doubles as the favicon. |
+| 12 | `concept-12-mascot.svg` | **Tellie the Mascot** — a friendly little TV with rabbit ears; gives the app a face for empty states, errors, and the README. |
+| 13 | `concept-13-retro-crt.svg` | **Retro CRT** — palette break: a CRT showing a synthwave sunset with scanlines; warm movie-night nostalgia instead of corporate blue. |
+| 14 | `concept-14-beam.svg` | **The Beam** — one stark shape: a play triangle stretched into a projector beam opening toward the audience; ownable through restraint. |
+| 15 | `concept-15-aurora-stream.svg` | **Aurora Stream** — premium dark tile with a glowing cyan→blue→violet stream flowing through it; Linear/Raycast-style dock icon. |
+
 These are proposals only — nothing in the app references them yet. If one direction
 wins, the follow-up is to regenerate `public/brand/` and `public/icons/` from it.
