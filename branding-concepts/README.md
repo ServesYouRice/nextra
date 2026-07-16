@@ -45,5 +45,16 @@ finish: gradient dark tiles, aurora gradients, layered glows, and light effects:
 | 19 | `concept-19-tunnel-deluxe.svg` | **Quick Tunnel Deluxe** — glowing gradient frames receding to an actual point of light (white core, cyan bloom). |
 | 20 | `concept-20-neon-deluxe.svg` | **Neon Marquee Deluxe** — gradient neon tube with layered glows, a faint under-sign reflection, and a sparkle at the tube's end. |
 
+The fifth batch keeps the deluxe finish but re-centers the meaning on *nex* as
+nexus — every mark pictures a connection between two sides:
+
+| # | File | Idea |
+|---|------|------|
+| 21 | `concept-21-linked-screens.svg` | **Linked Screens** — host and viewer screens woven together like chain links; the over-under weave is the connection. |
+| 22 | `concept-22-pairing.svg` | **Pairing** — two screens leaning toward each other with a glowing "connecting…" ellipsis: the room-code handshake as a mark. |
+| 23 | `concept-23-synapse.svg` | **Synapse** — two orbs joined by an arc of energy with a spark at the meeting point; the diagonal echoes the N. |
+| 24 | `concept-24-nexus.svg` | **Nexus** — streams converging from every direction into one bright core; doubles as a star and the ✕ in nextra. |
+| 25 | `concept-25-infinity.svg` | **Infinity Stream** — two loops sharing one continuous woven line, cyan flowing to violet: connection without a break. |
+
 These are proposals only — nothing in the app references them yet. If one direction
 wins, the follow-up is to regenerate `public/brand/` and `public/icons/` from it.
