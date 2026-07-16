@@ -34,5 +34,16 @@ retro palette, ultra-minimal, premium dimensional) to find the right direction:
 | 14 | `concept-14-beam.svg` | **The Beam** — one stark shape: a play triangle stretched into a projector beam opening toward the audience; ownable through restraint. |
 | 15 | `concept-15-aurora-stream.svg` | **Aurora Stream** — premium dark tile with a glowing cyan→blue→violet stream flowing through it; Linear/Raycast-style dock icon. |
 
+The fourth batch remasters batch two (the most promising direction) with a premium
+finish: gradient dark tiles, aurora gradients, layered glows, and light effects:
+
+| # | File | Idea |
+|---|------|------|
+| 16 | `concept-16-glitch-deluxe.svg` | **Glitch Scan Deluxe** — the sliced N with an aurora gradient, back-glow, and cyan/magenta chromatic-aberration echoes on a gradient tile. |
+| 17 | `concept-17-pixelcast-deluxe.svg` | **Pixelcast Deluxe** — the dissolving N in aurora colors; escaping blocks shift blue→cyan as they fly, with a soft bloom behind the mark. |
+| 18 | `concept-18-constellation-deluxe.svg` | **Constellation Deluxe** — the network N as a night sky: luminous nodes with white-hot cores, gradient edges, faint background stars. |
+| 19 | `concept-19-tunnel-deluxe.svg` | **Quick Tunnel Deluxe** — glowing gradient frames receding to an actual point of light (white core, cyan bloom). |
+| 20 | `concept-20-neon-deluxe.svg` | **Neon Marquee Deluxe** — gradient neon tube with layered glows, a faint under-sign reflection, and a sparkle at the tube's end. |
+
 These are proposals only — nothing in the app references them yet. If one direction
 wins, the follow-up is to regenerate `public/brand/` and `public/icons/` from it.
