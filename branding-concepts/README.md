@@ -13,5 +13,15 @@ dark and light backgrounds at full, navbar (32 px), and favicon (16 px) sizes.
 | 4 | `concept-4-broadcast-frame.svg` | **Broadcast Frame** — a monitor with the share arrow bursting out through the corner: your screen leaving the room. The most literal "share your screen with a link" story. |
 | 5 | `concept-5-crosscast.svg` | **Crosscast X** — leans on the ✕ instead of the N: two arrows fanning out from one origin (one host → many viewers, plus remote control flowing back). In the wordmark it replaces the x: ne✕tra. |
 
+A second, more experimental batch pushes further from the plain letterform:
+
+| # | File | Idea |
+|---|------|------|
+| 6 | `concept-6-glitch-scan.svg` | **Glitch Scan** — the N sliced into offset scanline bands, a video signal caught mid-transmission. Top and bottom bands stay anchored so the letter remains legible. |
+| 7 | `concept-7-pixelcast.svg` | **Pixelcast** — the N transmitting itself: solid where it starts, dissolving into blocks as it leaves for the network (a nod to the chunked relay stream). |
+| 8 | `concept-8-constellation.svg` | **Constellation** — the N as a network map: a ringed host node streams along the N's path to viewer nodes, with extra viewers hanging off the edge. |
+| 9 | `concept-9-quick-tunnel.svg` | **Quick Tunnel** — no letter at all: nested screen frames receding toward a point of light, the tunnel between your screen and everyone watching. |
+| 10 | `concept-10-neon-marquee.svg` | **Neon Marquee** — the N as a glowing neon sign on a dark tile: "we're live" movie-night energy, with the glow baked into the SVG. |
+
 These are proposals only — nothing in the app references them yet. If one direction
 wins, the follow-up is to regenerate `public/brand/` and `public/icons/` from it.
