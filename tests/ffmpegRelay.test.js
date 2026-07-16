@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { FFmpegRelay, getNvencProbeStatus } = require('../lib/ffmpegRelay');
+const config = require('../config');
 
 function createRelay(videoCodec, opts = {}) {
     return new FFmpegRelay({
@@ -82,4 +83,64 @@ test('setStartupVideoBacklogSec ignores invalid or negative values', () => {
     assert.equal(relay._buildArgs('test.sdp')[relay._buildArgs('test.sdp').indexOf('-itsoffset') + 1], '0.500');
     relay.setStartupVideoBacklogSec(NaN);
     assert.equal(relay._buildArgs('test.sdp')[relay._buildArgs('test.sdp').indexOf('-itsoffset') + 1], '0.500');
+});
+
+test('writeVideo bounds FFmpeg stdin backpressure and requests a keyframe after recovery', () => {
+    const relay = createRelay('h264', { hasAudio: false });
+    const writes = [];
+    relay._running = true;
+    relay._process = {
+        stdin: {
+            writable: true,
+            writableLength: 17 * 1024 * 1024,
+            write: (buffer) => {
+                writes.push(buffer);
+                return true;
+            },
+        },
+    };
+    let videoGaps = 0;
+    relay.on('video-gap', () => { videoGaps += 1; });
+
+    assert.equal(relay.writeVideo(Buffer.alloc(512)), false);
+    assert.equal(relay.totalStdinDroppedBytes, 512);
+    assert.equal(writes.length, 0);
+
+    relay._process.stdin.writableLength = 0;
+    assert.equal(relay.writeVideo(Buffer.alloc(64)), true);
+    assert.equal(videoGaps, 1);
+    assert.equal(writes.length, 1);
+});
+
+test('pre-start video buffering remains bounded while preserving the bootstrap head', () => {
+    const relay = createRelay('h264', { hasAudio: false });
+    const bootstrap = Buffer.alloc(4 * 1024 * 1024, 1);
+    relay.writeVideo(bootstrap);
+    relay.writeVideo(Buffer.alloc(4 * 1024 * 1024, 2));
+    relay.writeVideo(Buffer.alloc(4 * 1024 * 1024, 3));
+    relay.writeVideo(Buffer.alloc(4 * 1024 * 1024, 4));
+
+    assert.ok(relay._preStartBytes <= 12 * 1024 * 1024);
+    assert.equal(relay._preStartBuffer[0].equals(bootstrap), true);
+    assert.equal(relay._preStartBuffer.length, 3);
+});
+
+test('restart stops at the configured budget without spawning another child', async () => {
+    const relay = createRelay('h264', { hasAudio: false });
+    const originalCap = config.FALLBACK_RESTART_CAP;
+    const errors = [];
+    config.FALLBACK_RESTART_CAP = 2;
+    relay._restartCount = 2;
+    relay.on('error', (err) => errors.push(err));
+
+    try {
+        await relay.restart();
+    } finally {
+        config.FALLBACK_RESTART_CAP = originalCap;
+    }
+
+    assert.equal(relay.restartCount, 3);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /restart cap \(2\) reached/);
+    assert.equal(relay.running, false);
 });

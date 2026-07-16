@@ -1,6 +1,6 @@
 # Production Readiness — Deployment, Observability & Operations
 
-Revalidated against commit `2ba6c09` on 2026-07-14.
+Revalidated against the current remediation tree on 2026-07-16.
 
 Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 
@@ -36,13 +36,13 @@ The packaged artifact is Windows-only and uses `caxa`. The [upstream caxa reposi
 
 **Fix.** Keep the current reproducible Windows path while evaluating maintained alternatives. Add macOS/Linux artifacts or a container only when those become supported product targets.
 
-### D-7 🟢 CI has no coverage, server/signaling integration, or browser gate
+### D-7 🟢 CI still lacks a browser media-flow gate
 
-**Excluded from this remediation at the user's direction.** This finding is entirely the CI expression of `testing-gaps.md` T-1 through T-6, which was explicitly left out of scope.
+**Disposition (2026-07-16): Partially remediated.** The normal `npm test` gate boots the real server with a real mediasoup worker and exercises HTTP operations, metrics authorization, routing, Socket.IO admission, room throttling/capacity, transport replacement, production/consumption/resume, zero-resource cleanup, and graceful shutdown. Deterministic fallback allocation failures and client request/fMP4 lifecycles are also covered.
 
-Linux runs `release:prep`; Windows repeats the gate, builds `Nextra.exe`, launches it, and polls `/readyz`. CI does not yet run the suites described in `testing-gaps.md` T-1 through T-6.
+Linux runs `release:prep`; Windows repeats the gate, builds `Nextra.exe`, launches it, and polls `/readyz`. `release:prep` now enforces focused lifecycle coverage thresholds. CI still has no browser lifecycle/decoded-frame media-flow gate.
 
-**Fix.** Prioritize real server/Socket.IO and browser lifecycle tests, then add coverage reporting as a regression signal.
+**Fix.** Add browser lifecycle and decoded-frame coverage when a deterministic browser/media runtime is available in CI.
 
 ### D-8 🟢 Existing secrets and workflow hygiene are strong
 
@@ -92,6 +92,6 @@ No persistent business state exists to back up by design. A rollback/configurati
 ## Recommended order
 
 1. Satisfy the external signing and legal gates for a public distribution.
-2. Add server/Socket.IO and browser lifecycle coverage.
+2. Add browser lifecycle and decoded-frame media-flow coverage.
 3. Run the documented target-host load procedure and retain its JSON evidence.
 4. Re-run the maintained packaging evaluation on its documented triggers or when another product target is selected.

@@ -52,6 +52,7 @@ const { warmNvencProbe, getNvencProbeStatus } = require('./lib/ffmpegRelay');
 const { findAvailablePort } = require('./lib/portResolver');
 const { resolveExecutablePath } = require('./lib/executable');
 const { renderOpenMetrics } = require('./lib/openMetrics');
+const { decideWorkerDeathAction } = require('./lib/workerRecovery');
 const { execFile, execFileSync } = require('child_process');
 
 setWhipMediaLifecycle({ startFallbackRelay, stopFallbackRelay, emitHostMetrics });
@@ -1335,15 +1336,13 @@ async function startWhipHttpServer(whipRouter) {
     // room is dead. Rather than leave clients stuck, restart the whole process so
     // viewers and OBS reconnect on their own (browser-capture hosts re-share).
     setWorkerDeathHandler(() => {
-        // During an intentional shutdown (SIGINT/SIGTERM) the worker dies as a
-        // side effect of the process exiting — don't treat that as a crash or
-        // try to relaunch.
-        if (isShuttingDown) return;
+        const recoveryAction = decideWorkerDeathAction({
+            isShuttingDown,
+            uptimeSeconds: process.uptime(),
+        });
+        if (recoveryAction === 'ignore') return;
 
-        // Guard against crash loops: only auto-restart if we were up long enough
-        // that this looks like a genuine runtime crash rather than a broken start.
-        const MIN_UPTIME_SECONDS = 30;
-        if (process.uptime() < MIN_UPTIME_SECONDS) {
+        if (recoveryAction === 'exit') {
             console.error('[recovery] Media engine crashed during startup - not auto-restarting to avoid a crash loop.');
             cleanupGlobalResources();
             process.exit(1);
