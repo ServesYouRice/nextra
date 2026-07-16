@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nextra — Logo Concepts</title>
+<style>
+  :root {
+    --bg: #17171b; --panel: #212127; --panel-2: #2c2c33;
+    --text: #ececf0; --muted: #9ea6c7; --accent: #5b8def;
+    --chip-light: #f3f2ef; --border: rgba(255,255,255,0.08);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    padding: 40px 24px 80px; line-height: 1.55;
+  }
+  main { max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 1.7rem; letter-spacing: 0.01em; }
+  .sub { color: var(--muted); margin: 6px 0 36px; max-width: 62ch; }
+  .concept {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 18px; padding: 26px 28px; margin-bottom: 28px;
+  }
+  .concept h2 { font-size: 1.15rem; margin-bottom: 2px; }
+  .concept h2 .num { color: var(--accent); margin-right: 8px; }
+  .why { color: var(--muted); font-size: 0.92rem; max-width: 70ch; margin-bottom: 20px; }
+  .row { display: flex; flex-wrap: wrap; gap: 18px; align-items: stretch; }
+  .swatch {
+    border-radius: 14px; padding: 20px; display: flex; align-items: center;
+    justify-content: center; gap: 22px; flex: 1 1 260px; min-height: 150px;
+  }
+  .swatch.dark  { background: var(--panel-2); border: 1px solid var(--border); }
+  .swatch.light { background: var(--chip-light); }
+  .sizes { display: flex; align-items: flex-end; gap: 16px; }
+  .sizes figure { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .sizes figcaption { font-size: 0.68rem; color: var(--muted); }
+  .swatch.light .sizes figcaption { color: #6c6c7e; }
+  .lockup { display: flex; align-items: center; gap: 12px; }
+  .word { font-weight: 700; font-size: 34px; letter-spacing: 0.02em; color: var(--text); }
+  .swatch.light .word { color: #2c2c33; }
+  .word .x { color: var(--accent); }
+  img { display: block; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Nextra — five logo concepts</h1>
+  <p class="sub">Each mark is a standalone SVG in <code>branding-concepts/</code>, drawn on the app's
+  existing palette (accent <code>#5b8def</code>). Shown on dark and light, plus navbar (32&nbsp;px)
+  and favicon (16&nbsp;px) sizes, and a simple wordmark lockup.</p>
+
+  <section class="concept">
+    <h2><span class="num">1</span>Signal N</h2>
+    <p class="why">The two stems of the N stay, but the diagonal becomes a transmission: three dots
+    growing as the signal travels from host to viewer. Reads as an N at a glance, as a broadcast on
+    a second look. Very sturdy at favicon size.</p>
+    <div class="row">
+      <div class="swatch dark"><div class="sizes">
+        <figure><img src="concept-1-signal-n.svg" width="110" height="110"><figcaption>mark</figcaption></figure>
+        <figure><img src="concept-1-signal-n.svg" width="32" height="32"><figcaption>32</figcaption></figure>
+        <figure><img src="concept-1-signal-n.svg" width="16" height="16"><figcaption>16</figcaption></figure>
+      </div></div>
+      <div class="swatch light"><div class="lockup"><img src="concept-1-signal-n.svg" width="46" height="46"><span class="word">nextra</span></div></div>
+    </div>
+  </section>
+
+  <section class="concept">
+    <h2><span class="num">2</span>Stream Ribbon</h2>
+    <p class="why">The closest evolution of the current mark: one continuous monoline stroke draws the N
+    in a single gesture — an unbroken stream — and broadcast arcs radiate from the point where it
+    arrives. Keeps the current logo's DNA but bolder and one-piece.</p>
+    <div class="row">
+      <div class="swatch dark"><div class="sizes">
+        <figure><img src="concept-2-stream-ribbon.svg" width="118" height="110"><figcaption>mark</figcaption></figure>
+        <figure><img src="concept-2-stream-ribbon.svg" width="34" height="32"><figcaption>32</figcaption></figure>
+        <figure><img src="concept-2-stream-ribbon.svg" width="17" height="16"><figcaption>16</figcaption></figure>
+      </div></div>
+      <div class="swatch light"><div class="lockup"><img src="concept-2-stream-ribbon.svg" width="50" height="46"><span class="word">nextra</span></div></div>
+    </div>
+  </section>
+
+  <section class="concept">
+    <h2><span class="num">3</span>Portal Tile</h2>
+    <p class="why">A rounded screen tile with the N carved out in negative space — the mark <em>is</em>
+    an app icon, which suits a product people launch as <code>Nextra.exe</code>. Works everywhere a
+    solid square works: taskbar, PWA icon, social avatar.</p>
+    <div class="row">
+      <div class="swatch dark"><div class="sizes">
+        <figure><img src="concept-3-portal-tile.svg" width="110" height="110"><figcaption>mark</figcaption></figure>
+        <figure><img src="concept-3-portal-tile.svg" width="32" height="32"><figcaption>32</figcaption></figure>
+        <figure><img src="concept-3-portal-tile.svg" width="16" height="16"><figcaption>16</figcaption></figure>
+      </div></div>
+      <div class="swatch light"><div class="lockup"><img src="concept-3-portal-tile.svg" width="46" height="46"><span class="word">nextra</span></div></div>
+    </div>
+  </section>
+
+  <section class="concept">
+    <h2><span class="num">4</span>Broadcast Frame</h2>
+    <p class="why">A screen frame with the share arrow bursting out through the corner — your screen,
+    leaving the room. Directly tells the product story (share out, no accounts, just a link) and the
+    arrow doubles as the N's diagonal energy.</p>
+    <div class="row">
+      <div class="swatch dark"><div class="sizes">
+        <figure><img src="concept-4-broadcast-frame.svg" width="110" height="110"><figcaption>mark</figcaption></figure>
+        <figure><img src="concept-4-broadcast-frame.svg" width="32" height="32"><figcaption>32</figcaption></figure>
+        <figure><img src="concept-4-broadcast-frame.svg" width="16" height="16"><figcaption>16</figcaption></figure>
+      </div></div>
+      <div class="swatch light"><div class="lockup"><img src="concept-4-broadcast-frame.svg" width="46" height="46"><span class="word">nextra</span></div></div>
+    </div>
+  </section>
+
+  <section class="concept">
+    <h2><span class="num">5</span>Crosscast X</h2>
+    <p class="why">Leans on the other letter in the name: the ✕. Two arrows fan out from one origin —
+    one host, many viewers, plus the viewer-side remote control flowing back. In the wordmark it
+    replaces the x: <strong>ne<span style="color:#5b8def">✕</span>tra</strong>.</p>
+    <div class="row">
+      <div class="swatch dark"><div class="sizes">
+        <figure><img src="concept-5-crosscast.svg" width="110" height="110"><figcaption>mark</figcaption></figure>
+        <figure><img src="concept-5-crosscast.svg" width="32" height="32"><figcaption>32</figcaption></figure>
+        <figure><img src="concept-5-crosscast.svg" width="16" height="16"><figcaption>16</figcaption></figure>
+      </div></div>
+      <div class="swatch light"><div class="lockup">
+        <span class="word">ne</span><img src="concept-5-crosscast.svg" width="46" height="46" style="margin:0 -10px"><span class="word">tra</span>
+      </div></div>
+    </div>
+  </section>
+</main>
+</body>
+</html>
