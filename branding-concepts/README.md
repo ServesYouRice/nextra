@@ -56,5 +56,16 @@ nexus — every mark pictures a connection between two sides:
 | 24 | `concept-24-nexus.svg` | **Nexus** — streams converging from every direction into one bright core; doubles as a star and the ✕ in nextra. |
 | 25 | `concept-25-infinity.svg` | **Infinity Stream** — two loops sharing one continuous woven line, cyan flowing to violet: connection without a break. |
 
+The sixth batch keeps the connection meaning and deluxe finish but adds intricacy —
+real over-under interlacing, threading, and depth:
+
+| # | File | Idea |
+|---|------|------|
+| 26 | `concept-26-braid.svg` | **The Braid** — cyan and violet strands woven over-under three times between four peer nodes; a true weave, not a symbol of one. |
+| 27 | `concept-27-portal-thread.svg` | **Portal Thread** — a luminous thread passes through a tilted ring (in front of the near rim, behind the far rim) ending in a sparkle. |
+| 28 | `concept-28-orbit.svg` | **Orbit** — two interlaced orbital rings, a cyan peer and a violet peer bound to one white-hot core: connection as gravity. |
+| 29 | `concept-29-chainstream.svg` | **Chainstream** — three chain links climbing the N's diagonal, each threaded through the next, cyan fading to violet. |
+| 30 | `concept-30-clasp.svg` | **The Clasp** — two hooks reaching from either side, locked through each other and woven at both crossings. |
+
 These are proposals only — nothing in the app references them yet. If one direction
 wins, the follow-up is to regenerate `public/brand/` and `public/icons/` from it.
