@@ -89,5 +89,21 @@ finishes of the Union N idea:
 | 39 | `concept-39-stitched-n.svg` | **Stitched N** — two pillars sewn together by a thin bright thread woven in front of one and behind the other. |
 | 40 | `concept-40-union-tile.svg` | **Union N Tile** — the Union N in white on a flat blue rounded square: the conventional modern app icon version. |
 
+## Union N · Aurora family (`union-aurora/`)
+
+Concept 36 was chosen as the direction and expanded into a family — open
+`union-aurora/preview-union-aurora.html` to compare, including navbar/dock/favicon
+mocks:
+
+| Variant | File | Recipe |
+|---------|------|--------|
+| 36a | `union-aurora/36a-refined.svg` | Baseline, tuned: longer overlap, balanced terminals, white core on cyan bloom. |
+| 36b | `union-aurora/36b-spark.svg` | Strands stop short; a four-point sparkle bridges the gap. |
+| 36c | `union-aurora/36c-bare.svg` | No tile — the mark alone for navbar/README use. |
+| 36d | `union-aurora/36d-mono.svg` | Strictly the app's current blues; quieter, corporate. |
+| 36e | `union-aurora/36e-bold.svg` | Heavier stems, stronger glow; maximum dock presence. |
+| 36f | `union-aurora/36f-hot.svg` | Cyan→blue meets magenta→violet; loudest contrast. |
+| favicon | `union-aurora/36-favicon.svg` | Dedicated 32px-grid cut with simplified geometry. |
+
 These are proposals only — nothing in the app references them yet. If one direction
 wins, the follow-up is to regenerate `public/brand/` and `public/icons/` from it.

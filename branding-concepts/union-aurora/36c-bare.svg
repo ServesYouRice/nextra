@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Union N Aurora: bare mark">
+  <defs>
+    <linearGradient id="c-ha" gradientUnits="userSpaceOnUse" x1="36" y1="86" x2="66" y2="62">
+      <stop offset="0" stop-color="#4de3ff"/>
+      <stop offset="1" stop-color="#5b8def"/>
+    </linearGradient>
+    <linearGradient id="c-hb" gradientUnits="userSpaceOnUse" x1="84" y1="34" x2="54" y2="58">
+      <stop offset="0" stop-color="#a06bff"/>
+      <stop offset="1" stop-color="#5b8def"/>
+    </linearGradient>
+    <filter id="c-blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4"/>
+    </filter>
+  </defs>
+  <path d="M36 86 L36 34 L66 62" fill="none" stroke="url(#c-ha)"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M84 34 L84 86 L54 58" fill="none" stroke="url(#c-hb)" opacity="0.9"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="60" cy="60" r="6" fill="#4de3ff" filter="url(#c-blur)" opacity="0.8"/>
+  <circle cx="60" cy="60" r="3.6" fill="#ffffff"/>
+</svg>
