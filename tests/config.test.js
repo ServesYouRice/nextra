@@ -126,3 +126,34 @@ test('socket heartbeat defaults tolerate slow watcher links', () => {
     assert.equal(config.SOCKET_PING_INTERVAL_MS, 25000);
     assert.equal(config.SOCKET_PING_TIMEOUT_MS, 60000);
 });
+
+test('config refuses a non-loopback plaintext WHIP bind without acknowledgement', () => {
+    const configPath = path.join(__dirname, '..', 'config.js');
+    const result = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(configPath)})`], {
+        encoding: 'utf8',
+        env: {
+            ...process.env,
+            WHIP_ENABLED: '1',
+            WHIP_BIND_HOST: '0.0.0.0',
+            WHIP_ALLOW_INSECURE_REMOTE: '0',
+        },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Refusing plaintext WHIP listener on non-loopback host/);
+});
+
+test('config accepts an explicitly acknowledged remote WHIP bind', () => {
+    const configPath = path.join(__dirname, '..', 'config.js');
+    const result = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(configPath)})`], {
+        encoding: 'utf8',
+        env: {
+            ...process.env,
+            WHIP_ENABLED: '1',
+            WHIP_BIND_HOST: '0.0.0.0',
+            WHIP_ALLOW_INSECURE_REMOTE: '1',
+        },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+});

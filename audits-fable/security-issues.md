@@ -10,6 +10,8 @@ Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 
 ## S-2 🟠 WHIP bearer tokens use plain HTTP when the listener is widened
 
+**Remediated.** Non-loopback plaintext WHIP binds are now refused unless `WHIP_ALLOW_INSECURE_REMOTE=1` explicitly acknowledges the risk. Acknowledged remote binds log a startup warning, and the supported VPN/TLS reverse-proxy posture is documented.
+
 - **Severity:** High when `WHIP_BIND_HOST` is exposed beyond the local host; not applicable to the loopback default
 - **Blocker:** Conditional
 - **Location:** WHIP side listener in `server.js`; bearer validation in `lib/whipRoutes.js`; `WHIP_BIND_HOST` in `config.js`
@@ -24,6 +26,8 @@ Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 
 ## S-6 🟢 CSP permits inline styles
 
+**Remediated.** The unbuilt-client fallback uses a static stylesheet served from `public/`, and `style-src` no longer permits `'unsafe-inline'`. The production client contains no inline style attributes and the production build passes.
+
 - **Severity:** Low / Medium-low defense-in-depth
 - **Blocker:** No
 - **Location:** Helmet CSP directives and the unbuilt-client fallback in `server.js`
@@ -35,6 +39,8 @@ Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 ---
 
 ## S-10 🟢 FFmpeg defaults to resolution through `PATH`
+
+**Remediated.** Startup resolves FFmpeg to a canonical absolute path before any probe or relay child runs, reports that path and the version banner, and pins subsequent children to the inspected binary. Unattended deployments are documented to configure an absolute trusted `FFMPEG_PATH`.
 
 - **Severity:** Low
 - **Blocker:** No
@@ -50,9 +56,9 @@ The cloudflared resolver is more constrained: system command/cwd candidates are 
 
 ## Trust-model notes that are not vulnerabilities
 
-- The six-character CSPRNG room code is intentionally the viewer credential, and the documentation states that anyone with the code or link can attempt to join. An optional passphrase or approval lobby remains a product enhancement.
+- The six-character CSPRNG room code remains the default viewer credential. Hosts may now opt into a salted-scrypt room passphrase; a host-approval lobby remains an alternative future workflow rather than a second admission system.
 - Remote media control is disabled at server level by default, requires per-room host opt-in, admits only room viewers, invokes a fixed non-interpolated media-key command, and has room-wide plus per-viewer cooldowns. Its PowerShell/xdotool fallback is an explicitly constrained capability, not a current command-injection finding.
 
 ## Current assessment
 
-No unconditional security blocker from the original audit remains. S-2 matters when an operator deliberately broadens the WHIP listener; S-6 and S-10 are defense-in-depth hardening.
+All retained security findings are remediated. A deliberately widened WHIP listener remains plaintext by design and therefore requires explicit acknowledgement plus an encrypted VPN or TLS proxy; the default remains loopback-only. FFmpeg still accepts a bare configured command for desktop convenience, but it is resolved, inspected, and pinned once at startup. No unconditional security blocker from the original audit remains.

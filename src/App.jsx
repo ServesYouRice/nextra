@@ -2,6 +2,7 @@ import React, { lazy, Suspense, useState, useEffect } from 'react';
 import { SocketProvider } from './context/SocketContext';
 import BrandLogo from './components/BrandLogo';
 import ErrorBoundary from './components/ErrorBoundary';
+import { NotificationProvider } from './context/NotificationContext';
 import './index.css';
 
 const HostView = lazy(() => import('./HostView'));
@@ -194,8 +195,10 @@ function NotFound({ route }) {
 
 export default function App() {
     return (
-        <SocketProvider>
-            <Router />
-        </SocketProvider>
+        <NotificationProvider>
+            <SocketProvider>
+                <Router />
+            </SocketProvider>
+        </NotificationProvider>
     );
 }

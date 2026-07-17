@@ -3,6 +3,9 @@ import { useSocket } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { createFmp4RelayPlayer } from './lib/fmp4RelayPlayer';
 import { isAv1PlaybackUnsupported, shouldPreferRelayPlayback } from './lib/watchPlaybackMode.mjs';
+import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
+import { createLifecycleController } from './lib/lifecycleController.mjs';
+import { useViewerSessionController } from './hooks/useViewerSessionController';
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
@@ -71,6 +74,8 @@ export default function WatchView({ initialCode = '' }) {
     const [allowMediaControl, setAllowMediaControl] = useState(false);
     const [isMuted, setIsMuted] = useState(false);
     const [joining, setJoining] = useState(false);
+    const [passphrase, setPassphrase] = useState('');
+    const [passphraseRequired, setPassphraseRequired] = useState(false);
     const [watchLoading, setWatchLoading] = useState(false);
     const [playbackMode, setPlaybackMode] = useState('');
     const [hasTurnServer, setHasTurnServer] = useState(false);
@@ -83,6 +88,7 @@ export default function WatchView({ initialCode = '' }) {
     const [fallbackCodec, setFallbackCodec] = useState(null);
     const [codecUnsupported, setCodecUnsupported] = useState(false);
     const [whipReconnecting, setWhipReconnecting] = useState(false);
+    const [connectionQuality, setConnectionQuality] = useState(null);
 
     const videoRef = useRef(null);
     const deviceRef = useRef(null);
@@ -109,63 +115,27 @@ export default function WatchView({ initialCode = '' }) {
     const reconnectingRef = useRef(false);
     const joiningRef = useRef(false);
 
-    const cleanupPlayback = useCallback(() => {
-        activePlaybackAttemptRef.current += 1;
-
-        if (fmp4PlayerRef.current) {
-            fmp4PlayerRef.current.stop();
-            fmp4PlayerRef.current = null;
-        }
-
-        if (relaySubscribedRef.current) {
-            relaySubscribedRef.current = false;
-            socket.emit('relay-consume-stop');
-        }
-
-        if (relayCleanupRef.current) {
-            try { relayCleanupRef.current(); } catch { }
-            relayCleanupRef.current = null;
-        }
-
-        consumersRef.current.forEach((consumer) => {
-            try { consumer.close(); } catch { }
-        });
-        consumersRef.current = [];
-
-        if (recvTransportRef.current) {
-            const transportId = recvTransportRef.current.id;
-            try {
-                socket.emit('close-viewer-transport', { transportId });
-            } catch { }
-            try { recvTransportRef.current.close(); } catch { }
-            recvTransportRef.current = null;
-        }
-
-        if (objectUrlRef.current) {
-            URL.revokeObjectURL(objectUrlRef.current);
-            objectUrlRef.current = null;
-        }
-
-        if (videoRef.current) {
-            videoRef.current.src = '';
-            videoRef.current.srcObject = null;
-        }
-
-        if (mediaStreamRef.current) {
-            mediaStreamRef.current.getTracks().forEach((track) => {
-                try { track.stop(); } catch { }
-            });
-            mediaStreamRef.current = null;
-        }
-
-        mediaSourceRef.current = null;
-        sourceBufferRef.current = null;
-        chunkQueueRef.current = [];
-        queuedBytesRef.current = 0;
-        userPausedRef.current = false;
-        relayUnsupportedWarnedRef.current = false;
-        setPlaybackMode('');
-    }, [socket]);
+    const cleanupPlayback = useViewerSessionController({
+        socket,
+        setPlaybackMode,
+        refs: {
+            activePlaybackAttemptRef,
+            fmp4PlayerRef,
+            relaySubscribedRef,
+            relayCleanupRef,
+            consumersRef,
+            recvTransportRef,
+            objectUrlRef,
+            videoRef,
+            mediaStreamRef,
+            mediaSourceRef,
+            sourceBufferRef,
+            chunkQueueRef,
+            queuedBytesRef,
+            userPausedRef,
+            relayUnsupportedWarnedRef,
+        },
+    });
 
     const syncMutedState = useCallback((muted) => {
         if (videoRef.current) {
@@ -281,6 +251,30 @@ export default function WatchView({ initialCode = '' }) {
     useEffect(() => {
         playbackModeRef.current = playbackMode;
     }, [playbackMode]);
+
+    useEffect(() => {
+        if (!watching || playbackMode !== 'mediasoup') {
+            setConnectionQuality(null);
+            return undefined;
+        }
+        let active = true;
+        const lifecycle = createLifecycleController();
+        const sample = async () => {
+            try {
+                const report = await recvTransportRef.current?.getStats();
+                if (!active || !report) return;
+                const values = typeof report.values === 'function' ? report.values() : report;
+                setConnectionQuality(summarizeConnectionQuality(values));
+            } catch {
+                if (active) setConnectionQuality(null);
+            }
+        };
+        void sample();
+        const interval = setInterval(sample, 5000);
+        lifecycle.own('stats-interval', () => clearInterval(interval));
+        lifecycle.own('stats-sampler', () => { active = false; });
+        return () => lifecycle.close();
+    }, [watching, playbackMode]);
 
     useEffect(() => {
         fallbackModeRef.current = fallbackMode;
@@ -740,6 +734,11 @@ export default function WatchView({ initialCode = '' }) {
             console.error('[WatchView] Fallback worker failed:', message);
             setFallbackState('error');
         };
+        const onServerRestarting = ({ reconnectAfterMs } = {}) => {
+            const delaySeconds = Math.max(1, Math.ceil((Number(reconnectAfterMs) || 1000) / 1000));
+            setHostReconnectingReason(`Server restarting; reconnecting in about ${delaySeconds}s...`);
+            setError('Server restart in progress. Playback will resume when the server is available.');
+        };
 
         socket.on('host-disconnected', onHostDisconnected);
         socket.on('host-reconnected', onHostReconnected);
@@ -747,6 +746,7 @@ export default function WatchView({ initialCode = '' }) {
         socket.on('producer-closed', onProducerClosed);
         socket.on('whip-status', onWhipStatus);
         socket.on('fallback-error', onFallbackError);
+        socket.on('server-restarting', onServerRestarting);
 
         return () => {
             socket.off('host-disconnected', onHostDisconnected);
@@ -755,6 +755,7 @@ export default function WatchView({ initialCode = '' }) {
             socket.off('producer-closed', onProducerClosed);
             socket.off('whip-status', onWhipStatus);
             socket.off('fallback-error', onFallbackError);
+            socket.off('server-restarting', onServerRestarting);
         };
     }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback]);
 
@@ -843,7 +844,7 @@ export default function WatchView({ initialCode = '' }) {
 
     const joinRoomAndLoadDevice = useCallback(async (roomCode) => {
         const cleanCode = normalizeRoomCode(roomCode);
-        const response = await socketRequest(socket, 'join-room', { code: cleanCode });
+        const response = await socketRequest(socket, 'join-room', { code: cleanCode, passphrase });
         const av1Supported = typeof MediaSource !== 'undefined'
             && MediaSource.isTypeSupported('video/mp4; codecs="av01.0.08M.08"');
         const av1Unsupported = isAv1PlaybackUnsupported({
@@ -873,7 +874,7 @@ export default function WatchView({ initialCode = '' }) {
         if (response.fallbackCodec) setFallbackCodec(response.fallbackCodec);
         setWhipReconnecting(!!response.whipReconnecting);
         return response;
-    }, [socket]);
+    }, [socket, passphrase]);
 
     const handleJoin = useCallback(async () => {
         if (joiningRef.current) return;
@@ -911,6 +912,7 @@ export default function WatchView({ initialCode = '' }) {
             } catch { }
             joinedRoomCodeRef.current = '';
             setJoined(false);
+            if (err.requiresPassphrase) setPassphraseRequired(true);
             setError(err.message);
         } finally {
             joiningRef.current = false;
@@ -1276,6 +1278,19 @@ export default function WatchView({ initialCode = '' }) {
                             {joining ? 'Joining...' : 'Join Room'}
                         </button>
                     </div>
+                    {passphraseRequired && (
+                        <input
+                            type="password"
+                            className="input-code"
+                            placeholder="Room passphrase"
+                            value={passphrase}
+                            onChange={(evt) => setPassphrase(evt.target.value)}
+                            onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
+                            autoComplete="current-password"
+                            disabled={joining}
+                            aria-label="Room passphrase"
+                        />
+                    )}
                     <p className="join-hint" id="joinHint" role="status">
                         {(() => {
                             const codeLength = normalizeRoomCode(codeInput).length;
@@ -1402,6 +1417,15 @@ export default function WatchView({ initialCode = '' }) {
                     </div>
 
                     {playbackStatus && <div className="media-status" role="status">{playbackStatus}</div>}
+
+                    {connectionQuality && (
+                        <details className="connection-quality">
+                            <summary>Connection quality: {connectionQuality.quality}</summary>
+                            <span>RTT {connectionQuality.rttMs == null ? 'n/a' : `${connectionQuality.rttMs.toFixed(0)} ms`}</span>
+                            <span>Jitter {connectionQuality.jitterMs == null ? 'n/a' : `${connectionQuality.jitterMs.toFixed(1)} ms`}</span>
+                            <span>Packets lost {connectionQuality.packetsLost}</span>
+                        </details>
+                    )}
 
                     {mediaControlStatus && (
                         <div className="media-status" role="status">{mediaControlStatus}</div>

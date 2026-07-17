@@ -31,20 +31,4 @@ jobs:
       - run: npm run package:artifact
       - name: Smoke-test packaged executable
         shell: powershell
-        run: |
-          $env:AUTO_PUBLIC_TUNNEL = 'false'
-          $env:OPEN_BROWSER = 'false'
-          $process = Start-Process -FilePath .\Nextra.exe -PassThru -WindowStyle Hidden
-          try {
-            $ready = $false
-            for ($attempt = 0; $attempt -lt 40; $attempt++) {
-              Start-Sleep -Milliseconds 500
-              try {
-                $response = Invoke-RestMethod -Uri http://127.0.0.1:3000/readyz -TimeoutSec 2
-                if ($response.status -eq 'ready') { $ready = $true; break }
-              } catch {}
-            }
-            if (-not $ready) { throw 'Packaged executable did not become ready.' }
-          } finally {
-            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-          }
+        run: .\scripts\smoke-packaged.ps1

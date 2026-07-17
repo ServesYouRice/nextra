@@ -23,24 +23,30 @@
     "build": "vite build",
     "start": "node server.js",
     "lint": "eslint .",
+    "typecheck": "tsc -p jsconfig.lifecycle.json",
     "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=70 --test-coverage-branches=60 --test-coverage-functions=75 --test-coverage-include=lib/roomMediaPipeline.js --test-coverage-include=src/lib/lifecycleController.mjs --test-coverage-include=src/lib/mediasoupClient.js --test-coverage-include=src/lib/fmp4RelayPlayer.js tests/roomMediaPipeline.test.js tests/lifecycleController.test.js tests/mediasoupClient.test.js tests/fmp4RelayPlayer.test.js",
     "package": "npm run release:prep && node scripts/package-app.js",
     "package:artifact": "node scripts/package-app.js",
     "oss:check": "node scripts/opensource-preflight.js",
     "audit:prod": "npm audit --omit=dev && npm --prefix poc-mediasoup audit --omit=dev",
-    "release:prep": "npm run lint && npm test && npm run build && npm run oss:check && npm run audit:prod"
+    "benchmark:runtime": "node scripts/benchmark-runtime.js",
+    "evaluate:packaging": "node scripts/evaluate-packaging.js",
+    "release:prep": "npm run lint && npm run typecheck && npm test && npm run test:coverage && npm run build && npm run evaluate:packaging && npm run oss:check && npm run audit:prod"
   },
   "dependencies": {
     "compression": "^1.8.1",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "helmet": "^8.1.0",
+    "qrcode": "^1.5.4",
     "mediasoup": "^3.21.0",
     "selfsigned": "^5.5.0",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@types/node": "^24.10.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
@@ -55,6 +61,7 @@
     "react-dom": "^19.2.7",
     "rcedit": "^5.0.2",
     "socket.io-client": "^4.8.3",
+    "typescript": "^5.9.3",
     "vite": "^7.3.1"
   },
   "overrides": {

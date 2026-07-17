@@ -13,6 +13,7 @@ const {
     refreshRoomIceServers,
     startRoomCleanup,
     stopRoomCleanup,
+    verifyRoomPassphrase,
 } = require('../lib/rooms');
 const config = require('../config');
 
@@ -45,6 +46,36 @@ test('reclaimHostRoom swaps host ownership using the host token', { concurrency:
         assert.equal(findRoomByHost('host-new')?.code, room.code);
     } finally {
         destroyRoom(room.code);
+    }
+});
+
+test('optional room passphrases are salted, hashed, and asynchronously verified', { concurrency: false }, async () => {
+    const first = createRoom('host-protected-a', { passphrase: 'correct horse battery staple' });
+    const second = createRoom('host-protected-b', { passphrase: 'correct horse battery staple' });
+    try {
+        assert.ok(Buffer.isBuffer(first.passphraseSalt));
+        assert.ok(Buffer.isBuffer(first.passphraseHash));
+        assert.notDeepEqual(first.passphraseSalt, second.passphraseSalt);
+        assert.notDeepEqual(first.passphraseHash, second.passphraseHash);
+        assert.equal(await verifyRoomPassphrase(first, 'correct horse battery staple'), true);
+        assert.equal(await verifyRoomPassphrase(first, 'wrong'), false);
+        assert.equal(await verifyRoomPassphrase(first, ''), false);
+    } finally {
+        destroyRoom(first.code);
+        destroyRoom(second.code);
+    }
+});
+
+test('unprotected rooms remain joinable and reload recovery is opt-in', { concurrency: false }, async () => {
+    const defaultRoom = createRoom('host-default');
+    const recoverableRoom = createRoom('host-recoverable', { reloadRecoveryEnabled: true });
+    try {
+        assert.equal(await verifyRoomPassphrase(defaultRoom, ''), true);
+        assert.equal(defaultRoom.reloadRecoveryEnabled, false);
+        assert.equal(recoverableRoom.reloadRecoveryEnabled, true);
+    } finally {
+        destroyRoom(defaultRoom.code);
+        destroyRoom(recoverableRoom.code);
     }
 });
 
