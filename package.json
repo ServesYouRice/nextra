@@ -35,7 +35,7 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "helmet": "^8.1.0",
-    "mediasoup": "^3.19.17",
+    "mediasoup": "^3.21.0",
     "selfsigned": "^5.5.0",
     "socket.io": "^4.8.3"
   },
