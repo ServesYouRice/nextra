@@ -2,11 +2,11 @@
 
 **Reviewed branch:** `agent/complete-audit-remediation`
 
-**Reviewed commit:** `2ba6c09197fae3863985444f0aa038a2f945bd1c` (`Complete audit remediation`)
+**Remediation base:** `04732dea05bc610414f6dd3ddd30c0d1710fb7e7` (`fable audit update`) plus the current remediation working tree
 
-**Revalidated:** 2026-07-14
+**Revalidated:** 2026-07-16
 
-**Scope:** Current source, configuration, tests, CI, packaging, documentation, and remaining production-readiness risks. No production code was changed by this review.
+**Scope:** Current source, configuration, tests, CI, packaging, documentation, and remaining production-readiness risks. The original remediation changed production code, configuration, workflows, documentation, and focused tests. This follow-up adds a real server/Socket.IO integration gate; UI implementation remains excluded.
 
 ---
 
@@ -43,7 +43,7 @@ The default safety limits are 10 rooms, 10 direct viewers per room, and two simu
 
 The review traced the current implementation and compared every surviving audit claim with the cited code. It also inspected configuration defaults, CI/release workflows, package metadata, and the current test inventory.
 
-`npm test` was run on 2026-07-14: **19 test files, 97 tests passed, 0 failed**.
+`npm test` was run on 2026-07-16: **30 test files, 130 tests passed, 0 failed**. ESLint, the scoped strict lifecycle type-check, the production build, and the focused coverage gate also passed.
 
 This was not a load test, interactive browser/UI audit, formal accessibility assessment, penetration test, legal opinion, or verification of external GitHub signing secrets. Performance conclusions are therefore measurement-gated, UI conclusions are scoped to code review, and the external release gates remain explicit.
 
@@ -66,7 +66,7 @@ Missing tests represent confidence gaps, not proof that production code is broke
 | `logical-issues.md` | Remaining lifecycle and upgrade-hardening findings. |
 | `security-issues.md` | Conditional exposure and defense-in-depth findings. |
 | `performance-issues.md` | Measurement-led capacity questions and one cold-start optimization. |
-| `testing-gaps.md` | Current 97-test coverage map and missing integration/browser/fault coverage. |
+| `testing-gaps.md` | Updated coverage map and remaining integration/browser/fault-injection gaps. |
 | `ui-issues.md` | Scoped UI-review result and limitations. |
 | `nice-to-haves.md` | Optional product, maintainability, and architecture improvements. |
 | `production-readiness.md` | Deployment findings, external release gates, and posture-specific verdict. |
@@ -75,6 +75,6 @@ Missing tests represent confidence gaps, not proof that production code is broke
 
 No launch-blocking correctness or security defect from the original Fable audit remains reproducible in the current tree.
 
-For the intended personal desktop/LAN or opt-in public-sharing posture, no code blocker was identified. A public signed distribution still depends on trusted Windows-signing provisioning and distribution legal review. Unattended or higher-load service deployments additionally require an explicit operational posture and a measured load envelope.
+For the intended personal desktop/LAN or opt-in public-sharing posture, no code blocker was identified. A public signed distribution still depends on trusted Windows-signing provisioning and distribution legal review. Unattended deployment now has a documented single-replica operational contract. Higher-load claims still require running the checked benchmark procedure on the target host with the required real media topology.
 
-The largest remaining engineering risk is confidence: the real server/Socket.IO composition, browser lifecycle, concurrent admission, fallback failure paths, and media topologies do not yet have end-to-end automated coverage.
+The real server composition now has an automated HTTP, operations, Socket.IO admission and payload-cap, mediasoup transport/production/consumption, and zero-resource cleanup gate. Client request retry and fMP4 replacement are covered; fallback allocation failures, FFmpeg backpressure/restart caps, worker recovery decisions, and parallel WHIP/WHEP reservations are deterministic; focused lifecycle coverage thresholds are enforced. The remaining confidence gaps require a browser or real external topology: decoded frame delivery, view/page lifecycle, live child-process replacement, external TURN, and target-host capacity.

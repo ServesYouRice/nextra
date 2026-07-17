@@ -110,7 +110,9 @@ function emitWithAck(socket, event, data, timeoutMs) {
                 return;
             }
 
-            reject(new Error(response.error || response.message || 'Unknown error'));
+            const error = new Error(response.error || response.message || 'Unknown error');
+            Object.assign(error, response);
+            reject(error);
         });
     });
 }
@@ -127,12 +129,13 @@ function isTransientError(err) {
 
 export async function socketRequest(socket, event, data = {}, options = {}) {
     const timeoutMs = options.timeoutMs || 15000;
+    const connectTimeoutMs = options.connectTimeoutMs || 10000;
     const maxAttempts = options.maxAttempts || (RETRYABLE_EVENTS.has(event) ? 2 : 1);
 
     let lastError = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
-            await waitForSocketConnect(socket, 10000);
+            await waitForSocketConnect(socket, connectTimeoutMs);
             return await emitWithAck(socket, event, data, timeoutMs);
         } catch (err) {
             lastError = err;

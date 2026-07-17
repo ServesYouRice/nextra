@@ -1,0 +1,13 @@
+body {
+    max-width: 40rem;
+    margin: 4rem auto;
+    padding: 0 1rem;
+    font-family: system-ui, sans-serif;
+    line-height: 1.5;
+}
+
+pre {
+    padding: 1rem;
+    border-radius: 8px;
+    background: #f4f4f5;
+}

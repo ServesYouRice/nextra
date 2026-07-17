@@ -187,6 +187,8 @@ Tunnel notes:
 
 Open `http://127.0.0.1:3000/#status` on the host machine to see active rooms, WebRTC viewers, relay viewers, WHEP viewers, mediasoup consumers, relay throughput, and socket runtime counters. The page refreshes every 5 seconds and handles restricted or unavailable metrics with a friendly error state.
 
+The JSON metrics and readiness responses also report `fallbackRelay.nvencProbe`. The probe is warmed in the background during startup; `probing` does not make the service unready because the relay can use libx264 when NVENC is unavailable. For capacity tests, record `/api/metrics` repeatedly and correlate room/viewer topology with `process.cpuUsageMicroseconds`, `process.eventLoopDelayMs`, `mediaWorker.resourceUsage`, memory, relay throughput, and signaling acknowledgement latency measured by the load client. CPU counters are cumulative, so calculate the change between samples over the sample interval.
+
 Remote metrics are disabled by default. The in-app dashboard is intended for host/local use; if you expose `/api/metrics` for API access, use `ALLOW_REMOTE_METRICS` and `METRICS_TOKEN` deliberately, and avoid sharing room codes or runtime diagnostics with untrusted viewers.
 
 ---
@@ -227,8 +229,9 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 |---|---|---|
 | `WHIP_ENABLED` | `true` | Enable WHIP ingest endpoint |
 | `WHIP_HTTP_PORT` | `3001` | HTTP port for WHIP endpoint |
-| `WHIP_BIND_HOST` | `127.0.0.1` | Bind address for the WHIP HTTP endpoint |
-| `FFMPEG_PATH` | `ffmpeg` | Path to FFmpeg binary |
+| `WHIP_BIND_HOST` | `127.0.0.1` | Bind address for the plaintext OBS-compatible WHIP endpoint |
+| `WHIP_ALLOW_INSECURE_REMOTE` | `false` | Explicitly acknowledge a non-loopback plaintext WHIP bind; use only behind an encrypted VPN or TLS reverse proxy |
+| `FFMPEG_PATH` | `ffmpeg` | Path to FFmpeg; use an absolute trusted path for unattended deployments |
 | `FALLBACK_FRAGMENT_DURATION_MS` | `500` | fMP4 fragment duration in ms |
 | `FALLBACK_AUDIO_BITRATE` | `192k` | Audio bitrate for relay remux |
 | `FALLBACK_AUDIO_OFFSET_MS` | `1500` | Delay OBS relay audio to keep fMP4 playback in sync |
@@ -289,6 +292,9 @@ Notes:
 | `ALLOW_REMOTE_MEDIA_CONTROL` | `false` | Permit hosts to opt viewers into remote Play/Pause keyboard control |
 | `ALLOW_REMOTE_METRICS` | `false` | Allow `/api/metrics` from non-local clients |
 | `METRICS_TOKEN` | - | Optional bearer token for remote `/api/metrics` API access (send it in the `Authorization` header) |
+| `ENABLE_OPENMETRICS` | `false` | Enable token-gated Prometheus/OpenMetrics output at `/metrics`; requires `METRICS_TOKEN` |
+| `LOG_LEVEL` | `info` | Minimum server log level: `debug`, `info`, `warn`, or `error` |
+| `LOG_FORMAT` | text | Set to `json` for structured JSON logs with HTTP request correlation fields |
 | `MEDIA_DEBUG_LOGS` | `false` | Verbose media-pipeline logging; keep off during normal streams |
 
 See `.env.example` for the full list.
@@ -298,7 +304,7 @@ See `.env.example` for the full list.
 ## Security and Privacy
 
 - Public HTTPS tunnel links and WebRTC DTLS media encryption in transit
-- Room-code based access with no user accounts
+- Room-code based access with no user accounts; hosts may opt into an additional room passphrase
 - Rate limiting and connection limits on signaling
 - OBS WebSocket communication is localhost-only
 - Remote media control is host-controllable per room
@@ -308,7 +314,8 @@ See `.env.example` for the full list.
 
 Important limits:
 
-- Anyone with the room code or share link can attempt to join.
+- By default, anyone with the room code or share link can attempt to join. Hosts can set an optional passphrase under **Advanced settings**; browser viewers are prompted after entering the code, while WHEP clients send `Authorization: Bearer <passphrase>`. Only a salted scrypt hash is kept in ephemeral room state.
+- **Allow recovery after reload** stores the room code and reclaim token in tab-scoped session storage and preserves an opted-in room for the host reconnect grace (30 seconds by default). OBS remains attached; browser capture requires clicking **Resume Sharing** and selecting a screen again. Explicit stop still ends the room immediately.
 - Tunnel providers, TURN servers, ISPs, and network operators are external parties.
 - Treat this as secure-by-default self-hosted software, not a zero-trust system.
 
@@ -331,6 +338,8 @@ Important limits:
 ## Operations and supported scale
 
 The default limits are intentionally conservative for one desktop process: 10 rooms, 10 direct viewers per room, and 2 simultaneous FFmpeg fallback pipelines. They are safety limits, not a benchmark guarantee. Raise them only after measuring CPU, memory, relay throughput, and event-loop delay on the target host through the local `/api/metrics` endpoint.
+
+Use `npm run benchmark:runtime` with the real room/media topology to capture a threshold-checked JSON result. The full warm-up, repetition, topology, and architecture decision procedure is in [`docs/performance-benchmark.md`](docs/performance-benchmark.md). Optional single-replica supervisor guidance is in [`docs/service-deployment.md`](docs/service-deployment.md), and the maintained executable migration assessment is in [`docs/packaging-evaluation.md`](docs/packaging-evaluation.md).
 
 - `/healthz` is an unauthenticated process-liveness check.
 - `/readyz` returns 200 only after the HTTP, Socket.IO, and mediasoup worker layers are ready; it returns 503 during startup and shutdown.
@@ -375,6 +384,10 @@ npm run package      # build Nextra.exe + sha256
 ```
 
 `npm run package` builds `Nextra.exe`, writes `Nextra.exe.sha256`, and bundles runtime dependencies.
+
+Remote Play/Pause control uses the native Windows media-key fallback by default and
+`xdotool` on Linux. The dynamically detected `@nut-tree-fork/nut-js` integration is
+optional and is not part of the supported default installation.
 
 If `cloudflared` is not available locally, packaging downloads the exact immutable
 release declared in `scripts/cloudflared-manifest.json`. Packaging rejects the

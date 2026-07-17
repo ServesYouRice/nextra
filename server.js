@@ -1,5 +1,7 @@
 // server.js - Entry point: Express + Socket.io + Mediasoup
 require('dotenv').config();
+const { installConsoleLogger, runWithLogContext } = require('./lib/logger');
+installConsoleLogger();
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -27,6 +29,9 @@ const {
     stopJoinCleanup,
     getSocketRuntimeMetrics,
     destroyRoomWithReason,
+    startFallbackRelay,
+    stopFallbackRelay,
+    emitHostMetrics,
 } = require('./lib/socket');
 const { startRoomCleanup, stopRoomCleanup, getAllRoomStats } = require('./lib/rooms');
 const { getOrCreateCert } = require('./lib/https');
@@ -41,10 +46,16 @@ const {
     shouldTrustForwardedHeaders,
     getTrustedForwardedClientIp,
 } = require('./lib/network');
-const { createWhipRouter, setIo: setWhipIo } = require('./lib/whipRoutes');
+const { createWhipRouter, setIo: setWhipIo, setMediaLifecycle: setWhipMediaLifecycle } = require('./lib/whipRoutes');
 const { createWhepRouter } = require('./lib/whepRoutes');
+const { warmNvencProbe, getNvencProbeStatus } = require('./lib/ffmpegRelay');
 const { findAvailablePort } = require('./lib/portResolver');
+const { resolveExecutablePath } = require('./lib/executable');
+const { renderOpenMetrics } = require('./lib/openMetrics');
+const { decideWorkerDeathAction } = require('./lib/workerRecovery');
 const { execFile, execFileSync } = require('child_process');
+
+setWhipMediaLifecycle({ startFallbackRelay, stopFallbackRelay, emitHostMetrics });
 
 // Process-level safety net. Without these, a single stray promise rejection or
 // uncaught exception terminates the whole process on modern Node, dropping every
@@ -77,6 +88,12 @@ let whipHttpServer = null;
 let serviceReady = false;
 let tunnelRestartTimer = null;
 let tunnelRestartAttempts = 0;
+let requestGracefulShutdown = null;
+
+app.use((req, _res, next) => {
+    const requestId = String(req.headers['x-request-id'] || crypto.randomUUID()).slice(0, 128);
+    runWithLogContext({ requestId, method: req.method, path: req.path }, next);
+});
 
 function getLocalProtocol() {
     return config.LOCAL_HTTPS ? 'https' : 'http';
@@ -121,7 +138,7 @@ app.use(helmet({
         directives: {
             defaultSrc: ["'self'"],
             scriptSrc: ["'self'", (_req, res) => `'nonce-${res.locals.cspNonce}'`],
-            styleSrc: ["'self'", "'unsafe-inline'"],
+            styleSrc: ["'self'"],
             fontSrc: ["'self'"],
             connectSrc: ["'self'", 'ws:', 'wss:'],
             imgSrc: ["'self'", 'data:', 'blob:'],
@@ -754,7 +771,7 @@ app.post('/api/cloudflare-turn-credentials', async (req, res) => {
     }
 });
 
-app.get('/api/metrics', (req, res) => {
+app.get('/api/metrics', async (req, res) => {
     const clientIp = getRequestClientIp(req);
     const isLocalClient = isLocalClientIp(clientIp);
     if (!config.ALLOW_REMOTE_METRICS && !isLocalClient) {
@@ -776,13 +793,22 @@ app.get('/api/metrics', (req, res) => {
     const totalRelayViewers = rooms.reduce((sum, room) => sum + room.relayViewerCount, 0);
     const totalWhepViewers = rooms.reduce((sum, room) => sum + (room.whepViewerCount || 0), 0);
     const totalConsumers = rooms.reduce((sum, room) => sum + room.mediasoupConsumerCount, 0);
+    let mediaWorkerResourceUsage = null;
+    if (worker && !worker.closed) {
+        try {
+            mediaWorkerResourceUsage = await worker.getResourceUsage();
+        } catch (err) {
+            console.warn(`[Metrics] Could not sample mediasoup worker resource usage: ${err.message}`);
+        }
+    }
 
-    res.json({
+    const payload = {
         generatedAt: new Date().toISOString(),
         runtimeShareBaseUrl,
         process: {
             uptimeSec: Math.floor(process.uptime()),
             memory: process.memoryUsage(),
+            cpuUsageMicroseconds: process.cpuUsage(),
             eventLoopDelayMs: {
                 mean: Number.isFinite(eventLoopDelay.mean) ? eventLoopDelay.mean / 1e6 : 0,
                 p95: eventLoopDelay.percentile(95) / 1e6,
@@ -799,7 +825,88 @@ app.get('/api/metrics', (req, res) => {
             sensitiveFieldsIncluded: includeSensitiveRoomFields,
         },
         sockets: getSocketRuntimeMetrics(),
+        fallbackRelay: {
+            nvencProbe: getNvencProbeStatus(),
+        },
+        mediaWorker: {
+            resourceUsage: mediaWorkerResourceUsage,
+        },
+    };
+    res.json(payload);
+    // Benchmark clients can request interval-local histogram values. Access is
+    // already protected by the metrics authorization above; normal dashboard
+    // reads retain the existing process-lifetime histogram semantics.
+    if (req.query.resetEventLoopDelay === 'true') eventLoopDelay.reset();
+});
+
+app.get('/metrics', (req, res) => {
+    if (!config.ENABLE_OPENMETRICS) {
+        res.status(404).type('text/plain').send('OpenMetrics exporter is disabled.\n');
+        return;
+    }
+    if (!config.METRICS_TOKEN) {
+        res.status(503).type('text/plain').send('METRICS_TOKEN is required when OpenMetrics is enabled.\n');
+        return;
+    }
+    if (!isMetricsTokenAuthorized(req)) {
+        res.status(401).set('WWW-Authenticate', 'Bearer').type('text/plain').send('Metrics token required.\n');
+        return;
+    }
+
+    const rooms = getAllRoomStats();
+    const processMetrics = {
+        uptimeSec: Math.floor(process.uptime()),
+        memory: process.memoryUsage(),
+        eventLoopDelayMs: {
+            p95: eventLoopDelay.percentile(95) / 1e6,
+        },
+    };
+    res.set('Cache-Control', 'no-store');
+    res.type('application/openmetrics-text; version=1.0.0; charset=utf-8');
+    res.send(renderOpenMetrics({
+        processMetrics,
+        rooms: {
+            active: rooms.length,
+            totalViewers: rooms.reduce((sum, room) => sum + room.viewerCount, 0),
+            totalRelayViewers: rooms.reduce((sum, room) => sum + room.relayViewerCount, 0),
+            totalWhepViewers: rooms.reduce((sum, room) => sum + (room.whepViewerCount || 0), 0),
+            totalMediasoupConsumers: rooms.reduce((sum, room) => sum + room.mediasoupConsumerCount, 0),
+        },
+        sockets: getSocketRuntimeMetrics(),
+    }));
+});
+
+app.get('/api/package-info', (req, res) => {
+    if (!isLocalClientIp(getRequestClientIp(req))) {
+        res.status(403).json({ error: 'Package information is only available locally.' });
+        return;
+    }
+    const exists = (name) => fs.existsSync(path.join(__dirname, name));
+    res.set('Cache-Control', 'no-store').json({
+        version: require('./package.json').version,
+        packaged: process.env.NEXTRA_PACKAGED === '1',
+        artifacts: {
+            license: exists('LICENSE'),
+            notices: exists('THIRD_PARTY_NOTICES.md'),
+            sourceInstructions: exists('SOURCE.md'),
+            sbom: exists('SBOM.cdx.json'),
+        },
     });
+});
+
+// Kept behind an explicit process-local test flag so release CI can exercise the
+// real graceful-shutdown path without exposing a production control endpoint.
+app.post('/api/test/shutdown', (req, res) => {
+    if (process.env.NEXTRA_SMOKE_TEST !== '1' || !isLocalClientIp(getRequestClientIp(req))) {
+        res.status(404).end();
+        return;
+    }
+    if (!requestGracefulShutdown) {
+        res.status(503).json({ error: 'Shutdown handler is not ready.' });
+        return;
+    }
+    res.status(202).json({ status: 'shutting-down' });
+    void requestGracefulShutdown('SMOKE_TEST');
 });
 
 app.get('/healthz', (_req, res) => {
@@ -813,11 +920,15 @@ app.get('/readyz', (_req, res) => {
         mediaWorker: !!worker,
         socketServer: !!ioServer,
         whip: whipHttpStatus,
+        fallbackRelay: {
+            nvencProbe: getNvencProbeStatus(),
+        },
     });
 });
 
 const distDir = path.join(__dirname, 'dist');
 const indexHtmlPath = path.join(distDir, 'index.html');
+const buildRequiredCssPath = path.join(__dirname, 'public', 'build-required.css');
 let indexHtmlTemplate = null;
 let indexHtmlMtimeMs = 0;
 
@@ -852,6 +963,11 @@ app.use(express.static(distDir, {
         }
     },
 }));
+// Kept outside dist so the source-tree error page remains styled precisely when
+// the production bundle has not been built yet.
+app.get('/build-required.css', (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=86400').sendFile(buildRequiredCssPath);
+});
 // Unknown /api/* paths must return a JSON 404, not fall through to the SPA
 // catch-all below (which would send a 200 HTML document and break callers doing
 // res.json()). Every real /api route is registered above this point, so reaching
@@ -884,12 +1000,13 @@ app.get('/{*splat}', (req, res) => {
         res.status(503).type('html').send(
             '<!doctype html><meta charset="utf-8">'
             + '<title>Nextra - build required</title>'
-            + '<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;line-height:1.5">'
+            + '<link rel="stylesheet" href="/build-required.css">'
+            + '<body>'
             + '<h1>Nextra is not built yet</h1>'
             + '<p>The production client bundle (<code>dist/</code>) was not found. '
             + 'This usually means <code>npm start</code> was run from source without building first.</p>'
             + '<p>Build it once, then start again:</p>'
-            + '<pre style="background:#f4f4f5;padding:1rem;border-radius:8px">npm run build\nnpm start</pre>'
+            + '<pre>npm run build\nnpm start</pre>'
             + '<p>For development with hot reload, run <code>npm run dev</code> instead.</p>'
             + '</body>'
         );
@@ -1163,6 +1280,11 @@ async function startWhipHttpServer(whipRouter) {
     if (config.TRUST_X_FORWARDED_HEADERS) {
         console.log('Forwarded header trust: enabled for loopback proxy peers only.');
     }
+    if (config.WHIP_ALLOW_INSECURE_REMOTE
+        && config.WHIP_BIND_HOST.toLowerCase() !== 'localhost'
+        && !isLoopbackIp(config.WHIP_BIND_HOST)) {
+        console.warn('[Security] Plaintext WHIP is bound beyond loopback by explicit acknowledgement. Protect it with an encrypted VPN or TLS reverse proxy.');
+    }
 
     let appServer = null;
     let isShuttingDown = false;
@@ -1177,19 +1299,50 @@ async function startWhipHttpServer(whipRouter) {
     worker = result.worker;
     console.log(`Mediasoup Worker PID: ${worker.pid}`);
 
+    // Resolve and pin FFmpeg before any capability probe or relay process uses
+    // it. This prevents later PATH changes from selecting a different binary.
+    let ffmpegAvailable = false;
+    if (config.WHIP_ENABLED) {
+        try {
+            const resolvedFfmpegPath = resolveExecutablePath(config.FFMPEG_PATH);
+            if (!resolvedFfmpegPath) throw new Error(`could not resolve ${config.FFMPEG_PATH}`);
+            const versionOutput = execFileSync(resolvedFfmpegPath, ['-version'], {
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+            });
+            const version = String(versionOutput).split(/\r?\n/, 1)[0].trim() || 'version unknown';
+            config.FFMPEG_PATH = resolvedFfmpegPath;
+            ffmpegAvailable = true;
+            console.log(`[Startup] FFmpeg found — OBS fallback available (${version}; ${resolvedFfmpegPath})`);
+        } catch (err) {
+            console.warn(`[Startup] FFmpeg not found — OBS fallback will not work (${err.message})`);
+        }
+    }
+
+    // Resolve the one-time encoder capability check in the background so the
+    // first fallback viewer does not wait up to the probe timeout. NVENC is an
+    // optimization, not a readiness dependency: libx264 remains the fallback.
+    if (config.WHIP_ENABLED && ffmpegAvailable) {
+        warmNvencProbe()
+            .then((available) => {
+                console.log(`[Startup] FFmpeg NVENC relay encoder: ${available ? 'available' : 'unavailable; libx264 will be used'}`);
+            })
+            .catch((err) => {
+                console.warn(`[Startup] FFmpeg NVENC probe failed: ${err.message}`);
+            });
+    }
+
     // If the mediasoup worker subprocess dies, the media engine is gone and every
     // room is dead. Rather than leave clients stuck, restart the whole process so
     // viewers and OBS reconnect on their own (browser-capture hosts re-share).
     setWorkerDeathHandler(() => {
-        // During an intentional shutdown (SIGINT/SIGTERM) the worker dies as a
-        // side effect of the process exiting — don't treat that as a crash or
-        // try to relaunch.
-        if (isShuttingDown) return;
+        const recoveryAction = decideWorkerDeathAction({
+            isShuttingDown,
+            uptimeSeconds: process.uptime(),
+        });
+        if (recoveryAction === 'ignore') return;
 
-        // Guard against crash loops: only auto-restart if we were up long enough
-        // that this looks like a genuine runtime crash rather than a broken start.
-        const MIN_UPTIME_SECONDS = 30;
-        if (process.uptime() < MIN_UPTIME_SECONDS) {
+        if (recoveryAction === 'exit') {
             console.error('[recovery] Media engine crashed during startup - not auto-restarting to avoid a crash loop.');
             cleanupGlobalResources();
             process.exit(1);
@@ -1225,16 +1378,6 @@ async function startWhipHttpServer(whipRouter) {
             finish();
         }
     });
-
-    // Check FFmpeg availability for OBS fallback
-    if (config.WHIP_ENABLED) {
-        try {
-            execFileSync(config.FFMPEG_PATH, ['-version'], { stdio: 'ignore' });
-            console.log('[Startup] FFmpeg found — OBS fallback available');
-        } catch {
-            console.warn('[Startup] FFmpeg not found — OBS fallback will not work');
-        }
-    }
 
     // Mount WHIP routes on the main app and a separate HTTP server.
     // OBS cannot connect to self-signed HTTPS reliably, so we expose WHIP over HTTP.
@@ -1358,9 +1501,14 @@ async function startWhipHttpServer(whipRouter) {
     });
 
     async function shutdown(signal) {
+        if (isShuttingDown) return;
         isShuttingDown = true;
         serviceReady = false;
         console.log(`\n${signal} received. Shutting down gracefully...`);
+        if (ioServer) {
+            ioServer.emit('server-restarting', { reconnectAfterMs: 1500 });
+            await new Promise((resolve) => setTimeout(resolve, 150));
+        }
         cleanupGlobalResources();
 
         appServer.close(() => {
@@ -1373,6 +1521,8 @@ async function startWhipHttpServer(whipRouter) {
         // so exit 0 — a non-zero code is misreported as a startup failure.
         setTimeout(() => process.exit(0), 5000);
     }
+
+    requestGracefulShutdown = shutdown;
 
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));

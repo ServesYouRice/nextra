@@ -20,6 +20,10 @@ Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 
 **Action.** Benchmark the supported load envelope using worker CPU and the existing process/event-loop metrics. Add room-affine worker/router pooling only if measurements show the worker is the limiting resource or worker-level failure isolation becomes a product requirement.
 
+**Repository work complete; target-host evidence pending.** `/api/metrics` now includes cumulative process CPU counters and mediasoup worker resource usage alongside event-loop delay, memory, topology, and relay counters. The checked benchmark harness asserts the required room/fallback topology and applies documented thresholds. Establishing a supported load envelope still requires benchmark runs on the target host; no worker-pool architecture change is justified until those results exist.
+
+The runnable procedure is `npm run benchmark:runtime`; `docs/performance-benchmark.md` defines the topology matrix, three-run evidence requirement, and acceptance thresholds.
+
 ---
 
 ## P-2 🟡 Relay processing shares the signaling event loop
@@ -32,6 +36,10 @@ Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 
 **Action.** Measure event-loop delay and request/acknowledgement latency under the two-pipeline worst case. Move depacketization, parsing, or fanout to worker threads/a relay process only if a defined threshold is exceeded.
 
+**Repository work complete; target-host evidence pending.** The runtime harness measures end-to-end Socket.IO acknowledgement latency and refuses a P-2 run unless the required two rooms and two active fallback pipelines are present. Moving relay work off-thread remains measurement-gated.
+
+The runtime harness supplies that acknowledgement measurement. Its default gate is zero timeouts, at most 100 ms p95 acknowledgement latency, 50 ms event-loop p95, and 200 ms event-loop max during the two-pipeline run.
+
 ---
 
 ## P-7 🟢 The first fallback relay waits for an NVENC probe
@@ -43,6 +51,8 @@ Legend: 🔴 Critical · 🟠 High · 🟡 Medium · 🟢 Low
 **Problem.** The first fallback relay runs a real one-frame FFmpeg/NVENC encode probe. Its result is cached, but a hung or unusually slow FFmpeg can delay that first relay by up to the five-second probe timeout.
 
 **Fix.** Warm the cached probe during startup or expose its state in readiness/diagnostics so the first fallback viewer does not pay the cold-start cost.
+
+**Remediated.** The cached probe is now started asynchronously after the media worker initializes. Its state and duration are exposed as `fallbackRelay.nvencProbe` in `/readyz` and `/api/metrics`; probe completion is deliberately not a readiness gate because libx264 remains the supported fallback.
 
 ---
 
