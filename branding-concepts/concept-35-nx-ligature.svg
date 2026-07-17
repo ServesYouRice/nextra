@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Nextra concept: NX ligature">
+  <defs>
+    <linearGradient id="c35-g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#72a0f5"/>
+      <stop offset="1" stop-color="#4a6fd4"/>
+    </linearGradient>
+  </defs>
+  <path d="M34 82 L34 60 Q34 48 46 48 Q58 48 58 60 L58 82" fill="none"
+        stroke="url(#c35-g)" stroke-width="10" stroke-linecap="round"/>
+  <path d="M66 50 L90 80" fill="none" stroke="url(#c35-g)"
+        stroke-width="10" stroke-linecap="round"/>
+  <path d="M90 50 L66 80" fill="none" stroke="#8fb5f7"
+        stroke-width="10" stroke-linecap="round"/>
+  <circle cx="78" cy="65" r="4" fill="#4de3ff"/>
+</svg>
