@@ -67,5 +67,16 @@ real over-under interlacing, threading, and depth:
 | 29 | `concept-29-chainstream.svg` | **Chainstream** — three chain links climbing the N's diagonal, each threaded through the next, cyan fading to violet. |
 | 30 | `concept-30-clasp.svg` | **The Clasp** — two hooks reaching from either side, locked through each other and woven at both crossings. |
 
+The seventh batch is deliberately standard: classic professional marks where the
+connection idea lives inside the N (or the name) itself:
+
+| # | File | Idea |
+|---|------|------|
+| 31 | `concept-31-node-n.svg` | **Node N** — monoline N as a network path with nodes at all four terminals and a relay point mid-diagonal. |
+| 32 | `concept-32-union-n.svg` | **Union N** — two strokes, one from each side, overlap mid-diagonal: the N only exists because the two sides meet. |
+| 33 | `concept-33-beacon-n.svg` | **Beacon N** — the right stem ends short with a dot floating above it: the peer coming online, the connection about to complete. |
+| 34 | `concept-34-ring-n.svg` | **Ring N** — the N monogram inside a ring (the room) with two nodes on the ring along the diagonal's axis. |
+| 35 | `concept-35-nx-ligature.svg` | **NX Ligature** — lowercase n beside an x whose two strokes cross at a glowing meeting point; reads "nx". |
+
 These are proposals only — nothing in the app references them yet. If one direction
 wins, the follow-up is to regenerate `public/brand/` and `public/icons/` from it.
