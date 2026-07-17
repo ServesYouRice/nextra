@@ -41,7 +41,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
-    "@types/react": "^19.2.7",
+    "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
     "caxa": "^3.0.1",
@@ -51,8 +51,8 @@
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
     "mediasoup-client": "^3.18.7",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "rcedit": "^5.0.2",
     "socket.io-client": "^4.8.3",
     "vite": "^7.3.1"
