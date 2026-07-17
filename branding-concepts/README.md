@@ -78,5 +78,16 @@ connection idea lives inside the N (or the name) itself:
 | 34 | `concept-34-ring-n.svg` | **Ring N** — the N monogram inside a ring (the room) with two nodes on the ring along the diagonal's axis. |
 | 35 | `concept-35-nx-ligature.svg` | **NX Ligature** — lowercase n beside an x whose two strokes cross at a glowing meeting point; reads "nx". |
 
+The eighth batch refines the standard N+connection lane, including two hybrid
+finishes of the Union N idea:
+
+| # | File | Idea |
+|---|------|------|
+| 36 | `concept-36-union-aurora.svg` | **Union N Aurora** — cyan stroke from the host side, violet from the viewer side, meeting mid-diagonal in a white-hot point on the deluxe tile. |
+| 37 | `concept-37-twoway-n.svg` | **Two-Way N** — the stems are the machines; the diagonal is two arrows: stream down, remote control back up. |
+| 38 | `concept-38-sparkgap-n.svg` | **Spark Gap N** — a standard N whose diagonal breaks mid-way, bridged by a cyan spark. |
+| 39 | `concept-39-stitched-n.svg` | **Stitched N** — two pillars sewn together by a thin bright thread woven in front of one and behind the other. |
+| 40 | `concept-40-union-tile.svg` | **Union N Tile** — the Union N in white on a flat blue rounded square: the conventional modern app icon version. |
+
 These are proposals only — nothing in the app references them yet. If one direction
 wins, the follow-up is to regenerate `public/brand/` and `public/icons/` from it.

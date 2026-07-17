@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Nextra concept: Union N Tile">
+  <defs>
+    <linearGradient id="c40-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6b9af1"/>
+      <stop offset="1" stop-color="#4a6fd4"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="104" height="104" rx="27" fill="url(#c40-tile)"/>
+  <path d="M36 84 L36 36 L64 62" fill="none" stroke="#ffffff"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M84 36 L84 84 L56 60" fill="none" stroke="#cfe0ff" opacity="0.92"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
