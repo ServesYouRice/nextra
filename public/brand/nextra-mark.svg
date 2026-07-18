@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Nextra mark">
+  <defs>
+    <linearGradient id="nm-ha" gradientUnits="userSpaceOnUse" x1="36" y1="86" x2="66" y2="62">
+      <stop offset="0" stop-color="#4de3ff"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="nm-hb" gradientUnits="userSpaceOnUse" x1="84" y1="34" x2="54" y2="58">
+      <stop offset="0" stop-color="#ff5ce1"/>
+      <stop offset="1" stop-color="#a06bff"/>
+    </linearGradient>
+    <filter id="nm-blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4"/>
+    </filter>
+  </defs>
+  <path d="M36 86 L36 34 L66 62" fill="none" stroke="url(#nm-ha)"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M84 34 L84 86 L54 58" fill="none" stroke="url(#nm-hb)" opacity="0.92"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="60" cy="60" r="6" fill="#ff5ce1" filter="url(#nm-blur)" opacity="0.75"/>
+  <circle cx="60" cy="60" r="3.6" fill="#ffffff"/>
+</svg>

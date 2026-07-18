@@ -1,5 +1,11 @@
 # Nextra logo concepts
 
+> **Final decision:** Union N · Aurora, hot palette (concept 36f,
+> `union-aurora/36f-hot.svg`) was chosen and productionized. The shipped sources
+> live in `public/brand/*.svg` and all `public/icons/` PNGs, both `.ico` files,
+> and the brand PNGs are generated from them. This folder remains as the
+> exploration archive.
+
 Five alternative logo directions for Nextra, all drawn on the app's existing palette
 (accent `#5b8def`, light `#a9c4f7`, deep `#4a6fd4`) so any of them drops into the
 current UI without a restyle. Open `preview.html` in a browser to compare them on
