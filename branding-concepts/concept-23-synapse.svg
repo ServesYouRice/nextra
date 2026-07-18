@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Nextra concept: Synapse">
+  <defs>
+    <linearGradient id="c23-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#171a26"/>
+      <stop offset="1" stop-color="#0b0c12"/>
+    </linearGradient>
+    <linearGradient id="c23-aurora" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#4de3ff"/>
+      <stop offset="0.5" stop-color="#5b8def"/>
+      <stop offset="1" stop-color="#a06bff"/>
+    </linearGradient>
+    <radialGradient id="c23-orb-a" cx="0.35" cy="0.35" r="0.9">
+      <stop offset="0" stop-color="#eaf9ff"/>
+      <stop offset="1" stop-color="#4de3ff"/>
+    </radialGradient>
+    <radialGradient id="c23-orb-b" cx="0.35" cy="0.35" r="0.9">
+      <stop offset="0" stop-color="#f0eaff"/>
+      <stop offset="1" stop-color="#a06bff"/>
+    </radialGradient>
+    <filter id="c23-blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+  </defs>
+  <rect x="8" y="8" width="104" height="104" rx="27" fill="url(#c23-tile)"
+        stroke="rgba(255,255,255,0.08)" stroke-width="2"/>
+  <g filter="url(#c23-blur)" opacity="0.7">
+    <path d="M42 68 C55 62 65 58 78 52" fill="none" stroke="url(#c23-aurora)" stroke-width="7"/>
+    <circle cx="34" cy="72" r="10" fill="#4de3ff"/>
+    <circle cx="86" cy="48" r="10" fill="#a06bff"/>
+  </g>
+  <path d="M42 68 C55 62 65 58 78 52" fill="none" stroke="url(#c23-aurora)"
+        stroke-width="6" stroke-linecap="round"/>
+  <circle cx="34" cy="72" r="9" fill="url(#c23-orb-a)"/>
+  <circle cx="86" cy="48" r="9" fill="url(#c23-orb-b)"/>
+  <circle cx="60" cy="60" r="7" fill="#4de3ff" filter="url(#c23-blur)" opacity="0.9"/>
+  <path d="M60 51 Q61.6 58.4 69 60 Q61.6 61.6 60 69 Q58.4 61.6 51 60 Q58.4 58.4 60 51 Z"
+        fill="#ffffff"/>
+</svg>

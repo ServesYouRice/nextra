@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Union N Aurora: refined">
+  <defs>
+    <linearGradient id="a-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#171a26"/>
+      <stop offset="1" stop-color="#0b0c12"/>
+    </linearGradient>
+    <linearGradient id="a-ha" gradientUnits="userSpaceOnUse" x1="36" y1="86" x2="66" y2="62">
+      <stop offset="0" stop-color="#4de3ff"/>
+      <stop offset="1" stop-color="#5b8def"/>
+    </linearGradient>
+    <linearGradient id="a-hb" gradientUnits="userSpaceOnUse" x1="84" y1="34" x2="54" y2="58">
+      <stop offset="0" stop-color="#a06bff"/>
+      <stop offset="1" stop-color="#5b8def"/>
+    </linearGradient>
+    <filter id="a-blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+  </defs>
+  <rect x="8" y="8" width="104" height="104" rx="27" fill="url(#a-tile)"
+        stroke="rgba(255,255,255,0.08)" stroke-width="2"/>
+  <g filter="url(#a-blur)" opacity="0.6" fill="none" stroke-width="13"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M36 86 L36 34 L66 62" stroke="url(#a-ha)"/>
+    <path d="M84 34 L84 86 L54 58" stroke="url(#a-hb)"/>
+  </g>
+  <path d="M36 86 L36 34 L66 62" fill="none" stroke="url(#a-ha)"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M84 34 L84 86 L54 58" fill="none" stroke="url(#a-hb)" opacity="0.88"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="60" cy="60" r="7" fill="#4de3ff" filter="url(#a-blur)" opacity="0.9"/>
+  <circle cx="60" cy="60" r="3.8" fill="#ffffff"/>
+</svg>

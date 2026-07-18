@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Nextra concept: Neon Marquee Deluxe">
+  <defs>
+    <linearGradient id="c20-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14161f"/>
+      <stop offset="1" stop-color="#090a0f"/>
+    </linearGradient>
+    <linearGradient id="c20-aurora" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#4de3ff"/>
+      <stop offset="0.5" stop-color="#5b8def"/>
+      <stop offset="1" stop-color="#a06bff"/>
+    </linearGradient>
+    <filter id="c20-glow-wide" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <filter id="c20-glow-mid" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3"/>
+    </filter>
+    <filter id="c20-soft" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="2"/>
+    </filter>
+    <clipPath id="c20-clip"><rect x="8" y="8" width="104" height="104" rx="27"/></clipPath>
+  </defs>
+  <rect x="8" y="8" width="104" height="104" rx="27" fill="url(#c20-tile)"
+        stroke="rgba(255,255,255,0.09)" stroke-width="2"/>
+  <g clip-path="url(#c20-clip)">
+    <path d="M38 82 L38 36 L82 82 L82 36" transform="translate(0 172) scale(1 -1)"
+          fill="none" stroke="url(#c20-aurora)" stroke-width="6"
+          stroke-linecap="round" stroke-linejoin="round"
+          filter="url(#c20-soft)" opacity="0.14"/>
+  </g>
+  <path d="M38 82 L38 36 L82 82 L82 36" fill="none" stroke="url(#c20-aurora)"
+        stroke-width="14" stroke-linecap="round" stroke-linejoin="round"
+        filter="url(#c20-glow-wide)" opacity="0.85"/>
+  <path d="M38 82 L38 36 L82 82 L82 36" fill="none" stroke="url(#c20-aurora)"
+        stroke-width="8" stroke-linecap="round" stroke-linejoin="round"
+        filter="url(#c20-glow-mid)"/>
+  <path d="M38 82 L38 36 L82 82 L82 36" fill="none" stroke="#eaf3ff"
+        stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M92 20 Q93.5 26.5 100 28 Q93.5 29.5 92 36 Q90.5 29.5 84 28 Q90.5 26.5 92 20 Z"
+        fill="#ffffff" opacity="0.9"/>
+</svg>

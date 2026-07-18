@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Nextra concept: Nexus">
+  <defs>
+    <linearGradient id="c24-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#171a26"/>
+      <stop offset="1" stop-color="#0b0c12"/>
+    </linearGradient>
+    <linearGradient id="c24-aurora" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#4de3ff"/>
+      <stop offset="0.5" stop-color="#5b8def"/>
+      <stop offset="1" stop-color="#a06bff"/>
+    </linearGradient>
+    <filter id="c24-blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+    <g id="c24-rays" fill="none" stroke="url(#c24-aurora)" stroke-width="7" stroke-linecap="round">
+      <path d="M92.8 68.8 L71.6 63.1"/>
+      <path d="M68.8 92.8 L63.1 71.6"/>
+      <path d="M36 84 L51.5 68.5"/>
+      <path d="M27.2 51.2 L48.4 56.9"/>
+      <path d="M51.2 27.2 L56.9 48.4"/>
+      <path d="M84 36 L68.5 51.5"/>
+    </g>
+  </defs>
+  <rect x="8" y="8" width="104" height="104" rx="27" fill="url(#c24-tile)"
+        stroke="rgba(255,255,255,0.08)" stroke-width="2"/>
+  <use href="#c24-rays" filter="url(#c24-blur)" opacity="0.6"/>
+  <use href="#c24-rays"/>
+  <circle cx="60" cy="60" r="10" fill="#4de3ff" filter="url(#c24-blur)" opacity="0.85"/>
+  <circle cx="60" cy="60" r="5.5" fill="#eaf7ff"/>
+</svg>

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Nextra concept: Broadcast Frame">
+  <defs>
+    <linearGradient id="c4-frame" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8fa1bb"/>
+      <stop offset="1" stop-color="#5b8def"/>
+    </linearGradient>
+    <linearGradient id="c4-arrow" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#72a0f5"/>
+      <stop offset="1" stop-color="#a9c4f7"/>
+    </linearGradient>
+  </defs>
+  <path d="M94 52 L94 76 Q94 90 80 90 L32 90 Q18 90 18 76 L18 48 Q18 34 32 34 L58 34"
+        fill="none" stroke="url(#c4-frame)" stroke-width="8" stroke-linecap="round"/>
+  <path d="M56 90 L56 100 M42 104 L70 104" fill="none" stroke="url(#c4-frame)"
+        stroke-width="8" stroke-linecap="round"/>
+  <path d="M46 78 L92 27" fill="none" stroke="url(#c4-arrow)"
+        stroke-width="9" stroke-linecap="round"/>
+  <path d="M78.2 32.8 L92 27 L87.5 41.3" fill="none" stroke="url(#c4-arrow)"
+        stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

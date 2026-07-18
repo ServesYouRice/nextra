@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Union N Hot: ultra chromatic">
+  <defs>
+    <linearGradient id="f3-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#12101c"/>
+      <stop offset="1" stop-color="#08070d"/>
+    </linearGradient>
+    <linearGradient id="f3-ha" gradientUnits="userSpaceOnUse" x1="36" y1="86" x2="66" y2="62">
+      <stop offset="0" stop-color="#4de3ff"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="f3-hb" gradientUnits="userSpaceOnUse" x1="84" y1="34" x2="54" y2="58">
+      <stop offset="0" stop-color="#ff5ce1"/>
+      <stop offset="1" stop-color="#a06bff"/>
+    </linearGradient>
+    <filter id="f3-blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+  </defs>
+  <rect x="8" y="8" width="104" height="104" rx="27" fill="url(#f3-tile)"
+        stroke="rgba(255,255,255,0.08)" stroke-width="2"/>
+  <g fill="none" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" opacity="0.45">
+    <path d="M36 86 L36 34 L66 62" stroke="#ff5ce1" transform="translate(-3.5 2)"/>
+    <path d="M84 34 L84 86 L54 58" stroke="#22f3ff" transform="translate(3.5 -2)"/>
+  </g>
+  <g filter="url(#f3-blur)" opacity="0.6" fill="none" stroke-width="13"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M36 86 L36 34 L66 62" stroke="url(#f3-ha)"/>
+    <path d="M84 34 L84 86 L54 58" stroke="url(#f3-hb)"/>
+  </g>
+  <path d="M36 86 L36 34 L66 62" fill="none" stroke="url(#f3-ha)"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M84 34 L84 86 L54 58" fill="none" stroke="url(#f3-hb)" opacity="0.92"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="60" cy="60" r="3.8" fill="#ffffff"/>
+</svg>
