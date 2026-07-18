@@ -27,6 +27,7 @@ async function sha256Base64(input) {
  */
 export function withObsConnection(password, callback, {
     WebSocketImpl = globalThis.WebSocket,
+    url = `ws://127.0.0.1:${OBS_WS_PORT}`,
     connectTimeoutMs = OBS_WS_CONNECT_TIMEOUT,
     requestTimeoutMs = OBS_WS_REQUEST_TIMEOUT,
     transactionTimeoutMs = OBS_WS_TRANSACTION_TIMEOUT,
@@ -37,7 +38,7 @@ export function withObsConnection(password, callback, {
             return;
         }
 
-        const ws = new WebSocketImpl(`ws://127.0.0.1:${OBS_WS_PORT}`);
+        const ws = new WebSocketImpl(url);
         let identified = false;
         let settled = false;
         let connectTimeout = null;

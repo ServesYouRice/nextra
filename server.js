@@ -36,6 +36,7 @@ const {
 const { startRoomCleanup, stopRoomCleanup, getAllRoomStats } = require('./lib/rooms');
 const { getOrCreateCert } = require('./lib/https');
 const { startCloudflareTunnel } = require('./lib/tunnel');
+const { TunnelSupervisor } = require('./lib/tunnelSupervisor');
 const { fetchCloudflareTurnCredentials } = require('./lib/cloudflareTurn');
 const {
     normalizeIp,
@@ -74,21 +75,25 @@ process.on('uncaughtException', (err) => {
 });
 
 const app = express();
-let runtimeShareBaseUrl = '';
-let stopPublicTunnel = null;
 let ioServer = null;
-let publicShareStatus = config.CLOUDFLARED_TUNNEL_TOKEN
-    ? 'starting'
-    : (normalizeBaseUrl(config.SHARE_BASE_URL) ? 'manual' : (config.AUTO_PUBLIC_TUNNEL ? 'starting' : 'disabled'));
-let publicShareError = '';
 let runtimeWhipHttpPort = config.WHIP_HTTP_PORT;
 let whipHttpStatus = config.WHIP_ENABLED ? 'starting' : 'disabled';
 let whipHttpError = '';
 let whipHttpServer = null;
 let serviceReady = false;
-let tunnelRestartTimer = null;
-let tunnelRestartAttempts = 0;
 let requestGracefulShutdown = null;
+const publicTunnel = new TunnelSupervisor({
+    config,
+    startTunnel: startCloudflareTunnel,
+    normalizeBaseUrl,
+    getLocalProtocol,
+    isServiceReady: () => serviceReady,
+    onChange: () => emitServerConfigToAll(ioServer),
+});
+
+function getPublicTunnelState() {
+    return publicTunnel.snapshot();
+}
 
 app.use((req, _res, next) => {
     const requestId = String(req.headers['x-request-id'] || crypto.randomUUID()).slice(0, 128);
@@ -209,7 +214,7 @@ function isPublicOrigin(origin) {
 function getKnownPublicShareOrigins() {
     return [
         normalizeBaseUrl(config.SHARE_BASE_URL),
-        runtimeShareBaseUrl,
+        getPublicTunnelState().baseUrl,
     ].filter((origin) => origin && isPublicOrigin(origin));
 }
 
@@ -395,14 +400,14 @@ function getAllowedOrigins() {
 
     const manualShareBase = normalizeBaseUrl(config.SHARE_BASE_URL);
     if (manualShareBase) origins.add(manualShareBase);
-    if (runtimeShareBaseUrl) origins.add(runtimeShareBaseUrl);
+    if (getPublicTunnelState().baseUrl) origins.add(getPublicTunnelState().baseUrl);
 
     return origins;
 }
 
 function getShareBaseUrl(req) {
-    if (runtimeShareBaseUrl) {
-        return runtimeShareBaseUrl;
+    if (getPublicTunnelState().baseUrl) {
+        return getPublicTunnelState().baseUrl;
     }
 
     const manualShareBase = normalizeBaseUrl(config.SHARE_BASE_URL);
@@ -549,8 +554,8 @@ function getShareBaseUrlFromHeaders(headers = {}, remoteAddress = '') {
 }
 
 function getShareBaseUrlForSocket(socket) {
-    if (runtimeShareBaseUrl) {
-        return runtimeShareBaseUrl;
+    if (getPublicTunnelState().baseUrl) {
+        return getPublicTunnelState().baseUrl;
     }
 
     const manualShareBase = normalizeBaseUrl(config.SHARE_BASE_URL);
@@ -623,8 +628,8 @@ function buildSocketConfigPayload(socket) {
         mediaMaxChunkSize: config.MEDIA_MAX_CHUNK_SIZE,
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
-        publicShareStatus,
-        publicShareError,
+        publicShareStatus: getPublicTunnelState().status,
+        publicShareError: getPublicTunnelState().error,
         whipHttpHost: getWhipHttpClientHost(),
         whipHttpPort: runtimeWhipHttpPort,
         whipHttpStatus,
@@ -674,6 +679,24 @@ function isMetricsTokenAuthorized(req) {
     return timingSafeStringEqual(provided, expected);
 }
 
+// Summarize the process's active libuv resources for the churn/leak suite.
+// `total` and the per-type breakdown (e.g. ChildProcess, TCPSocketWrap, Timeout)
+// should return to a stable baseline after rooms and clients are torn down; a
+// monotonic climb across churn cycles indicates a leaked handle.
+function getActiveResourceMetrics() {
+    let active = [];
+    try {
+        active = process.getActiveResourcesInfo();
+    } catch {
+        active = [];
+    }
+    const byType = {};
+    for (const kind of active) {
+        byType[kind] = (byType[kind] || 0) + 1;
+    }
+    return { total: active.length, byType };
+}
+
 async function loadCloudflareTurnCredentials() {
     const turnSource = config.getCloudflareTurnCredentialSource();
     const abortController = new AbortController();
@@ -703,8 +726,8 @@ app.get('/api/config', (req, res) => {
         mediaMaxChunkSize: config.MEDIA_MAX_CHUNK_SIZE,
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
-        publicShareStatus,
-        publicShareError,
+        publicShareStatus: getPublicTunnelState().status,
+        publicShareError: getPublicTunnelState().error,
         whipEnabled: config.WHIP_ENABLED,
         whipHttpHost: getWhipHttpClientHost(),
         whipHttpPort: runtimeWhipHttpPort,
@@ -804,8 +827,9 @@ app.get('/api/metrics', async (req, res) => {
 
     const payload = {
         generatedAt: new Date().toISOString(),
-        runtimeShareBaseUrl,
+        runtimeShareBaseUrl: getPublicTunnelState().baseUrl,
         process: {
+            pid: process.pid,
             uptimeSec: Math.floor(process.uptime()),
             memory: process.memoryUsage(),
             cpuUsageMicroseconds: process.cpuUsage(),
@@ -814,6 +838,10 @@ app.get('/api/metrics', async (req, res) => {
                 p95: eventLoopDelay.percentile(95) / 1e6,
                 max: eventLoopDelay.max / 1e6,
             },
+            // Active-resource counts let the churn/leak suite detect leaked
+            // handles, timers, sockets, and child processes across create/destroy
+            // cycles. getActiveResourcesInfo is a stable public API (Node 17.3+).
+            resources: getActiveResourceMetrics(),
         },
         rooms: {
             active: rooms.length,
@@ -829,6 +857,7 @@ app.get('/api/metrics', async (req, res) => {
             nvencProbe: getNvencProbeStatus(),
         },
         mediaWorker: {
+            pid: worker && !worker.closed ? worker.pid : null,
             resourceUsage: mediaWorkerResourceUsage,
         },
     };
@@ -907,6 +936,26 @@ app.post('/api/test/shutdown', (req, res) => {
     }
     res.status(202).json({ status: 'shutting-down' });
     void requestGracefulShutdown('SMOKE_TEST');
+});
+
+// Test-only destructive transition used by the real subprocess recovery gate.
+// The endpoint is absent unless the explicitly local smoke-test mode is active.
+app.post('/api/test/kill-media-worker', (req, res) => {
+    if (process.env.NEXTRA_SMOKE_TEST !== '1' || !isLocalClientIp(getRequestClientIp(req))) {
+        res.status(404).end();
+        return;
+    }
+    if (!worker || worker.closed || !Number.isInteger(worker.pid)) {
+        res.status(503).json({ error: 'Media worker is unavailable.' });
+        return;
+    }
+    const workerPid = worker.pid;
+    res.status(202).json({ status: 'terminating', workerPid });
+    setImmediate(() => {
+        try { process.kill(workerPid, 'SIGKILL'); } catch (err) {
+            console.error(`[recovery-test] Could not kill worker ${workerPid}: ${err.message}`);
+        }
+    });
 });
 
 app.get('/healthz', (_req, res) => {
@@ -1053,76 +1102,7 @@ async function detectPublicIpIfEnabled() {
 }
 
 async function maybeStartPublicTunnel() {
-    const configuredShareBaseUrl = normalizeBaseUrl(config.SHARE_BASE_URL);
-    const namedTunnelConfigured = !!config.CLOUDFLARED_TUNNEL_TOKEN;
-    if (configuredShareBaseUrl && !namedTunnelConfigured) {
-        publicShareStatus = 'manual';
-        publicShareError = '';
-        return;
-    }
-
-    if (!config.AUTO_PUBLIC_TUNNEL && !namedTunnelConfigured) {
-        publicShareStatus = 'disabled';
-        publicShareError = '';
-        return;
-    }
-
-    if (config.PUBLIC_TUNNEL_PROVIDER !== 'cloudflared') {
-        publicShareStatus = 'error';
-        publicShareError = `Unsupported tunnel provider: ${config.PUBLIC_TUNNEL_PROVIDER}`;
-        console.warn(`Unsupported PUBLIC_TUNNEL_PROVIDER: ${config.PUBLIC_TUNNEL_PROVIDER}. Skipping tunnel startup.`);
-        emitServerConfigToAll(ioServer);
-        return;
-    }
-
-    publicShareStatus = 'starting';
-    publicShareError = '';
-    emitServerConfigToAll(ioServer);
-
-    try {
-        const tunnel = await startCloudflareTunnel({
-            port: config.PORT,
-            localProtocol: getLocalProtocol(),
-            explicitPath: config.CLOUDFLARED_PATH,
-            timeoutMs: config.PUBLIC_TUNNEL_TIMEOUT_MS,
-            noTlsVerify: config.PUBLIC_TUNNEL_NO_TLS_VERIFY,
-            tunnelToken: config.CLOUDFLARED_TUNNEL_TOKEN,
-            baseUrl: configuredShareBaseUrl,
-        });
-
-        runtimeShareBaseUrl = normalizeBaseUrl(tunnel.baseUrl);
-        stopPublicTunnel = tunnel.stop;
-        publicShareStatus = 'active';
-        publicShareError = '';
-        tunnelRestartAttempts = 0;
-        console.log(`Public tunnel active: ${runtimeShareBaseUrl}`);
-        emitServerConfigToAll(ioServer);
-
-        tunnel.process.on('exit', () => {
-            if (runtimeShareBaseUrl) {
-                console.warn('Public tunnel closed. Public link is no longer available.');
-            }
-            runtimeShareBaseUrl = '';
-            stopPublicTunnel = null;
-            publicShareStatus = 'error';
-            publicShareError = 'Built-in public tunnel closed.';
-            emitServerConfigToAll(ioServer);
-            if (serviceReady && (config.AUTO_PUBLIC_TUNNEL || config.CLOUDFLARED_TUNNEL_TOKEN) && !tunnelRestartTimer) {
-                const delay = Math.min(60_000, 1_000 * (2 ** Math.min(tunnelRestartAttempts, 6)));
-                tunnelRestartAttempts += 1;
-                tunnelRestartTimer = setTimeout(() => {
-                    tunnelRestartTimer = null;
-                    void maybeStartPublicTunnel();
-                }, delay);
-            }
-        });
-    } catch (err) {
-        publicShareStatus = 'error';
-        publicShareError = err?.message || 'Built-in public tunnel failed to start.';
-        console.warn(`Public tunnel unavailable: ${err.message}`);
-        console.warn('Continuing in local/LAN mode. Set SHARE_BASE_URL manually or install cloudflared for auto internet links.');
-        emitServerConfigToAll(ioServer);
-    }
+    return publicTunnel.start();
 }
 
 let worker = null;
@@ -1130,10 +1110,7 @@ let connectionCleanupInterval = null;
 
 function cleanupGlobalResources() {
     serviceReady = false;
-    if (tunnelRestartTimer) {
-        clearTimeout(tunnelRestartTimer);
-        tunnelRestartTimer = null;
-    }
+    publicTunnel.close();
     stopRoomCleanup();
     stopJoinCleanup();
     if (connectionCleanupInterval) {
@@ -1151,17 +1128,7 @@ function cleanupGlobalResources() {
         worker = null;
     }
 
-    if (stopPublicTunnel) {
-        try { stopPublicTunnel(); } catch { }
-        stopPublicTunnel = null;
-    }
-
     ioServer = null;
-    runtimeShareBaseUrl = '';
-    publicShareStatus = config.CLOUDFLARED_TUNNEL_TOKEN
-        ? 'starting'
-        : (normalizeBaseUrl(config.SHARE_BASE_URL) ? 'manual' : (config.AUTO_PUBLIC_TUNNEL ? 'starting' : 'disabled'));
-    publicShareError = '';
     runtimeWhipHttpPort = config.WHIP_HTTP_PORT;
     whipHttpStatus = config.WHIP_ENABLED ? 'starting' : 'disabled';
     whipHttpError = '';
@@ -1339,6 +1306,7 @@ async function startWhipHttpServer(whipRouter) {
         const recoveryAction = decideWorkerDeathAction({
             isShuttingDown,
             uptimeSeconds: process.uptime(),
+            minimumUptimeSeconds: config.WORKER_RECOVERY_MIN_UPTIME_SECONDS,
         });
         if (recoveryAction === 'ignore') return;
 

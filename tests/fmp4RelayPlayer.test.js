@@ -27,6 +27,8 @@ class FakeEventTarget {
 }
 
 class FakeSourceBuffer extends FakeEventTarget {
+    static holdUpdates = false;
+
     constructor() {
         super();
         this.updating = false;
@@ -43,6 +45,7 @@ class FakeSourceBuffer extends FakeEventTarget {
     appendBuffer(value) {
         this.appended.push(new Uint8Array(value));
         this.updating = true;
+        if (FakeSourceBuffer.holdUpdates) return;
         queueMicrotask(() => {
             this.updating = false;
             this.dispatch('updateend');
@@ -225,4 +228,56 @@ test('fMP4 relay player replaces generations without leaking listeners, buffers,
     });
     assert.ok(states.includes('playing'));
     assert.equal(states.at(-1), 'stopped');
+});
+
+test('fMP4 relay player bounds an overflowing queue and requests a fresh generation', { concurrency: false }, async (t) => {
+    const originalMediaSource = global.MediaSource;
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    FakeMediaSource.instances = [];
+    FakeSourceBuffer.holdUpdates = true;
+    global.MediaSource = FakeMediaSource;
+    URL.createObjectURL = () => 'blob:overflow';
+    URL.revokeObjectURL = () => {};
+    t.after(() => {
+        FakeSourceBuffer.holdUpdates = false;
+        global.MediaSource = originalMediaSource;
+        URL.createObjectURL = originalCreateObjectUrl;
+        URL.revokeObjectURL = originalRevokeObjectUrl;
+    });
+
+    const { createFmp4RelayPlayer } = await import('../src/lib/fmp4RelayPlayer.js');
+    const socket = new FakeSocket();
+    const video = new FakeVideoElement();
+    const states = [];
+    const player = createFmp4RelayPlayer({
+        videoElement: video,
+        socket,
+        roomCode: 'ABC123',
+        onStateChange: (state) => states.push(state),
+    });
+    player.start();
+    socket.serverEmit('media-init', {
+        generation: 7,
+        mimeType: 'video/mp4; codecs="avc1.42e01f"',
+        initSegment: Uint8Array.of(1),
+    });
+    FakeMediaSource.instances[0].open();
+    await flushTasks();
+
+    for (let sequence = 1; sequence <= 150; sequence += 1) {
+        socket.serverEmit('media-chunk', {
+            generation: 7,
+            sequence,
+            chunk: Uint8Array.of(sequence % 255),
+        });
+    }
+    await flushTasks();
+
+    assert.ok(socket.requests.filter(({ event }) => event === 'get-media-init').length >= 2);
+    assert.equal(player.getState().queueLength, 0);
+    assert.equal(player.getState().queueBytes, 0);
+    assert.ok(states.includes('buffering'));
+    assert.equal(states.at(-1), 'error');
+    player.stop();
 });
