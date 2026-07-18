@@ -105,5 +105,15 @@ mocks:
 | 36f | `union-aurora/36f-hot.svg` | Cyan→blue meets magenta→violet; loudest contrast. |
 | favicon | `union-aurora/36-favicon.svg` | Dedicated 32px-grid cut with simplified geometry. |
 
+The hot palette (36f) was chosen as the direction; five alternates explore it:
+
+| Variant | File | Recipe |
+|---------|------|--------|
+| 36f1 | `union-aurora/36f1-neon.svg` | **Neon** — electric cyan vs hot pink on a near-black tile, maximum glow. |
+| 36f2 | `union-aurora/36f2-sunset.svg` | **Sunset** — amber→coral meets violet→rose; warm movie-night take. |
+| 36f3 | `union-aurora/36f3-ultra.svg` | **Ultra** — hot pair plus chromatic echoes: each strand throws a shifted ghost of the other's color. |
+| 36f4 | `union-aurora/36f4-spark.svg` | **Spark** — hot palette with the sparkle-gap treatment: white star in a pink bloom bridges the strands. |
+| 36f5 | `union-aurora/36f5-bare.svg` | **Bare** — the hot mark without the tile, for navbar/README use. |
+
 These are proposals only — nothing in the app references them yet. If one direction
 wins, the follow-up is to regenerate `public/brand/` and `public/icons/` from it.
