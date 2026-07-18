@@ -117,6 +117,10 @@ export function createFmp4RelayPlayer(opts) {
     function resetAndRequestInit() {
         // Full cleanup (handles abort + endOfStream + null-out)
         cleanupMediaSource();
+        // Reject late fragments from the overflowed generation until a fresh
+        // init response explicitly establishes the next generation.
+        currentGeneration = -1;
+        lastSequence = 0;
         setState('buffering');
         socket.emit('get-media-init', { roomCode, format: 'fmp4' }, (response) => {
             if (response && response.success && response.initSegment) {

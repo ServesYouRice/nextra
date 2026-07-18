@@ -9,6 +9,8 @@ lerna-debug.log*
 
 node_modules
 dist
+test-results/
+playwright-report/
 .env
 .env.*
 !.env.example
@@ -45,8 +47,6 @@ cloudflared
 # Documentation files
 *.md
 !README.md
-!SENATE3.md
-!audits-codex/
-!audits-codex/*.md
+!REMAINING-WORK.md
 !docs/
 !docs/*.md

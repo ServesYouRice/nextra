@@ -337,6 +337,9 @@ const config = {
     // The reclaim-host flow covers a page reload in seconds; a long grace just
     // leaves viewers staring at a frozen frame when the host is really gone.
     HOST_RECONNECT_GRACE_MS: parseIntEnv(process.env.HOST_RECONNECT_GRACE_MS, 30000),
+    // Avoid restarting during an immediate startup crash loop. Tests can set 0
+    // when they intentionally kill a fully initialized worker.
+    WORKER_RECOVERY_MIN_UPTIME_SECONDS: parseIntEnv(process.env.WORKER_RECOVERY_MIN_UPTIME_SECONDS, 30),
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     ALLOW_REMOTE_METRICS: parseBoolEnv(process.env.ALLOW_REMOTE_METRICS, false),
     METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),
@@ -433,6 +436,7 @@ function validateConfig(value) {
 
     assertNumberInRange('FALLBACK_AUDIO_OFFSET_MS', value.FALLBACK_AUDIO_OFFSET_MS, 0, 60_000);
     assertNumberInRange('FALLBACK_RESTART_CAP', value.FALLBACK_RESTART_CAP, 0, 100);
+    assertNumberInRange('WORKER_RECOVERY_MIN_UPTIME_SECONDS', value.WORKER_RECOVERY_MIN_UPTIME_SECONDS, 0, 3600);
 }
 
 validateConfig(config);

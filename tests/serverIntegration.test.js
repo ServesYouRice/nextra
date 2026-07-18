@@ -316,6 +316,10 @@ test('real server composition enforces HTTP and Socket.IO operational contracts'
     assert.equal(activeRoomMetrics.sockets.counters.createRoomDeniedRateLimit, 1);
     assert.equal(activeRoomMetrics.sockets.counters.activeProducers, 1);
     assert.equal(activeRoomMetrics.sockets.counters.activeConsumers, 1);
+    // Active-resource metrics power the churn/leak suite (T-07).
+    assert.equal(typeof activeRoomMetrics.process.resources.total, 'number');
+    assert.ok(activeRoomMetrics.process.resources.total > 0);
+    assert.equal(typeof activeRoomMetrics.process.resources.byType, 'object');
 
     assert.deepEqual(await socketRequest(viewer, 'leave-room'), { success: true });
     assert.deepEqual(await socketRequest(socket, 'leave-room'), { success: true });
