@@ -51,6 +51,22 @@ test('RoomMediaPipeline replaces an owned timer without leaking the previous one
     assert.deepEqual(cleared, [1, 2]);
 });
 
+test('RoomMediaPipeline can recycle fallback resources without closing WHIP ownership', () => {
+    const room = { fallbackStarting: false };
+    const closed = [];
+    const pipeline = new RoomMediaPipeline(room);
+    pipeline.ownWhip('transport', {}, () => closed.push('whip-transport'));
+    pipeline.beginStart();
+    pipeline.own('relay', {}, () => closed.push('relay'));
+
+    assert.equal(pipeline.closeFallback(), true);
+    assert.equal(pipeline.state, 'idle');
+    assert.deepEqual(closed, ['relay']);
+    pipeline.beginStart();
+    pipeline.close();
+    assert.deepEqual(closed, ['relay', 'whip-transport']);
+});
+
 function createConsumer(kind, closed) {
     const consumer = new EventEmitter();
     consumer.kind = kind;
@@ -122,7 +138,7 @@ test('fallback startup releases every allocation when successive stages fail', {
         await startFallbackRelay(room, router, null, { FFmpegRelay: FailingRelay });
 
         assert.deepEqual(closed, expectedClosed, failAt);
-        assert.equal(room._mediaPipeline, null, failAt);
+        assert.equal(room._mediaPipeline.state, 'idle', failAt);
         assert.equal(room.fallbackWorker, null, failAt);
         assert.equal(room.fallbackStarting, false, failAt);
         assert.match(room.fallbackLastError, new RegExp(failAt), failAt);

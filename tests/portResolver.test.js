@@ -50,7 +50,12 @@ test('findAvailablePort skips occupied and reserved ports', async () => {
             maxAttempts: 5,
         });
 
-        assert.equal(resolved, address.port + 2);
+        // Other processes may legitimately occupy candidates in the ephemeral
+        // range while the suite runs in parallel. The contract is to skip the
+        // occupied preferred port and the explicitly reserved candidate, not to
+        // promise that the very next unreserved integer is free.
+        assert.ok(resolved > address.port);
+        assert.notEqual(resolved, address.port + 1);
     } finally {
         await close(server);
     }

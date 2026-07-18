@@ -843,9 +843,11 @@ export default function HostView() {
             cleanup();
         };
         const onPageShow = () => { pageHidingRef.current = false; };
+        window.addEventListener('beforeunload', closeHostSession);
         window.addEventListener('pagehide', closeHostSession);
         window.addEventListener('pageshow', onPageShow);
         return () => {
+            window.removeEventListener('beforeunload', closeHostSession);
             window.removeEventListener('pagehide', closeHostSession);
             window.removeEventListener('pageshow', onPageShow);
             // Defer non-pagehide teardown by one task so React StrictMode's
@@ -1121,6 +1123,12 @@ export default function HostView() {
                 }
 
                 videoTrack.addEventListener('ended', () => {
+                    // Reload recovery deliberately keeps the server-side room
+                    // alive across pagehide. Chromium ends display-capture tracks
+                    // while unloading; treating that teardown as a user stop
+                    // would immediately destroy the room before the new page can
+                    // reclaim it.
+                    if (pageHidingRef.current && reloadRecoveryEnabledRef.current) return;
                     socket.emit('host-stopped');
                     cleanup();
                 });
@@ -1374,12 +1382,12 @@ export default function HostView() {
         return () => socket.off('server-config', onServerConfig);
     }, [socket, applyServerConfig]);
 
-    const handleStopSharing = useCallback(() => {
+    const handleStopSharing = useCallback((confirmed = false) => {
         // Guard against a misclick ending everyone's session: stopping tears down
         // the room and disconnects every viewer, and the next share gets a NEW code.
         const connectedViewers = viewerCount + whepViewerCount;
-        if (connectedViewers > 0
-            && !window.confirm(`Stop sharing? This will end the stream for ${connectedViewers} viewer${connectedViewers !== 1 ? 's' : ''}.`)) {
+        if (connectedViewers > 0 && !confirmed) {
+            setShowStopConfirm(true);
             return;
         }
         // Stop OBS streaming if in OBS mode
@@ -1491,8 +1499,7 @@ export default function HostView() {
                                 <button
                                     className="btn btn-danger"
                                     onClick={() => {
-                                        if (totalViewers > 0) setShowStopConfirm(true);
-                                        else handleStopSharing();
+                                        handleStopSharing();
                                     }}
                                 >
                                     Stop Sharing
@@ -2024,7 +2031,7 @@ export default function HostView() {
                             className="btn btn-danger"
                             onClick={() => {
                                 setShowStopConfirm(false);
-                                handleStopSharing();
+                                handleStopSharing(true);
                             }}
                         >
                             Stop Sharing
