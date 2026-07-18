@@ -341,6 +341,8 @@ The default limits are intentionally conservative for one desktop process: 10 ro
 
 Use `npm run benchmark:runtime` with the real room/media topology to capture a threshold-checked JSON result. The full warm-up, repetition, topology, and architecture decision procedure is in [`docs/performance-benchmark.md`](docs/performance-benchmark.md). Optional single-replica supervisor guidance is in [`docs/service-deployment.md`](docs/service-deployment.md), and the maintained executable migration assessment is in [`docs/packaging-evaluation.md`](docs/packaging-evaluation.md).
 
+Use `npm run churn:runtime` for the long-running room/transport leak gate described in [`docs/churn-suite.md`](docs/churn-suite.md).
+
 - `/healthz` is an unauthenticated process-liveness check.
 - `/readyz` returns 200 only after the HTTP, Socket.IO, and mediasoup worker layers are ready; it returns 503 during startup and shutdown.
 - An uncaught exception or mediasoup worker death terminates/restarts the process. Run production deployments under a supervisor such as Windows Service management, systemd, or a container restart policy.
@@ -380,6 +382,8 @@ npm run dev          # development: hot reload (client + server)
 npm run build        # build the client into dist/
 npm start            # run the production server (serves dist/; build first)
 npm run lint         # lint code
+npm test             # unit and real server/subprocess integration tests
+npm run test:e2e     # Chromium decoded-frame and browser lifecycle tests
 npm run package      # build Nextra.exe + sha256
 ```
 
