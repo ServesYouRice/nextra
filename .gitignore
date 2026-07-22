@@ -50,3 +50,7 @@ cloudflared
 !REMAINING-WORK.md
 !docs/
 !docs/*.md
+!audits-codex/
+!audits-codex/*.md
+!implementation/
+!implementation/*.md
