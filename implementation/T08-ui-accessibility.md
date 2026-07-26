@@ -1,6 +1,7 @@
 # T08 — UI correctness, accessibility, and support truth
 
 Depends on T03, T04, T07, and decision D05.
+Findings: CF-16, CF-17, CF-18.
 
 <goal>
 Fix the high-traffic state/copy/semantic defects and make support claims match
@@ -30,3 +31,12 @@ retained browser evidence.
 State, copy, labels, routes, and selection semantics have focused tests; keyboard
 flows work; UI and README claims do not exceed recorded browser/path evidence.
 </accept>
+
+<checks>
+Run focused component/semantic tests, then `npm test` and `npm run test:e2e`.
+</checks>
+
+<stop>
+Do not decide the support claim yourself; without an explicit D05, keep this card
+Blocked. Never widen a claim to a browser or viewport this run did not test.
+</stop>

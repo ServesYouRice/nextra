@@ -1,6 +1,7 @@
 # T09 — Relay security and bounded operations
 
-Depends on T02, T05, and decision D02.
+Depends on T02, T05, and decision D02, so it inherits decision D01 through T05.
+Findings: CF-10, CF-21, CF-22.
 
 <goal>
 Apply the chosen LAN relay policy, bound long-lived housekeeping collections,
@@ -33,3 +34,13 @@ Collections remain bounded, hidden tabs do no periodic work, resume creates one
 timer, absent hosts get no metrics work, unexpected rejection handling is
 supervisor-safe, and relay/security wording is accurate.
 </accept>
+
+<checks>
+Run focused cleanup, timer, and visibility tests, then `npm test`.
+</checks>
+
+<stop>
+Do not choose the LAN relay policy; without an explicit D02, keep this card
+Blocked. Block instead of making a fatal-rejection change if no supervisor
+contract is documented, since exiting would then end rooms with no restart.
+</stop>

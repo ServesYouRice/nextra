@@ -1,6 +1,7 @@
 # T02 — Clean build and truthful readiness
 
 Depends on T01.
+Findings: CF-02, CF-06.
 
 <goal>
 Make tests and release preparation independent of an ignored pre-existing
@@ -27,8 +28,11 @@ Make tests and release preparation independent of an ignored pre-existing
 - A clean checkout can run the integration/release sequence without stale `dist/`.
 - Missing SPA or required WHIP is unready; disabled optional fallback is not.
 - `/healthz` remains 200 while the process is alive.
-- Focused tests and `npm run release:prep` pass.
 </accept>
+
+<checks>
+Run the focused server integration and readiness tests, then `npm run release:prep`.
+</checks>
 
 <stop>
 Block if the supported deployment profile cannot be derived from existing config;

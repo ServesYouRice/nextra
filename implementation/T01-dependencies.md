@@ -1,5 +1,8 @@
 # T01 — Reproducible dependencies
 
+Depends on nothing; this is the entry card.
+Findings: CF-01.
+
 <goal>
 Regenerate the malformed root lockfile with the CI Node 20 toolchain, then make
 the installed tree and clean-install gates match `package.json`.
@@ -23,11 +26,16 @@ the installed tree and clean-install gates match `package.json`.
 </do>
 
 <accept>
-- Both lockfiles parse; root `npm ci` and `npm ls --depth=0` pass on Node 20.
-- `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`,
-  `npm run evaluate:packaging`, `npm run oss:check`, and `npm run audit:prod` pass.
+- Both lockfiles parse; the clean install and dependency inventory succeed on Node 20.
+- Every listed check passes.
 - No unrelated application change or dependency upgrade is included.
 </accept>
+
+<checks>
+`npm ci`, `npm ls --depth=0`, `npm run lint`, `npm run typecheck`, `npm test`,
+`npm run build`, `npm run evaluate:packaging`, `npm run oss:check`, and
+`npm run audit:prod`.
+</checks>
 
 <stop>
 Block on registry/native-package failure, a required major upgrade, or an audit

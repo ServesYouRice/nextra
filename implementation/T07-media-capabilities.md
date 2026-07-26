@@ -1,6 +1,7 @@
 # T07 — Authoritative AV1 capability
 
 Depends on T01. The OBS audio-offset measurement is D03/T10, not this card.
+Findings: CF-13, CF-14, CF-15 (code contract only; CF-15 measurement is T10).
 
 <goal>
 Use WebRTC/OBS capabilities for AV1 decisions instead of MP4 or WebGL proxies.
@@ -28,6 +29,12 @@ MP4 support cannot falsely approve WebRTC AV1; WebGL cannot falsely block an OBS
 encoder; failed AV1 setup leaves no partial settings and offers H.264 safely.
 </accept>
 
+<checks>
+Run focused watch-mode, capability, and OBS WebSocket tests, then `npm test`.
+</checks>
+
 <stop>
-Do not change the 1500 ms audio offset from source inspection or model judgment.
+Do not change the 1500 ms audio offset from source inspection or model judgment;
+that contract needs the D03 measurement. Block if capability inspection requires
+a loaded mediasoup device that no existing test harness can provide.
 </stop>

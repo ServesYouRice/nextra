@@ -2,6 +2,7 @@
 
 Depends on T01. This is a concurrency-sensitive card; use a stronger review if
 the ownership point remains ambiguous after reading the named files.
+Findings: CF-03.
 
 <goal>
 A first relay viewer joining minutes after host prewarm receives a fresh,
@@ -37,3 +38,9 @@ chunks never cross generations; direct WebRTC and existing relay recovery pass.
 <checks>
 Run focused relay tests, `npm test`, and `npm run test:e2e`.
 </checks>
+
+<stop>
+Block if the generation owner cannot be placed without changing the recorder or
+server protocol shape, or if the delayed-viewer case cannot be made deterministic.
+Report the ambiguous ownership point and the observed ordering.
+</stop>

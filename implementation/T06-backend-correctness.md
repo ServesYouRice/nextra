@@ -1,7 +1,14 @@
 # T06 — Contained backend correctness
 
-Depends on T01 and the shared auth helper from T05. Complete A, B, and C as
-separate reviewable changes; do not turn them into a socket rewrite.
+Depends on T01 and the shared auth helper from T05, so it inherits decision D01.
+Complete A, B, and C as separate reviewable changes; do not turn them into a
+socket rewrite.
+Findings: CF-11, CF-12, CF-20.
+
+<goal>
+Fix three contained backend defects: viewer bandwidth estimation, room-creation
+hashing with capacity accounting, and token comparison plus WebSocket CSP scope.
+</goal>
 
 <read>
 `lib/mediasoup.js`, `lib/socket.js`, `lib/rooms.js`, `server.js`, WHIP/WHEP
@@ -33,3 +40,9 @@ protected rooms still verify; all supported Socket.IO/OBS connections satisfy CS
 Run focused transport/room/socket/WHIP/server tests, then lint, typecheck, unit,
 coverage, and browser gates.
 </checks>
+
+<stop>
+Block if the T05 comparator does not exist yet, or if bounding capacity would
+change the documented room limit or the create-room protocol. Name which of
+A, B, or C is affected and leave the others complete.
+</stop>
