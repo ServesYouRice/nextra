@@ -28,6 +28,28 @@ If the card reaches a listed stop condition, move it to **Blocked**, add the
 smallest concrete question under **User needs to decide / provide**, and stop.
 Do not guess policy, credentials, hardware results, or external approvals.
 
+## Card format
+
+Every `Txx-*.md` file uses the same shape, so an executor always knows where to
+look. Keep new cards identical:
+
+```
+# Txx — Title
+Depends on ...        one line; decisions inherited through another card included
+Findings: CF-nn, ...  IDs in ../archive/2026-07-26-audit-consolidation/audits-codex/consolidated-findings.md
+<goal>      one or two sentences: the end state
+<read>      the only files to open
+<contract>  optional: the state/event table the change must satisfy
+<do>        numbered or lettered steps
+<accept>    observable outcomes
+<checks>    exact commands to run
+<stop>      when to stop and mark Blocked instead of guessing
+<parked>    optional: out of scope without a new user card
+```
+
+The `Findings` IDs are traceability only. Read the archived register when a card
+seems ambiguous; never treat it as extra scope.
+
 ## Board rules
 
 - A card appears in exactly one status section.

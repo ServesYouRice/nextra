@@ -1,6 +1,7 @@
 # T05 — Operator, LAN, and WHIP boundary
 
 Depends on T01 and user decision D01.
+Findings: CF-04, CF-08, CF-09.
 
 <goal>
 Enforce the approved operator policy before room allocation, sensitive metrics,
@@ -29,6 +30,10 @@ TURN minting, or public WHIP work. Public viewers never gain host authority.
 Public create attempts allocate nothing and cannot replace a room; loopback Host/
 OBS passes; spoofing fails; concurrent WHIP cannot exceed caps; no secret leaks.
 </accept>
+
+<checks>
+Run focused network, socket, WHIP, and WHEP tests, then `npm test`.
+</checks>
 
 <stop>
 Do not choose the remote-host or public-WHIP policy. If D01 is not explicit, keep

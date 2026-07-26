@@ -1,6 +1,7 @@
 # T04 — Truthful restart and reclaim states
 
 Depends on T01.
+Findings: CF-05.
 
 <goal>
 Keep same-process reconnect/reload recovery, but end the room cleanly when the
@@ -34,3 +35,12 @@ server process is replaced or reclaim is terminal.
 Failed reclaim cannot leave a false Streaming state; terminal viewers stop; all
 same-process recovery tests still pass; no persistence is introduced.
 </accept>
+
+<checks>
+Run the focused recovery/reclaim and real-server integration tests, then `npm test`.
+</checks>
+
+<stop>
+Block if a contract row cannot be distinguished from existing signals without
+persisting state across the restart. Never add persistence to satisfy a row.
+</stop>
