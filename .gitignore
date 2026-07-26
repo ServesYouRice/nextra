@@ -47,10 +47,9 @@ cloudflared
 # Documentation files
 *.md
 !README.md
-!REMAINING-WORK.md
-!docs/
-!docs/*.md
-!audits-codex/
-!audits-codex/*.md
+!AGENTS.md
+!CLAUDE.md
+!archive/
+!archive/**/*.md
 !implementation/
 !implementation/*.md

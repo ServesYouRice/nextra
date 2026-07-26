@@ -1,6 +1,6 @@
 'use strict';
 
-// Long-running churn / leak harness (REMAINING-WORK.md T-07).
+// Long-running churn / leak harness (implementation/T10-release-evidence.md).
 //
 // Holds a small pool of persistent host+viewer socket pairs and, on each pair,
 // repeatedly creates and tears down a room, a host send transport, a viewer join,
