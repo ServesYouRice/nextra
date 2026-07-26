@@ -339,9 +339,9 @@ Important limits:
 
 The default limits are intentionally conservative for one desktop process: 10 rooms, 10 direct viewers per room, and 2 simultaneous FFmpeg fallback pipelines. They are safety limits, not a benchmark guarantee. Raise them only after measuring CPU, memory, relay throughput, and event-loop delay on the target host through the local `/api/metrics` endpoint.
 
-Use `npm run benchmark:runtime` with the real room/media topology to capture a threshold-checked JSON result. The full warm-up, repetition, topology, and architecture decision procedure is in [`docs/performance-benchmark.md`](docs/performance-benchmark.md). Optional single-replica supervisor guidance is in [`docs/service-deployment.md`](docs/service-deployment.md), and the maintained executable migration assessment is in [`docs/packaging-evaluation.md`](docs/packaging-evaluation.md).
+Use `npm run benchmark:runtime` with a real room/media topology and `npm run churn:runtime` for the long-running room/transport leak gate. The release procedure, thresholds, repetitions, and evidence fields are tracked in [`implementation/T10-release-evidence.md`](implementation/T10-release-evidence.md).
 
-Use `npm run churn:runtime` for the long-running room/transport leak gate described in [`docs/churn-suite.md`](docs/churn-suite.md).
+Production supervision means exactly one replica; a restart ends all in-memory rooms. Keep the verified `caxa` Windows package until it fails its gate or a supported platform change requires a replacement.
 
 - `/healthz` is an unauthenticated process-liveness check.
 - `/readyz` returns 200 only after the HTTP, Socket.IO, and mediasoup worker layers are ready; it returns 503 during startup and shutdown.
