@@ -10,7 +10,8 @@ export default defineConfig({
     retries: process.env.CI ? 1 : 0,
     reporter: process.env.CI ? 'github' : 'list',
     use: {
-        baseURL: `http://127.0.0.1:${port}`,
+        baseURL: `https://127.0.0.1:${port}`,
+        ignoreHTTPSErrors: true,
         trace: 'retain-on-failure',
         video: 'retain-on-failure',
     },
@@ -19,13 +20,17 @@ export default defineConfig({
         use: {
             ...devices['Desktop Chrome'],
             launchOptions: {
-                args: ['--autoplay-policy=no-user-gesture-required'],
+                args: [
+                    '--autoplay-policy=no-user-gesture-required',
+                    '--host-resolver-rules=MAP nextra.cloudflare.test 127.0.0.1',
+                ],
             },
         },
     }],
     webServer: {
         command: 'npm run build && node server.js',
-        url: `http://127.0.0.1:${port}/readyz`,
+        url: `https://127.0.0.1:${port}/readyz`,
+        ignoreHTTPSErrors: true,
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,
         env: {
@@ -33,9 +38,10 @@ export default defineConfig({
             NODE_ENV: 'test',
             PORT: String(port),
             BIND_HOST: '127.0.0.1',
-            LOCAL_HTTPS: 'false',
+            LOCAL_HTTPS: 'true',
             OPEN_BROWSER: 'false',
             AUTO_PUBLIC_TUNNEL: 'false',
+            SHARE_BASE_URL: `https://nextra.cloudflare.test:${port}`,
             WHIP_ENABLED: 'false',
             WHEP_ENABLED: 'false',
             RTC_LISTEN_IP: '127.0.0.1',

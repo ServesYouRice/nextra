@@ -77,7 +77,7 @@ test('parallel WHEP admission reserves room capacity before asynchronous transpo
     config.WHEP_MAX_GLOBAL_SESSIONS = 10;
     config.WHEP_RATE_LIMIT_MAX = 100;
 
-    const room = createRoom('whep-race-host');
+    const room = await createRoom('whep-race-host');
     room.producer = { id: 'video-producer', closed: false, close() {} };
     const closed = { transports: 0, consumers: 0 };
     let releaseTransport;

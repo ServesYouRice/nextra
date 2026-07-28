@@ -23,19 +23,36 @@ test('relay-first playback stays enabled for tunnel viewers when TURN is unavail
     }), true);
 });
 
-test('AV1 unsupported warning only appears for AV1 rooms without AV1 playback support', async () => {
-    const { isAv1PlaybackUnsupported } = await watchPlaybackModeModule;
+test('WebRTC AV1 support comes from loaded receive RTP capabilities, not MP4 support', async () => {
+    const { hasWebRtcReceiveCodec, isAv1PlaybackUnsupported } = await watchPlaybackModeModule;
+
+    assert.equal(hasWebRtcReceiveCodec({
+        codecs: [{ mimeType: 'video/H264' }, { mimeType: 'video/AV1' }],
+    }, 'video/AV1'), true);
+    assert.equal(hasWebRtcReceiveCodec({
+        codecs: [{ mimeType: 'video/H264' }],
+    }, 'video/AV1'), false);
+
+    // Before Device.load(), support is unknown and must not produce a warning.
+    assert.equal(isAv1PlaybackUnsupported({
+        obsVideoCodec: 'av1',
+        receiveCapabilitiesLoaded: false,
+        av1ReceiveSupported: false,
+    }), false);
 
     assert.equal(isAv1PlaybackUnsupported({
         obsVideoCodec: 'av1',
-        mediaSourceSupported: false,
+        receiveCapabilitiesLoaded: true,
+        av1ReceiveSupported: false,
     }), true);
     assert.equal(isAv1PlaybackUnsupported({
         obsVideoCodec: 'h264',
-        mediaSourceSupported: false,
+        receiveCapabilitiesLoaded: true,
+        av1ReceiveSupported: false,
     }), false);
     assert.equal(isAv1PlaybackUnsupported({
         obsVideoCodec: 'av1',
-        mediaSourceSupported: true,
+        receiveCapabilitiesLoaded: true,
+        av1ReceiveSupported: true,
     }), false);
 });

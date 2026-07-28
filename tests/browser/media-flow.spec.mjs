@@ -53,6 +53,24 @@ async function joinAndWatch(viewerPage, code) {
     ))).toBe(true);
 }
 
+async function joinAndWatchRelay(viewerPage, code) {
+    await viewerPage.goto(`https://nextra.cloudflare.test:3210/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    await viewerPage.getByRole('button', { name: 'Watch Stream' }).click();
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible();
+    await expect.poll(() => viewerPage.locator('video').evaluate((video) => (
+        video.videoWidth > 0
+        && video.videoHeight > 0
+        && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+        && video.currentTime > 0
+    ))).toBe(true);
+}
+
+async function getOnlyRoom(request) {
+    const metrics = await (await request.get('/api/metrics')).json();
+    return metrics.rooms.list.length === 1 ? metrics.rooms.list[0] : null;
+}
+
 test('host and viewer receive decoded frames through direct WebRTC and can rejoin', async ({ browser, request }) => {
     const hostContext = await browser.newContext();
     const viewerContext = await browser.newContext();
@@ -68,7 +86,7 @@ test('host and viewer receive decoded frames through direct WebRTC and can rejoi
 
     await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
     await hostPage.getByRole('dialog').getByRole('button', { name: 'Stop Sharing' }).click();
-    await expect(viewerPage.getByText('Host has ended the stream')).toBeVisible();
+    await expect(viewerPage.getByRole('alert')).toHaveText('Host stopped sharing');
     await expect.poll(async () => (await request.get('/api/metrics')).json())
         .toMatchObject({ rooms: { active: 0 } });
 
@@ -138,4 +156,56 @@ test('reload recovery keeps the room code and concurrent stop/unmount is idempot
     await expect.poll(async () => (await request.get('/api/metrics')).json())
         .toMatchObject({ rooms: { active: 0 } });
     await context.close();
+});
+
+test('delayed relay-first viewers select one fresh recorder generation and clean up after rejoin', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const firstViewerContext = await browser.newContext();
+    const secondViewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const firstViewerPage = await firstViewerContext.newPage();
+    const secondViewerPage = await secondViewerContext.newPage();
+
+    const code = await startHost(hostPage);
+    await expect.poll(async () => (await getOnlyRoom(request))?.mediaGeneration || 0).toBeGreaterThan(0);
+    const prewarmGeneration = (await getOnlyRoom(request)).mediaGeneration;
+    await hostPage.waitForTimeout(2_000);
+
+    await joinAndWatchRelay(firstViewerPage, code);
+    await expect.poll(async () => (await getOnlyRoom(request))?.mediaGeneration || 0)
+        .toBeGreaterThan(prewarmGeneration);
+    const firstAudienceGeneration = (await getOnlyRoom(request)).mediaGeneration;
+
+    await joinAndWatchRelay(secondViewerPage, code);
+    await secondViewerPage.waitForTimeout(1_000);
+    expect((await getOnlyRoom(request)).mediaGeneration).toBe(firstAudienceGeneration);
+
+    await secondViewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await firstViewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await expect.poll(async () => {
+        const room = await getOnlyRoom(request);
+        return room ? room.mediaGeneration : 'room-missing';
+    }).toBeNull();
+
+    await joinAndWatchRelay(firstViewerPage, code);
+    await expect.poll(async () => (await getOnlyRoom(request))?.mediaGeneration || 0)
+        .toBeGreaterThan(firstAudienceGeneration);
+
+    await firstViewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    const confirmStopButton = hostPage.getByRole('dialog').getByRole('button', { name: 'Stop Sharing' });
+    if (await confirmStopButton.isVisible()) {
+        await confirmStopButton.click();
+    }
+    await expect.poll(async () => (await request.get('/api/metrics')).json()).toMatchObject({
+        rooms: {
+            active: 0,
+            totalRelayViewers: 0,
+            totalMediasoupConsumers: 0,
+        },
+    });
+
+    await secondViewerContext.close();
+    await firstViewerContext.close();
+    await hostContext.close();
 });
