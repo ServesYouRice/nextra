@@ -341,8 +341,10 @@ const config = {
     // when they intentionally kill a fully initialized worker.
     WORKER_RECOVERY_MIN_UPTIME_SECONDS: parseIntEnv(process.env.WORKER_RECOVERY_MIN_UPTIME_SECONDS, 30),
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
-    ALLOW_REMOTE_METRICS: parseBoolEnv(process.env.ALLOW_REMOTE_METRICS, false),
     METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),
+    OPERATOR_TOKEN: (process.env.OPERATOR_TOKEN || '').trim(),
+    TRUSTED_LAN_CIDRS: (process.env.TRUSTED_LAN_CIDRS || '').trim(),
+    ALLOW_INSECURE_TRUSTED_LAN_RELAY: parseBoolEnv(process.env.ALLOW_INSECURE_TRUSTED_LAN_RELAY, false),
     ENABLE_OPENMETRICS: parseBoolEnv(process.env.ENABLE_OPENMETRICS, false),
     MEDIA_DEBUG_LOGS: parseBoolEnv(process.env.MEDIA_DEBUG_LOGS, false),
     // Public share URL (recommended when using a tunnel/reverse proxy)
@@ -354,6 +356,10 @@ const config = {
 
     // ── OBS / WHIP ──
     WHIP_ENABLED: parseBoolEnv(process.env.WHIP_ENABLED, true),
+    PUBLIC_WHIP_ENABLED: parseBoolEnv(process.env.PUBLIC_WHIP_ENABLED, false),
+    PUBLIC_WHIP_RATE_LIMIT_MAX: parseIntEnv(process.env.PUBLIC_WHIP_RATE_LIMIT_MAX, 5),
+    PUBLIC_WHIP_RATE_LIMIT_WINDOW_MS: parseIntEnv(process.env.PUBLIC_WHIP_RATE_LIMIT_WINDOW_MS, 60000),
+    PUBLIC_WHIP_MAX_PENDING_STARTS: parseIntEnv(process.env.PUBLIC_WHIP_MAX_PENDING_STARTS, 2),
     WHIP_HTTP_PORT: parseIntEnv(process.env.WHIP_HTTP_PORT, 3001),
     WHIP_BIND_HOST: (process.env.WHIP_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1',
     // The OBS-compatible listener is plain HTTP. Widening it beyond loopback
@@ -409,6 +415,15 @@ function validateConfig(value) {
             + 'Keep WHIP_BIND_HOST on loopback, or set WHIP_ALLOW_INSECURE_REMOTE=1 only behind an encrypted VPN/TLS proxy.'
         );
     }
+    if (value.OPERATOR_TOKEN && value.OPERATOR_TOKEN.length < 32) {
+        throw new Error('Invalid OPERATOR_TOKEN: use at least 32 high-entropy characters.');
+    }
+    if (value.ALLOW_INSECURE_TRUSTED_LAN_RELAY && !value.TRUSTED_LAN_CIDRS) {
+        throw new Error('Invalid ALLOW_INSECURE_TRUSTED_LAN_RELAY: declare TRUSTED_LAN_CIDRS first.');
+    }
+    if (value.PUBLIC_WHIP_ENABLED && !value.WHIP_ENABLED) {
+        throw new Error('Invalid PUBLIC_WHIP_ENABLED: WHIP_ENABLED must also be enabled.');
+    }
 
     [
         ['HOST_UPLOAD_MBPS', value.HOST_UPLOAD_MBPS, 0.1, 100000],
@@ -432,6 +447,8 @@ function validateConfig(value) {
         'FALLBACK_FRAGMENT_DURATION_MS', 'WHIP_GRACE_TIMEOUT_MS',
         'WHEP_RATE_LIMIT_MAX', 'WHEP_RATE_LIMIT_WINDOW_MS',
         'WHEP_MAX_GLOBAL_SESSIONS', 'WHIP_HEARTBEAT_INTERVAL_MS',
+        'PUBLIC_WHIP_RATE_LIMIT_MAX', 'PUBLIC_WHIP_RATE_LIMIT_WINDOW_MS',
+        'PUBLIC_WHIP_MAX_PENDING_STARTS',
     ].forEach((name) => assertNumberInRange(name, value[name], 1, Number.MAX_SAFE_INTEGER));
 
     assertNumberInRange('FALLBACK_AUDIO_OFFSET_MS', value.FALLBACK_AUDIO_OFFSET_MS, 0, 60_000);

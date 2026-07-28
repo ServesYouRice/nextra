@@ -68,7 +68,7 @@ test('WHIP CORS reflects only trusted browser origins', async () => {
 test('parallel WHIP starts admit one owner and clear the synchronous claim after failure', { concurrency: false }, async () => {
     const originalWhipEnabled = config.WHIP_ENABLED;
     config.WHIP_ENABLED = true;
-    const room = createRoom('whip-race-host', { ingestMode: 'obs' });
+    const room = await createRoom('whip-race-host', { ingestMode: 'obs' });
     let releaseTransport;
     const transportRelease = new Promise((resolve) => { releaseTransport = resolve; });
     let markTransportEntered;
@@ -109,6 +109,86 @@ test('parallel WHIP starts admit one owner and clear the synchronous claim after
         releaseTransport?.();
         destroyRoom(room.code);
         config.WHIP_ENABLED = originalWhipEnabled;
+        await new Promise((resolve) => server.close(resolve));
+    }
+});
+
+test('public WHIP enforces per-IP and global pending-start limits before media allocation', { concurrency: false }, async () => {
+    const previous = {
+        enabled: config.WHIP_ENABLED,
+        publicEnabled: config.PUBLIC_WHIP_ENABLED,
+        rateMax: config.PUBLIC_WHIP_RATE_LIMIT_MAX,
+        pendingMax: config.PUBLIC_WHIP_MAX_PENDING_STARTS,
+    };
+    config.WHIP_ENABLED = true;
+    config.PUBLIC_WHIP_ENABLED = true;
+    config.PUBLIC_WHIP_RATE_LIMIT_MAX = 10;
+    config.PUBLIC_WHIP_MAX_PENDING_STARTS = 1;
+    const firstRoom = await createRoom('public-whip-a', { ingestMode: 'obs' });
+    const secondRoom = await createRoom('public-whip-b', { ingestMode: 'obs' });
+    const releases = [];
+    let enteredCount = 0;
+    let notifyEntered = null;
+    const waitForEntered = () => new Promise((resolve) => { notifyEntered = resolve; });
+    const app = express();
+    app.use('/whip', createWhipRouter({}, {
+        publicEndpoint: true,
+        getClientIp: (req) => req.headers['x-test-ip'] || 'unknown',
+        createWebRtcTransport: async () => {
+            enteredCount += 1;
+            notifyEntered?.();
+            notifyEntered = null;
+            await new Promise((resolve) => releases.push(resolve));
+            throw new Error('injected public transport failure');
+        },
+    }));
+    const { server, baseUrl } = await listen(app);
+    const postRoom = (room, ip) => fetch(`${baseUrl}/whip/broadcast/${room.code}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/sdp',
+            Authorization: `Bearer ${room.hostToken}`,
+            'x-test-ip': ip,
+        },
+        body: VIDEO_OFFER,
+    });
+
+    try {
+        const firstEntered = waitForEntered();
+        const firstRequest = postRoom(firstRoom, '198.51.100.1');
+        await firstEntered;
+        assert.equal(enteredCount, 1);
+
+        const overlap = await postRoom(secondRoom, '198.51.100.2');
+        assert.equal(overlap.status, 503);
+        assert.match((await overlap.json()).error, /capacity/);
+        assert.equal(enteredCount, 1);
+
+        releases.shift()?.();
+        assert.equal((await firstRequest).status, 500);
+        assert.equal(firstRoom.whipStarting, false);
+
+        const secondEntered = waitForEntered();
+        const afterRelease = postRoom(secondRoom, '198.51.100.3');
+        await secondEntered;
+        assert.equal(enteredCount, 2);
+        releases.shift()?.();
+        assert.equal((await afterRelease).status, 500);
+
+        config.PUBLIC_WHIP_RATE_LIMIT_MAX = 1;
+        const missingRoom = { code: 'ZZZZZZ', hostToken: 'unused-token' };
+        const firstLimited = await postRoom(missingRoom, '198.51.100.99');
+        assert.equal(firstLimited.status, 404);
+        const secondLimited = await postRoom(missingRoom, '198.51.100.99');
+        assert.equal(secondLimited.status, 429);
+    } finally {
+        releases.splice(0).forEach((release) => release());
+        destroyRoom(firstRoom.code);
+        destroyRoom(secondRoom.code);
+        config.WHIP_ENABLED = previous.enabled;
+        config.PUBLIC_WHIP_ENABLED = previous.publicEnabled;
+        config.PUBLIC_WHIP_RATE_LIMIT_MAX = previous.rateMax;
+        config.PUBLIC_WHIP_MAX_PENDING_STARTS = previous.pendingMax;
         await new Promise((resolve) => server.close(resolve));
     }
 });

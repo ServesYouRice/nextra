@@ -2,7 +2,11 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSocket } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { createFmp4RelayPlayer } from './lib/fmp4RelayPlayer';
-import { isAv1PlaybackUnsupported, shouldPreferRelayPlayback } from './lib/watchPlaybackMode.mjs';
+import {
+    hasWebRtcReceiveCodec,
+    isAv1PlaybackUnsupported,
+    shouldPreferRelayPlayback,
+} from './lib/watchPlaybackMode.mjs';
 import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
 import { createLifecycleController } from './lib/lifecycleController.mjs';
 import { useViewerSessionController } from './hooks/useViewerSessionController';
@@ -65,6 +69,7 @@ export default function WatchView({ initialCode = '' }) {
     const socket = useSocket();
     const [codeInput, setCodeInput] = useState(initialCode);
     const [joined, setJoined] = useState(false);
+    const [joinedRoomCode, setJoinedRoomCode] = useState(normalizeRoomCode(initialCode));
     const [watching, setWatching] = useState(false);
     const [error, setError] = useState('');
     const [hostDisconnected, setHostDisconnected] = useState(false);
@@ -114,6 +119,7 @@ export default function WatchView({ initialCode = '' }) {
     const fallbackModeRef = useRef(false);
     const reconnectingRef = useRef(false);
     const joiningRef = useRef(false);
+    const terminalRoomEndedRef = useRef(false);
 
     const cleanupPlayback = useViewerSessionController({
         socket,
@@ -254,8 +260,8 @@ export default function WatchView({ initialCode = '' }) {
 
     useEffect(() => {
         if (!watching || playbackMode !== 'mediasoup') {
-            setConnectionQuality(null);
-            return undefined;
+            const reset = setTimeout(() => setConnectionQuality(null), 0);
+            return () => clearTimeout(reset);
         }
         let active = true;
         const lifecycle = createLifecycleController();
@@ -380,17 +386,13 @@ export default function WatchView({ initialCode = '' }) {
         const attemptId = ++activePlaybackAttemptRef.current;
         if (!videoRef.current) throw new Error('Video element not found');
 
-        console.log('[Nextra] relay-consume-start…');
-        await socketRequest(socket, 'relay-consume-start');
-        console.log('[Nextra] relay-consume-start OK');
-        relaySubscribedRef.current = true;
-
         chunkQueueRef.current = [];
         queuedBytesRef.current = 0;
         let appendingLock = false;
         let mimeType = 'video/webm;codecs=vp8,opus';
         let initResultData = null;
         let liveInitPayload = null;
+        let selectedGeneration = null;
         let resolveLiveInit = null;
         let firstBufferedSettled = false;
         let resolveFirstBuffered = null;
@@ -449,7 +451,9 @@ export default function WatchView({ initialCode = '' }) {
         };
 
         let chunkArrivalCount = 0;
-        const onChunk = (data) => {
+        const onChunk = (payload = {}) => {
+            if (payload.generation !== selectedGeneration) return;
+            const data = payload.chunk;
             chunkArrivalCount += 1;
             if (chunkArrivalCount <= 3 || chunkArrivalCount % 20 === 0) {
                 mediaDebugLog(`[Nextra] media-chunk #${chunkArrivalCount} arrived, type=${typeof data}, constructor=${data?.constructor?.name}, size=${data?.size ?? data?.byteLength ?? '?'}`);
@@ -468,7 +472,7 @@ export default function WatchView({ initialCode = '' }) {
         };
 
         const onMediaInit = (payload = {}) => {
-            if (!payload?.mimeType) return;
+            if (!payload?.mimeType || !Number.isSafeInteger(payload.generation) || payload.generation <= 0) return;
             // A new recorder session started — discard any stale chunks from
             // the previous session so the fresh init segment is appended first.
             if (chunkQueueRef.current.length > 0) {
@@ -476,6 +480,7 @@ export default function WatchView({ initialCode = '' }) {
                 chunkQueueRef.current.length = 0;
                 queuedBytesRef.current = 0;
             }
+            selectedGeneration = payload.generation;
             liveInitPayload = payload;
             mimeType = payload.mimeType;
             if (resolveLiveInit) {
@@ -532,11 +537,21 @@ export default function WatchView({ initialCode = '' }) {
         relayCleanupRef.current = cleanupRelayAttempt;
 
         try {
+            console.log('[Nextra] relay-consume-start…');
+            const relayStart = await socketRequest(socket, 'relay-consume-start');
+            console.log('[Nextra] relay-consume-start OK');
+            relaySubscribedRef.current = true;
+
+            if (relayStart.relayViewerCount > 1 && relayStart.bootstrapComplete === false) {
+                throw new Error('Relay playback has been active too long for a safe late join. Rejoin after the current relay viewers leave.');
+            }
+
             try {
                 initResultData = await socketRequest(socket, 'get-media-init');
                 mediaDebugLog('[Nextra] get-media-init OK:', initResultData?.init?.mimeType || 'no mime');
                 if (initResultData.init?.mimeType) {
                     mimeType = initResultData.init.mimeType;
+                    selectedGeneration = initResultData.init.generation;
                 }
             } catch {
                 mediaDebugLog('[Nextra] get-media-init not cached yet, waiting for live media-init...');
@@ -549,7 +564,9 @@ export default function WatchView({ initialCode = '' }) {
             // appended to the SourceBuffer is the fresh WebM init segment.
             // Even when get-media-init already returned a mimeType, we still
             // need the live event to synchronise the queue.
-            const needsLiveInit = !initResultData?.init?.mimeType || isTunnelOrigin;
+            const needsLiveInit = !initResultData?.init?.mimeType
+                || !Number.isSafeInteger(initResultData?.init?.generation)
+                || (isTunnelOrigin && relayStart.relayViewerCount === 1);
 
             if (needsLiveInit) {
                 const liveInit = liveInitPayload || await new Promise((resolve, reject) => {
@@ -628,11 +645,17 @@ export default function WatchView({ initialCode = '' }) {
                 processQueue();
             });
 
-            // Don't use the cached initChunk from get-media-init — when the relay
-            // recorder is prewarmed, it's from the start of the session and
-            // incompatible with live chunks arriving minutes later. Instead, let
-            // processQueue append the first chunk from the (re)started recorder,
-            // which contains a fresh WebM init segment + current keyframe.
+            // The relay-start acknowledgement is ordered before subsequent live
+            // chunks. Prepend its bounded snapshot so a later viewer sees the
+            // active WebM generation from byte zero without restarting it.
+            if (relayStart.relayViewerCount > 1 && relayStart.bootstrapChunks?.length) {
+                const bootstrapChunks = relayStart.bootstrapChunks
+                    .map(toUint8ArraySync)
+                    .filter((chunk) => chunk?.byteLength);
+                const bootstrapBytes = bootstrapChunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+                chunkQueueRef.current.unshift(...bootstrapChunks);
+                queuedBytesRef.current += bootstrapBytes;
+            }
 
             safetyInterval = setInterval(() => {
                 if (
@@ -678,19 +701,30 @@ export default function WatchView({ initialCode = '' }) {
     }, [joined, socket]);
 
     useEffect(() => {
+        const onRoomEnded = ({ reason } = {}) => {
+            terminalRoomEndedRef.current = true;
+            reconnectingRef.current = false;
+            setHostReconnectingReason('');
+            cleanupPlayback();
+            setWatching(false);
+            setWatchLoading(false);
+            setFallbackMode(false);
+            setFallbackState(null);
+            setWhipReconnecting(false);
+            setHostDisconnected(true);
+            setError(reason || 'This room ended. Leave it and join a new room to continue.');
+        };
+
         const onHostDisconnected = ({ reason, recoverable } = {}) => {
             if (recoverable) {
                 setHostReconnectingReason(reason || 'Host reconnecting...');
                 return;
             }
-
-            setHostReconnectingReason('');
-            cleanupPlayback();
-            setHostDisconnected(true);
-            setWatching(false);
+            onRoomEnded({ reason });
         };
 
         const onHostReconnected = () => {
+            terminalRoomEndedRef.current = false;
             setHostReconnectingReason('');
             setHostDisconnected(false);
             setError('');
@@ -734,19 +768,14 @@ export default function WatchView({ initialCode = '' }) {
             console.error('[WatchView] Fallback worker failed:', message);
             setFallbackState('error');
         };
-        const onServerRestarting = ({ reconnectAfterMs } = {}) => {
-            const delaySeconds = Math.max(1, Math.ceil((Number(reconnectAfterMs) || 1000) / 1000));
-            setHostReconnectingReason(`Server restarting; reconnecting in about ${delaySeconds}s...`);
-            setError('Server restart in progress. Playback will resume when the server is available.');
-        };
-
         socket.on('host-disconnected', onHostDisconnected);
         socket.on('host-reconnected', onHostReconnected);
         socket.on('new-producer', onNewProducer);
         socket.on('producer-closed', onProducerClosed);
         socket.on('whip-status', onWhipStatus);
         socket.on('fallback-error', onFallbackError);
-        socket.on('server-restarting', onServerRestarting);
+        socket.on('room-ended', onRoomEnded);
+        socket.on('server-restarting', onRoomEnded);
 
         return () => {
             socket.off('host-disconnected', onHostDisconnected);
@@ -755,7 +784,8 @@ export default function WatchView({ initialCode = '' }) {
             socket.off('producer-closed', onProducerClosed);
             socket.off('whip-status', onWhipStatus);
             socket.off('fallback-error', onFallbackError);
-            socket.off('server-restarting', onServerRestarting);
+            socket.off('room-ended', onRoomEnded);
+            socket.off('server-restarting', onRoomEnded);
         };
     }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback]);
 
@@ -845,25 +875,25 @@ export default function WatchView({ initialCode = '' }) {
     const joinRoomAndLoadDevice = useCallback(async (roomCode) => {
         const cleanCode = normalizeRoomCode(roomCode);
         const response = await socketRequest(socket, 'join-room', { code: cleanCode, passphrase });
-        const av1Supported = typeof MediaSource !== 'undefined'
-            && MediaSource.isTypeSupported('video/mp4; codecs="av01.0.08M.08"');
-        const av1Unsupported = isAv1PlaybackUnsupported({
-            obsVideoCodec: response.obsVideoCodec,
-            mediaSourceSupported: av1Supported,
-        });
-        if (av1Unsupported) {
-            console.warn('[WatchView] AV1 playback is not supported in this browser');
-        }
-        setCodecUnsupported(av1Unsupported);
-
         const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
         const device = await getDevice();
         if (!device.loaded) {
             await device.load({ routerRtpCapabilities: rtpCapabilities });
         }
         deviceRef.current = device;
+        const av1ReceiveSupported = hasWebRtcReceiveCodec(device.rtpCapabilities, 'video/AV1');
+        const av1Unsupported = isAv1PlaybackUnsupported({
+            obsVideoCodec: response.obsVideoCodec,
+            receiveCapabilitiesLoaded: device.loaded,
+            av1ReceiveSupported,
+        });
+        if (av1Unsupported) {
+            console.warn('[WatchView] WebRTC receive capabilities do not include video/AV1');
+        }
+        setCodecUnsupported(av1Unsupported);
 
         joinedRoomCodeRef.current = cleanCode;
+        setJoinedRoomCode(cleanCode);
         setJoined(true);
         setHasProducer(response.hasProducer || false);
         setAllowMediaControl(response.allowMediaControl === true);
@@ -877,6 +907,7 @@ export default function WatchView({ initialCode = '' }) {
     }, [socket, passphrase]);
 
     const handleJoin = useCallback(async () => {
+        terminalRoomEndedRef.current = false;
         if (joiningRef.current) return;
         setError('');
         setHostDisconnected(false);
@@ -1109,6 +1140,7 @@ export default function WatchView({ initialCode = '' }) {
         }
 
         cleanupPlayback();
+        terminalRoomEndedRef.current = false;
         resetDevice();
         joinedRoomCodeRef.current = '';
         setJoined(false);
@@ -1132,7 +1164,7 @@ export default function WatchView({ initialCode = '' }) {
 
     useEffect(() => {
         const onReconnect = async () => {
-            if (!joinedRef.current || reconnectingRef.current) return;
+            if (!joinedRef.current || reconnectingRef.current || terminalRoomEndedRef.current) return;
             const roomCode = joinedRoomCodeRef.current || normalizeRoomCode(codeInput);
             if (!roomCode) return;
 
@@ -1329,7 +1361,7 @@ export default function WatchView({ initialCode = '' }) {
                                     <>
                                         <p>Waiting for host to start sharing...</p>
                                         <p className="video-overlay-sub">
-                                            You&apos;re in room {formatRoomCode(normalizeRoomCode(joinedRoomCodeRef.current || codeInput))}.
+                                            You&apos;re in room {formatRoomCode(normalizeRoomCode(joinedRoomCode || codeInput))}.
                                             The stream starts automatically once the host begins sharing.
                                         </p>
                                     </>
@@ -1346,7 +1378,7 @@ export default function WatchView({ initialCode = '' }) {
                         {hostDisconnected && (
                             <div className="video-overlay">
                                 <p className="host-ended">
-                                    Host has ended the stream
+                                    This room has ended
                                 </p>
                             </div>
                         )}
@@ -1360,7 +1392,7 @@ export default function WatchView({ initialCode = '' }) {
 
                     {ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported && (
                         <div className="alert alert-error" role="alert">
-                            Your browser does not support AV1 playback. The host is streaming in AV1. Fallback playback is not available in this browser.
+                            This browser&apos;s WebRTC receive capabilities do not include video/AV1. This AV1 room has no relay fallback.
                         </div>
                     )}
 

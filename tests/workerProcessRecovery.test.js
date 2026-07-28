@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const net = require('node:net');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { io: createSocketClient } = require('socket.io-client');
 
 const projectRoot = path.resolve(__dirname, '..');
 
@@ -45,6 +46,7 @@ test('a killed real mediasoup subprocess is replaced with a ready process', {
     const baseUrl = `http://127.0.0.1:${port}`;
     let output = '';
     let replacementStarted = false;
+    let hostSocket = null;
 
     const child = spawn(process.execPath, ['server.js'], {
         cwd: projectRoot,
@@ -74,6 +76,7 @@ test('a killed real mediasoup subprocess is replaced with a ready process', {
     child.stderr.on('data', (chunk) => { output += chunk.toString(); });
 
     t.after(async () => {
+        hostSocket?.close();
         try { await fetch(`${baseUrl}/api/test/shutdown`, { method: 'POST' }); } catch {}
         if (!replacementStarted && child.exitCode === null) child.kill();
     });
@@ -83,9 +86,35 @@ test('a killed real mediasoup subprocess is replaced with a ready process', {
     assert.ok(Number.isInteger(before.process.pid));
     assert.ok(Number.isInteger(before.mediaWorker.pid));
 
+    hostSocket = createSocketClient(baseUrl, {
+        transports: ['websocket'],
+        reconnection: false,
+    });
+    await new Promise((resolve, reject) => {
+        hostSocket.once('connect', resolve);
+        hostSocket.once('connect_error', reject);
+    });
+    const created = await new Promise((resolve) => {
+        hostSocket.emit('create-room', { ingestMode: 'browser' }, resolve);
+    });
+    assert.equal(created.success, true);
+    const roomEnded = new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('room-ended event timed out')), 5_000);
+        hostSocket.once('room-ended', (payload) => {
+            clearTimeout(timeout);
+            resolve(payload);
+        });
+    });
+
     const killed = await fetch(`${baseUrl}/api/test/kill-media-worker`, { method: 'POST' });
     assert.equal(killed.status, 202);
     assert.equal((await killed.json()).workerPid, before.mediaWorker.pid);
+    assert.deepEqual(await roomEnded, {
+        code: 'media-worker-fatal',
+        reason: 'The media engine restarted. This room ended; create or join a new room.',
+        recoverable: false,
+        terminal: true,
+    });
 
     const after = await waitForJson(`${baseUrl}/api/metrics`, (body) => (
         body.process?.pid !== before.process.pid

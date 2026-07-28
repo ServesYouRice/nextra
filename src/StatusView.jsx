@@ -77,9 +77,10 @@ export default function StatusView() {
     }, []);
 
     useEffect(() => {
-        fetchMetrics();
+        const initialFetch = setTimeout(fetchMetrics, 0);
         const interval = setInterval(fetchMetrics, REFRESH_INTERVAL_MS);
         return () => {
+            clearTimeout(initialFetch);
             clearInterval(interval);
             abortRef.current?.abort();
         };

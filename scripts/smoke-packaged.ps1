@@ -17,7 +17,12 @@ try {
         Start-Sleep -Milliseconds 500
         try {
             $response = Invoke-RestMethod -Uri "$baseUrl/readyz" -TimeoutSec 2
-            if ($response.status -eq 'ready') { $ready = $true; break }
+            $requiredComponentsReady = @($response.components.PSObject.Properties.Value) |
+                Where-Object { $_.required -and $_.status -ne 'ready' }
+            if ($response.status -eq 'ready' -and $requiredComponentsReady.Count -eq 0) {
+                $ready = $true
+                break
+            }
         } catch {}
     }
     if (-not $ready) { throw 'Packaged executable did not become ready.' }

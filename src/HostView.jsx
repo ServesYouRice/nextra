@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useContext } from 'rea
 import { SocketContext } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { configureObsStream, stopObsStream } from './lib/obsWebSocket';
+import { getAv1EncoderCandidates } from './lib/obsOutputModel.mjs';
 import CopyField from './components/CopyField';
 import StatusPill from './components/StatusPill';
 import Modal from './components/Modal';
@@ -124,35 +125,16 @@ function createGpuCapability(overrides = {}) {
         gpu: 'unknown',
         h264EncoderIds: ['obs_x264'],
         h264Label: 'x264',
-        av1EncoderIds: [],
+        av1EncoderIds: getAv1EncoderCandidates(),
         av1Label: 'AV1',
-        av1Supported: false,
         ...overrides,
     };
 }
 
 /**
- * Detect host GPU and determine the preferred OBS encoder families.
+ * Detect the host GPU only to order OBS encoder attempts. OBS set-and-verify is
+ * authoritative because WebGL renderers may be masked or misleading.
  */
-function detectAv1Support(renderer) {
-    const normalized = String(renderer || '').toUpperCase();
-    if (!normalized) return false;
-
-    if (/NVIDIA|GEFORCE|RTX/.test(normalized)) {
-        return /\bRTX\s*40\d{2}\b|\bRTX\s*50\d{2}\b|\bRTX\s*(4000|4500|5000|6000)\s*ADA\b|\bADA\b|\bL4\b|\bL40\b/.test(normalized);
-    }
-
-    if (/AMD|RADEON/.test(normalized)) {
-        return /\bRX\s*7\d{3}\b|\bRADEON\s*7\d{3}\b|\b780M\b|\b880M\b|\b890M\b/.test(normalized);
-    }
-
-    if (/INTEL/.test(normalized)) {
-        return /\bARC\b|\bULTRA\b/.test(normalized);
-    }
-
-    return false;
-}
-
 function detectGpuCapability() {
     try {
         const canvas = document.createElement('canvas');
@@ -164,16 +146,15 @@ function detectGpuCapability() {
 
         const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '';
         canvas.remove();
-        const av1Supported = detectAv1Support(renderer);
+        const av1EncoderIds = getAv1EncoderCandidates(renderer);
 
         if (/GTX|NVIDIA|GeForce/i.test(renderer)) {
             return createGpuCapability({
                 gpu: renderer,
                 h264EncoderIds: ['obs_nvenc_h264_tex', 'jim_nvenc', 'obs_x264'],
                 h264Label: 'NVENC',
-                av1EncoderIds: av1Supported ? ['obs_nvenc_av1_tex', 'jim_av1_nvenc', 'ffmpeg_nvenc_av1'] : [],
+                av1EncoderIds,
                 av1Label: 'NVENC AV1',
-                av1Supported,
             });
         }
 
@@ -182,9 +163,8 @@ function detectGpuCapability() {
                 gpu: renderer,
                 h264EncoderIds: ['h264_texture_amf', 'obs_amf_h264', 'obs_x264'],
                 h264Label: 'AMF',
-                av1EncoderIds: av1Supported ? ['av1_texture_amf', 'obs_amf_av1', 'amd_amf_av1'] : [],
+                av1EncoderIds,
                 av1Label: 'AMF AV1',
-                av1Supported,
             });
         }
 
@@ -193,13 +173,12 @@ function detectGpuCapability() {
                 gpu: renderer,
                 h264EncoderIds: ['obs_qsv11', 'obs_x264'],
                 h264Label: 'QSV',
-                av1EncoderIds: av1Supported ? ['obs_qsv11_av1', 'obs_qsv_av1'] : [],
+                av1EncoderIds,
                 av1Label: 'QSV AV1',
-                av1Supported,
             });
         }
 
-        return createGpuCapability({ gpu: renderer, av1Supported });
+        return createGpuCapability({ gpu: renderer, av1EncoderIds });
     } catch {
         return createGpuCapability();
     }
@@ -417,6 +396,7 @@ export default function HostView() {
     const [relayViewerCount, setRelayViewerCount] = useState(0);
     const [error, setError] = useState('');
     const [status, setStatus] = useState('idle');
+    const [terminalRoomEnded, setTerminalRoomEnded] = useState(false);
     const [showStopConfirm, setShowStopConfirm] = useState(false);
     const [whepEnabled, setWhepEnabled] = useState(false);
     const [qualityProfile, setQualityProfile] = useState(() => {
@@ -474,6 +454,7 @@ export default function HostView() {
     const pageHidingRef = useRef(false);
     const hostUnmountTimerRef = useRef(null);
     const prevRelayViewerCountRef = useRef(0);
+    const relayGenerationRef = useRef(0);
 
     const bitratePerViewer = viewerCount > 0 ? hostUploadMbps / viewerCount : hostUploadMbps;
     const bandwidthWarning = viewerCount >= 3 && bitratePerViewer < 7
@@ -545,12 +526,6 @@ export default function HostView() {
     }, [frameRate, obsApplySettings, obsAutoStart, obsAv1Mode, obsPassword, qualityProfile, obsTuningProfile]);
 
     useEffect(() => {
-        if (obsTryAv1 && !obsApplySettings) {
-            setObsApplySettings(true);
-        }
-    }, [obsTryAv1, obsApplySettings]);
-
-    useEffect(() => {
         persistObsPassword(obsPassword);
     }, [obsPassword]);
 
@@ -583,12 +558,6 @@ export default function HostView() {
         byokTurnUsername,
         byokTurnCredential,
     ]);
-
-    useEffect(() => {
-        if (ingestMode !== 'obs' || !obsTryAv1) {
-            setShowByokTurnModal(false);
-        }
-    }, [ingestMode, obsTryAv1]);
 
     // WHEP enablement is only exposed via the HTTP config endpoint (the
     // socket server-config payload does not include it), so probe it once.
@@ -668,11 +637,11 @@ export default function HostView() {
         }
     }, []);
 
-    const emitRelayChunk = useCallback((blob) => {
+    const emitRelayChunk = useCallback((blob, generation) => {
         if (!blob || blob.size <= 0) return;
 
         if (blob.size <= relayMaxChunkSize) {
-            socket.emit('media-chunk', blob);
+            socket.emit('media-chunk', { generation, chunk: blob });
             return;
         }
 
@@ -680,7 +649,7 @@ export default function HostView() {
         for (let offset = 0; offset < blob.size; offset += relayChunkEmitSize) {
             const part = blob.slice(offset, Math.min(offset + relayChunkEmitSize, blob.size));
             if (part.size > 0) {
-                socket.emit('media-chunk', part);
+                socket.emit('media-chunk', { generation, chunk: part });
                 emittedParts += 1;
             }
         }
@@ -731,13 +700,14 @@ export default function HostView() {
             mimeType,
             videoBitsPerSecond: effectiveRelayBitsPerSecond,
         });
+        const generation = ++relayGenerationRef.current;
         mediaRecorderRef.current = recorder;
 
         let chunkCount = 0;
         let lastChunkAt = 0;
         recorder.onstart = () => {
             lastChunkAt = Date.now();
-            socket.emit('media-init', { mimeType });
+            socket.emit('media-init', { mimeType, generation });
         };
         recorder.ondataavailable = (evt) => {
             if (evt.data && evt.data.size > 0) {
@@ -746,7 +716,7 @@ export default function HostView() {
                 if (chunkCount % 20 === 0) {
                     mediaDebugLog(`[Nextra-Host] Emitted ${chunkCount} relay chunks. Latest size: ${evt.data.size}`);
                 }
-                emitRelayChunk(evt.data);
+                emitRelayChunk(evt.data, generation);
             }
         };
         recorder.onerror = (evt) => {
@@ -809,6 +779,7 @@ export default function HostView() {
         setObsAutoMessage('');
         setShowByokTurnModal(false);
         setStatus('idle');
+        setTerminalRoomEnded(false);
         resetDevice();
     }, []);
 
@@ -823,6 +794,13 @@ export default function HostView() {
         silentAudioTrackRef,
         resetState: resetHostSessionState,
     });
+
+    const terminateHostSession = useCallback((reason) => {
+        cleanup();
+        setResumePending(false);
+        setTerminalRoomEnded(true);
+        setError(reason || 'This room ended. Create a new room to share again.');
+    }, [cleanup]);
 
     useEffect(() => {
         if (hostUnmountTimerRef.current) {
@@ -875,12 +853,15 @@ export default function HostView() {
                 setRoomMetrics(metrics || null);
             } catch (err) {
                 console.warn('[Nextra] Failed to reclaim host room after reconnect:', err.message);
+                if (err.terminal === true) {
+                    terminateHostSession(err.reason || err.message);
+                }
             }
         };
 
         socket.on('connect', onReconnect);
         return () => socket.off('connect', onReconnect);
-    }, [socket, isSharing, roomCode]);
+    }, [socket, isSharing, roomCode, terminateHostSession]);
 
     useEffect(() => {
         const stored = loadHostRecoverySession();
@@ -907,7 +888,14 @@ export default function HostView() {
                 setIngestMode(response.ingestMode === 'obs' ? 'obs' : 'browser');
                 setObsVideoCodec(response.obsVideoCodec || null);
                 setRoomHasTurnServer(!!response.hasRoomTurnServer);
-                resumeRoomRef.current = { ...stored, ...response };
+                // Room-state responses also carry a stable `code` describing the
+                // transition (for example `host-reconnected`). Preserve the room
+                // identity from the authenticated recovery session explicitly.
+                resumeRoomRef.current = {
+                    ...response,
+                    code: stored.code,
+                    hostToken: stored.hostToken,
+                };
                 if (response.ingestMode === 'obs') {
                     setIsSharing(true);
                     setStatus('streaming');
@@ -916,14 +904,27 @@ export default function HostView() {
                     setResumePending(true);
                     setStatus('idle');
                 }
-            } catch {
-                clearHostRecoverySession();
+            } catch (err) {
+                if (cancelled) return;
+                terminateHostSession(err.reason || err.message || 'The previous room ended. Create a new room to continue.');
             }
         };
 
         reclaimStoredRoom();
         return () => { cancelled = true; };
-    }, [socket]);
+    }, [socket, terminateHostSession]);
+
+    useEffect(() => {
+        const onRoomEnded = ({ reason } = {}) => terminateHostSession(reason);
+        socket.on('room-ended', onRoomEnded);
+        // Older servers used this event for process replacement. In-memory
+        // rooms cannot survive either signal, so it is terminal as well.
+        socket.on('server-restarting', onRoomEnded);
+        return () => {
+            socket.off('room-ended', onRoomEnded);
+            socket.off('server-restarting', onRoomEnded);
+        };
+    }, [socket, terminateHostSession]);
 
     useEffect(() => {
         const onRoomMetrics = (data) => {
@@ -1035,10 +1036,14 @@ export default function HostView() {
             return;
         }
 
+        const previousRelayViewerCount = prevRelayViewerCountRef.current;
         prevRelayViewerCountRef.current = relayViewerCount;
 
         if (relayViewerCount > 0 || shouldPrewarmRelay) {
-            if (!mediaRecorderRef.current) {
+            if (relayViewerCount > 0 && previousRelayViewerCount === 0 && mediaRecorderRef.current) {
+                stopRelayRecorder();
+                startRelayRecorder();
+            } else if (!mediaRecorderRef.current) {
                 startRelayRecorder();
             }
         } else {
@@ -1065,6 +1070,7 @@ export default function HostView() {
 
     const handleStartSharing = useCallback(async () => {
         setError('');
+        setTerminalRoomEnded(false);
         setStatus('connecting');
         const resumedRoom = resumeRoomRef.current;
 
@@ -1408,6 +1414,13 @@ export default function HostView() {
         setShowByokTurnModal(false);
     }, []);
 
+    const handleIngestModeChange = useCallback((mode) => {
+        setIngestMode(mode);
+        if (mode !== 'obs') {
+            setShowByokTurnModal(false);
+        }
+    }, []);
+
     const localWatchLink = roomCode ? `${lanBaseUrl}/#watch/${roomCode}` : '';
     const publicWatchLink = roomCode && shareBaseUrl ? `${shareBaseUrl}/#watch/${roomCode}` : '';
     const showPublicLink = !!publicWatchLink && publicWatchLink !== localWatchLink;
@@ -1438,7 +1451,7 @@ export default function HostView() {
 
             {showFirstRun && !isSharing && (
                 <FirstRunGuide
-                    onChoose={(mode) => { setIngestMode(mode); dismissFirstRun(); }}
+                    onChoose={(mode) => { handleIngestModeChange(mode); dismissFirstRun(); }}
                     onDismiss={dismissFirstRun}
                 />
             )}
@@ -1476,7 +1489,13 @@ export default function HostView() {
                                     onClick={handleStartSharing}
                                     disabled={status === 'connecting'}
                                 >
-                                    {status === 'connecting' ? 'Connecting...' : (resumePending ? 'Resume Sharing' : 'Start Sharing')}
+                                    {status === 'connecting'
+                                        ? 'Connecting...'
+                                        : resumePending
+                                            ? 'Resume Sharing'
+                                            : terminalRoomEnded
+                                                ? 'Create new room'
+                                                : 'Start Sharing'}
                                 </button>
                                 {ingestMode === 'obs' && obsApplySettings && (
                                     <div className="mode-toggle" role="group" aria-label="OBS tuning profile">
@@ -1634,7 +1653,7 @@ export default function HostView() {
                                         type="checkbox"
                                         id="obsMode"
                                         checked={ingestMode === 'obs'}
-                                        onChange={(e) => setIngestMode(e.target.checked ? 'obs' : 'browser')}
+                                        onChange={(e) => handleIngestModeChange(e.target.checked ? 'obs' : 'browser')}
                                     />
                                     <label htmlFor="obsMode">
                                         Use OBS (WHIP ingest)
@@ -1671,18 +1690,13 @@ export default function HostView() {
                                             type="checkbox"
                                             id="obsTryAv1"
                                             checked={obsTryAv1}
-                                            disabled={!gpuInfo.av1Supported || ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported)}
+                                            disabled={(publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported}
                                             onChange={(e) => handleObsTryAv1Change(e.target.checked)}
                                         />
                                         <label htmlFor="obsTryAv1">
                                             Use BYOK TURN (AV1)
                                             <span className="setting-hint">Open TURN setup in a modal and switch OBS rooms to AV1 WebRTC-only mode</span>
-                                            {!gpuInfo.av1Supported && (
-                                                <span className="setting-hint">
-                                                    Disabled: AV1 encode was not detected on this host GPU.
-                                                </span>
-                                            )}
-                                            {gpuInfo.av1Supported && (publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported && (
+                                            {(publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported && (
                                                 <span className="setting-hint">
                                                     Disabled for public sharing: configure a reachable public media address first.
                                                 </span>
