@@ -41,11 +41,17 @@ if (result.status !== 0) {
 }
 
 const observed = new Map();
+const pathAtDepth = [];
 for (const line of String(result.stdout).split(/\r?\n/)) {
-    const match = line.match(/^#\s+(.+?)\s+\|\s+([\d.]+)\s+\|\s+([\d.]+)\s+\|\s+([\d.]+)\s+\|/);
+    const match = line.match(/^# (.*?\S)\s+\|\s*([\d.]*)\s+\|\s*([\d.]*)\s+\|\s*([\d.]*)\s+\|/);
     if (!match) continue;
-    const file = match[1].trim().replaceAll('\\', '/');
+    const rawName = match[1];
+    const depth = rawName.length - rawName.trimStart().length;
+    pathAtDepth[depth] = rawName.trim();
+    pathAtDepth.length = depth + 1;
+    const file = pathAtDepth.join('/').replaceAll('\\', '/');
     if (!targets.has(file)) continue;
+    if (!match[2] || !match[3] || !match[4]) continue;
     observed.set(file, {
         lines: Number(match[2]),
         branches: Number(match[3]),

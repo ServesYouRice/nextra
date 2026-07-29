@@ -41,6 +41,7 @@ jobs:
       - run: npm ci
       - run: npm run release:prep
       - run: npm run package:artifact
+      - run: npx playwright install chromium
       - name: Smoke-test packaged executable
         shell: powershell
         run: .\scripts\smoke-packaged.ps1
