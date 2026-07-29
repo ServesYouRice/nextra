@@ -62,3 +62,13 @@ Never write a measured number you did not observe, and never mark B or C Done fr
 CI results. Finish step A, then keep this card Blocked with the missing owner or
 hardware named.
 </stop>
+
+<evidence>
+2026-07-29 non-UI step A2 complete: Windows packaging automation replaces the
+real mediasoup worker, waits for distinct ready app/worker PIDs, proves decoded
+frames through the packaged Host/view flow, shuts down, and rejects leftover
+caxa or cloudflared processes. Local Node 22 `release:prep`, the 24-case Chromium
+and mobile-Chrome E2E suite, artifact build, and the strengthened packaged smoke
+passed. Step A1's remaining UI/browser-matrix scope is being handled separately;
+steps B and C remain blocked on D03 release hardware and D04 named owners/access.
+</evidence>

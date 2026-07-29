@@ -1477,16 +1477,28 @@ async function startWhipHttpServer(whipRouter) {
             finished = true;
             try {
                 const { spawn } = require('child_process');
-                spawn(process.execPath, process.argv.slice(1), {
+                const replacement = spawn(process.execPath, [
+                    ...process.execArgv,
+                    ...process.argv.slice(1),
+                ], {
                     detached: true,
-                    stdio: 'inherit',
+                    stdio: 'ignore',
                     cwd: process.cwd(),
                     env: process.env,
-                }).unref();
+                    windowsHide: true,
+                });
+                replacement.once('spawn', () => {
+                    replacement.unref();
+                    process.exit(0);
+                });
+                replacement.once('error', (err) => {
+                    console.error('[recovery] Failed to relaunch automatically:', err.message);
+                    process.exit(1);
+                });
             } catch (err) {
                 console.error('[recovery] Failed to relaunch automatically:', err.message);
+                process.exit(1);
             }
-            process.exit(0);
         };
 
         // Give Socket.IO one event-loop turn to flush the terminal state before

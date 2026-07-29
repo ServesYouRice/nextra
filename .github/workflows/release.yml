@@ -42,7 +42,9 @@ jobs:
           Remove-Item $pfx -Force
       - name: Smoke-test signed artifact
         shell: powershell
-        run: .\scripts\smoke-packaged.ps1
+        run: |
+          npx playwright install chromium
+          .\scripts\smoke-packaged.ps1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Nextra-${{ github.ref_name }}-windows
