@@ -1,11 +1,5 @@
 import React from 'react';
-
-function formatBytes(value) {
-    const bytes = Number(value) || 0;
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
+import { formatBytes } from '../lib/formatBytes.mjs';
 
 export default function HostDiagnostics({ metrics }) {
     if (!metrics) return null;
@@ -17,7 +11,7 @@ export default function HostDiagnostics({ metrics }) {
             <dl>
                 <div><dt>Fallback restarts</dt><dd>{metrics.fallbackRestartCount || 0}</dd></div>
                 <div><dt>Dropped relay chunks</dt><dd>{relay.droppedOversized || 0}</dd></div>
-                <div><dt>Dropped fallback input</dt><dd>{formatBytes(metrics.fallbackDroppedBytes)}</dd></div>
+                <div><dt>Dropped fallback input</dt><dd>{formatBytes(metrics.fallbackDroppedBytes, { maxUnit: 'MB' })}</dd></div>
                 <div><dt>Event-loop p95</dt><dd>{Number(eventLoop.p95 || 0).toFixed(1)} ms</dd></div>
                 <div><dt>Event-loop max</dt><dd>{Number(eventLoop.max || 0).toFixed(1)} ms</dd></div>
             </dl>

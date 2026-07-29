@@ -10,17 +10,12 @@ import {
 import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
 import { createLifecycleController } from './lib/lifecycleController.mjs';
 import { useViewerSessionController } from './hooks/useViewerSessionController';
+import UserErrorAlert from './components/UserErrorAlert';
+import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
-const MEDIA_DEBUG_LOGS = (() => {
-    try {
-        const params = new URLSearchParams(window.location.search);
-        return params.has('debugMedia') || window.localStorage.getItem('nextra.debugMedia') === '1';
-    } catch {
-        return false;
-    }
-})();
+const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, window.localStorage);
 
 function mediaDebugLog(...args) {
     if (MEDIA_DEBUG_LOGS) {
@@ -72,6 +67,7 @@ export default function WatchView({ initialCode = '' }) {
     const [joinedRoomCode, setJoinedRoomCode] = useState(normalizeRoomCode(initialCode));
     const [watching, setWatching] = useState(false);
     const [error, setError] = useState('');
+    const [codeError, setCodeError] = useState(false);
     const [hostDisconnected, setHostDisconnected] = useState(false);
     const [hostReconnectingReason, setHostReconnectingReason] = useState('');
     const [mediaControlStatus, setMediaControlStatus] = useState('');
@@ -94,8 +90,10 @@ export default function WatchView({ initialCode = '' }) {
     const [codecUnsupported, setCodecUnsupported] = useState(false);
     const [whipReconnecting, setWhipReconnecting] = useState(false);
     const [connectionQuality, setConnectionQuality] = useState(null);
+    const [isFullscreen, setIsFullscreen] = useState(false);
 
     const videoRef = useRef(null);
+    const passphraseInputRef = useRef(null);
     const deviceRef = useRef(null);
     const recvTransportRef = useRef(null);
     const consumersRef = useRef([]);
@@ -120,6 +118,23 @@ export default function WatchView({ initialCode = '' }) {
     const reconnectingRef = useRef(false);
     const joiningRef = useRef(false);
     const terminalRoomEndedRef = useRef(false);
+
+    useEffect(() => {
+        if (passphraseRequired) passphraseInputRef.current?.focus();
+    }, [passphraseRequired]);
+
+    useEffect(() => {
+        const syncFullscreen = () => {
+            const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
+            setIsFullscreen(fullscreenElement === videoRef.current);
+        };
+        document.addEventListener('fullscreenchange', syncFullscreen);
+        document.addEventListener('webkitfullscreenchange', syncFullscreen);
+        return () => {
+            document.removeEventListener('fullscreenchange', syncFullscreen);
+            document.removeEventListener('webkitfullscreenchange', syncFullscreen);
+        };
+    }, []);
 
     const cleanupPlayback = useViewerSessionController({
         socket,
@@ -595,7 +610,7 @@ export default function WatchView({ initialCode = '' }) {
             mediaDebugLog('[Nextra] Setting up MediaSource with mime:', mimeType);
             const mseMimeSupported = window.MediaSource && MediaSource.isTypeSupported(mimeType);
             if (!mseMimeSupported) {
-                throw new Error('Your browser does not support live WebM streaming. Use Chrome, Edge, or Firefox.');
+                throw new Error('This browser cannot play the relay stream (Media Source Extensions rejected the stream format). Nextra relay playback is tested on desktop Chrome/Edge and mobile Chrome.');
             }
 
             const mediaSource = new MediaSource();
@@ -841,6 +856,7 @@ export default function WatchView({ initialCode = '' }) {
             cleanupPlayback();
             resetDevice();
             joinedRoomCodeRef.current = '';
+            setJoinedRoomCode('');
             setJoined(false);
             setWatching(false);
             setHasProducer(false);
@@ -910,6 +926,7 @@ export default function WatchView({ initialCode = '' }) {
         terminalRoomEndedRef.current = false;
         if (joiningRef.current) return;
         setError('');
+        setCodeError(false);
         setHostDisconnected(false);
         setHostReconnectingReason('');
         setIngestMode('browser');
@@ -924,6 +941,7 @@ export default function WatchView({ initialCode = '' }) {
 
         const code = normalizeRoomCode(codeInput);
         if (code.length !== 6) {
+            setCodeError(true);
             setError(code ? 'Enter the full 6-character room code.' : 'Please enter a room code.');
             return;
         }
@@ -942,9 +960,14 @@ export default function WatchView({ initialCode = '' }) {
                 await socketRequest(socket, 'leave-room', {}, { timeoutMs: 3000, maxAttempts: 1 });
             } catch { }
             joinedRoomCodeRef.current = '';
+            setJoinedRoomCode('');
             setJoined(false);
-            if (err.requiresPassphrase) setPassphraseRequired(true);
-            setError(err.message);
+            if (err.requiresPassphrase) {
+                setPassphraseRequired(true);
+                setError('');
+            } else {
+                setError(err);
+            }
         } finally {
             joiningRef.current = false;
             setJoining(false);
@@ -1143,6 +1166,7 @@ export default function WatchView({ initialCode = '' }) {
         terminalRoomEndedRef.current = false;
         resetDevice();
         joinedRoomCodeRef.current = '';
+        setJoinedRoomCode('');
         setJoined(false);
         setWatching(false);
         setHasProducer(false);
@@ -1226,6 +1250,7 @@ export default function WatchView({ initialCode = '' }) {
                 cleanupPlayback();
                 resetDevice();
                 joinedRoomCodeRef.current = '';
+                setJoinedRoomCode('');
                 setJoined(false);
                 setWatching(false);
                 setHasProducer(false);
@@ -1288,40 +1313,61 @@ export default function WatchView({ initialCode = '' }) {
                 <p className="subtitle">Join a room to watch a stream</p>
             </div>
 
-            {error && <div className="alert alert-error" role="alert">{error}</div>}
+            <UserErrorAlert error={error} id="watchError" />
 
             {!joined ? (
                 <div className="join-form">
-                    <div className="input-group">
-                        <input
-                            type="text"
-                            className="input-code"
-                            placeholder="XXX-XXX"
-                            value={codeInput}
-                            onChange={(evt) => {
-                                setCodeInput(formatRoomCode(extractRoomCode(evt.target.value)));
-                            }}
-                            onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
-                            autoFocus
-                            aria-describedby="joinHint"
-                            disabled={joining}
-                        />
-                        <button className="btn btn-primary" onClick={handleJoin} disabled={joining}>
-                            {joining ? 'Joining...' : 'Join Room'}
-                        </button>
+                    <div className="join-field">
+                        <label className="input-label" htmlFor="roomCode">Room code</label>
+                        <div className="input-group">
+                            <input
+                                id="roomCode"
+                                type="text"
+                                className="input-code"
+                                placeholder="XXX-XXX"
+                                value={codeInput}
+                                onChange={(evt) => {
+                                    setCodeError(false);
+                                    setPassphraseRequired(false);
+                                    setPassphrase('');
+                                    setCodeInput(formatRoomCode(extractRoomCode(evt.target.value)));
+                                }}
+                                onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
+                                autoFocus
+                                aria-describedby={error ? 'joinHint watchError' : 'joinHint'}
+                                aria-invalid={codeError || undefined}
+                                aria-busy={joining || undefined}
+                                disabled={joining}
+                            />
+                            <button
+                                className="btn btn-primary"
+                                onClick={handleJoin}
+                                disabled={joining}
+                                aria-busy={joining || undefined}
+                            >
+                                {joining ? 'Joining...' : 'Join Room'}
+                            </button>
+                        </div>
                     </div>
                     {passphraseRequired && (
-                        <input
-                            type="password"
-                            className="input-code"
-                            placeholder="Room passphrase"
-                            value={passphrase}
-                            onChange={(evt) => setPassphrase(evt.target.value)}
-                            onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
-                            autoComplete="current-password"
-                            disabled={joining}
-                            aria-label="Room passphrase"
-                        />
+                        <div className="join-field">
+                            <p className="alert alert-info" role="status">
+                                This room requires a passphrase. The room code has been kept; enter the passphrase to continue.
+                            </p>
+                            <label className="input-label" htmlFor="roomPassphrase">Room passphrase</label>
+                            <input
+                                ref={passphraseInputRef}
+                                id="roomPassphrase"
+                                type="password"
+                                className="input-code"
+                                value={passphrase}
+                                onChange={(evt) => setPassphrase(evt.target.value)}
+                                onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
+                                autoComplete="current-password"
+                                disabled={joining}
+                                aria-busy={joining || undefined}
+                            />
+                        </div>
                     )}
                     <p className="join-hint" id="joinHint" role="status">
                         {(() => {
@@ -1361,8 +1407,8 @@ export default function WatchView({ initialCode = '' }) {
                                     <>
                                         <p>Waiting for host to start sharing...</p>
                                         <p className="video-overlay-sub">
-                                            You&apos;re in room {formatRoomCode(normalizeRoomCode(joinedRoomCode || codeInput))}.
-                                            The stream starts automatically once the host begins sharing.
+                                            You&apos;re in room {formatRoomCode(joinedRoomCode)}.
+                                            A <strong>Watch Stream</strong> button appears here once the host&apos;s media starts.
                                         </p>
                                     </>
                                 )}
@@ -1418,16 +1464,24 @@ export default function WatchView({ initialCode = '' }) {
                         {(watching || fallbackMode) && (
                             <button
                                 className="btn btn-primary"
-                                title="Fullscreen"
-                                onClick={() => {
+                                type="button"
+                                aria-pressed={isFullscreen}
+                                onClick={async () => {
                                     const player = videoRef.current;
                                     if (!player) return;
-                                    if (player.requestFullscreen) player.requestFullscreen();
-                                    else if (player.webkitRequestFullscreen) player.webkitRequestFullscreen();
-                                    else if (player.msRequestFullscreen) player.msRequestFullscreen();
+                                    try {
+                                        if (isFullscreen) {
+                                            if (document.exitFullscreen) await document.exitFullscreen();
+                                            else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
+                                        } else if (player.requestFullscreen) await player.requestFullscreen();
+                                        else if (player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
+                                        else if (player.msRequestFullscreen) await player.msRequestFullscreen();
+                                    } catch (err) {
+                                        setError(err);
+                                    }
                                 }}
                             >
-                                Fullscreen
+                                {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
                             </button>
                         )}
 

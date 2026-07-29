@@ -276,19 +276,6 @@ export function createFmp4RelayPlayer(opts) {
         }
     }
 
-    function evictOldBuffer() {
-        if (!sourceBuffer || sourceBuffer.updating) return;
-        try {
-            const buffered = sourceBuffer.buffered;
-            if (buffered.length > 0 && videoElement.currentTime > 0) {
-                const removeEnd = videoElement.currentTime - BACK_BUFFER_SECONDS;
-                if (removeEnd > buffered.start(0)) {
-                    sourceBuffer.remove(buffered.start(0), removeEnd);
-                }
-            }
-        } catch { }
-    }
-
     function startLiveSeekTimer() {
         if (liveSeekTimer) return;
         liveSeekTimer = setInterval(() => {
@@ -328,7 +315,7 @@ export function createFmp4RelayPlayer(opts) {
             if (state === 'buffering' && bufferAhead >= RESUME_BUFFER_SECONDS) {
                 maybeResumePlayback(RESUME_BUFFER_SECONDS);
             }
-            evictOldBuffer();
+            trimBuffer();
         }, 1000);
     }
 
