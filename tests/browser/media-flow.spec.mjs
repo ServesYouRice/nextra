@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, devices } from '@playwright/test';
 
 async function installDeterministicDisplayCapture(page) {
     await page.addInitScript(() => {
@@ -30,14 +30,36 @@ async function installDeterministicDisplayCapture(page) {
     });
 }
 
-async function startHost(hostPage) {
+async function startHost(hostPage, { passphrase = '' } = {}) {
     await installDeterministicDisplayCapture(hostPage);
     await hostPage.goto('/#host');
+    if (passphrase) {
+        await hostPage.getByText('Advanced settings', { exact: true }).click();
+        await hostPage.getByLabel('Optional room passphrase').fill(passphrase);
+    }
     await hostPage.getByRole('button', { name: 'Start Sharing' }).click();
     await expect(hostPage.getByText(/Streaming \(/)).toBeVisible();
     const displayedCode = await hostPage.locator('.copy-field', { hasText: 'Room Code' })
         .locator('.copy-field-value').innerText();
     return displayedCode.replace(/-/g, '');
+}
+
+async function installFullscreenStub(page) {
+    await page.addInitScript(() => {
+        let fullscreenElement = null;
+        Object.defineProperty(document, 'fullscreenElement', {
+            configurable: true,
+            get: () => fullscreenElement,
+        });
+        HTMLElement.prototype.requestFullscreen = async function requestFullscreen() {
+            fullscreenElement = this;
+            document.dispatchEvent(new Event('fullscreenchange'));
+        };
+        document.exitFullscreen = async () => {
+            fullscreenElement = null;
+            document.dispatchEvent(new Event('fullscreenchange'));
+        };
+    });
 }
 
 async function joinAndWatch(viewerPage, code) {
@@ -66,6 +88,14 @@ async function joinAndWatchRelay(viewerPage, code) {
     ))).toBe(true);
 }
 
+// Stop Sharing only asks for confirmation while viewers are still connected.
+async function confirmStopIfPrompted(hostPage) {
+    const confirmStopButton = hostPage.getByRole('dialog').getByRole('button', { name: 'Stop Sharing' });
+    if (await confirmStopButton.isVisible()) {
+        await confirmStopButton.click();
+    }
+}
+
 async function getOnlyRoom(request) {
     const metrics = await (await request.get('/api/metrics')).json();
     return metrics.rooms.list.length === 1 ? metrics.rooms.list[0] : null;
@@ -92,6 +122,108 @@ test('host and viewer receive decoded frames through direct WebRTC and can rejoi
 
     await viewerContext.close();
     await hostContext.close();
+});
+
+test('a mobile Chrome viewer joins and receives decoded frames', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    // Backs the "Viewer, WebRTC / Mobile Chrome: Tested" row of the README
+    // support table. Hosting stays desktop-only, as the same table records.
+    const viewerContext = await browser.newContext({ ...devices['Pixel 5'] });
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await expect(viewerPage.getByLabel('Room code')).toBeVisible();
+
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+test('a protected room asks for its passphrase as a focused second step and keeps the code', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    const code = await startHost(hostPage, { passphrase: 'open sesame' });
+
+    await viewerPage.goto(`/#watch/${code}`);
+    const codeInput = viewerPage.getByLabel('Room code');
+    await expect(codeInput).toHaveValue(code);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+
+    const passphraseInput = viewerPage.getByLabel('Room passphrase');
+    await expect(viewerPage.getByText(/requires a passphrase.*code has been kept/i)).toBeVisible();
+    await expect(codeInput).toHaveValue(code);
+    await expect(passphraseInput).toBeFocused();
+    await passphraseInput.fill('open sesame');
+    await passphraseInput.press('Enter');
+    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toBeVisible();
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+test('fullscreen control exposes pressed state and exits fullscreen', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installFullscreenStub(viewerPage);
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+
+    const enterFullscreen = viewerPage.getByRole('button', { name: 'Fullscreen', exact: true });
+    await expect(enterFullscreen).toHaveAttribute('aria-pressed', 'false');
+    await enterFullscreen.click();
+    const exitFullscreen = viewerPage.getByRole('button', { name: 'Exit Fullscreen' });
+    await expect(exitFullscreen).toHaveAttribute('aria-pressed', 'true');
+    await exitFullscreen.click();
+    await expect(enterFullscreen).toHaveAttribute('aria-pressed', 'false');
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+test('the streaming frame-rate control is a labelled group with programmatic selection', async ({ browser, request }) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await startHost(page);
+
+    const frameRateGroup = page.getByRole('group', { name: 'Frame rate' });
+    const sixty = frameRateGroup.getByRole('button', { name: '60 fps' });
+    const thirty = frameRateGroup.getByRole('button', { name: '30 fps' });
+
+    await expect(thirty).toHaveAttribute('aria-pressed', 'true');
+    await expect(sixty).toHaveAttribute('aria-pressed', 'false');
+
+    await sixty.click();
+    await expect(sixty).toHaveAttribute('aria-pressed', 'true');
+    await expect(thirty).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.getByText(/Streaming \(.*@ 60fps\)/)).toBeVisible();
+
+    await page.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(page);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+    await context.close();
 });
 
 test('capture-track end and host route unmount reclaim the room', async ({ browser, request }) => {
@@ -193,10 +325,7 @@ test('delayed relay-first viewers select one fresh recorder generation and clean
 
     await firstViewerPage.getByRole('button', { name: 'Leave Room' }).click();
     await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
-    const confirmStopButton = hostPage.getByRole('dialog').getByRole('button', { name: 'Stop Sharing' });
-    if (await confirmStopButton.isVisible()) {
-        await confirmStopButton.click();
-    }
+    await confirmStopIfPrompted(hostPage);
     await expect.poll(async () => (await request.get('/api/metrics')).json()).toMatchObject({
         rooms: {
             active: 0,

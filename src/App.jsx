@@ -1,8 +1,9 @@
-import React, { lazy, Suspense, useState, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { SocketProvider } from './context/SocketContext';
 import BrandLogo from './components/BrandLogo';
 import ErrorBoundary from './components/ErrorBoundary';
 import { NotificationProvider } from './context/NotificationContext';
+import { routeName, routeTitle } from './lib/routeTitle.mjs';
 import './index.css';
 
 const HostView = lazy(() => import('./HostView'));
@@ -28,12 +29,28 @@ function isNavItemActive(item, route) {
 
 function Router() {
     const [route, setRoute] = useState(window.location.hash || '');
+    // Counts user-initiated navigations only, so the initial load never steals
+    // focus from where the browser put it.
+    const [navigationCount, setNavigationCount] = useState(0);
+    const mainRef = useRef(null);
 
     useEffect(() => {
-        const onHashChange = () => setRoute(window.location.hash);
+        const onHashChange = () => {
+            setRoute(window.location.hash);
+            setNavigationCount((count) => count + 1);
+        };
         window.addEventListener('hashchange', onHashChange);
         return () => window.removeEventListener('hashchange', onHashChange);
     }, []);
+
+    useEffect(() => {
+        document.title = routeTitle(route);
+    }, [route]);
+
+    useEffect(() => {
+        if (navigationCount === 0) return;
+        mainRef.current?.focus();
+    }, [navigationCount, route]);
 
     let view;
     if (route === '' || route === '#') view = <Landing />;
@@ -75,13 +92,22 @@ function Router() {
                     })}
                 </nav>
             </header>
-            <main className="main-content" id="main">
+            <main
+                className="main-content"
+                id="main"
+                ref={mainRef}
+                tabIndex={-1}
+                aria-label={routeName(route)}
+            >
                 <ErrorBoundary>
                     <Suspense fallback={<LoadingState />}>
                         {view}
                     </Suspense>
                 </ErrorBoundary>
             </main>
+            <div className="visually-hidden" role="status" data-testid="route-announcer">
+                {navigationCount === 0 ? '' : routeName(route)}
+            </div>
             <footer className="site-footer">
                 <div className="site-footer-inner">
                     <p className="footer-note">

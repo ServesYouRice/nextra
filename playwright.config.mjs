@@ -15,18 +15,36 @@ export default defineConfig({
         trace: 'retain-on-failure',
         video: 'retain-on-failure',
     },
-    projects: [{
-        name: 'chromium',
-        use: {
-            ...devices['Desktop Chrome'],
-            launchOptions: {
-                args: [
-                    '--autoplay-policy=no-user-gesture-required',
-                    '--host-resolver-rules=MAP nextra.cloudflare.test 127.0.0.1',
-                ],
+    projects: [
+        {
+            name: 'chromium',
+            use: {
+                ...devices['Desktop Chrome'],
+                launchOptions: {
+                    args: [
+                        '--autoplay-policy=no-user-gesture-required',
+                        '--host-resolver-rules=MAP nextra.cloudflare.test 127.0.0.1',
+                    ],
+                },
             },
         },
-    }],
+        {
+            // Backs the mobile Chrome viewer row of the README support table.
+            // Media flows stay on the desktop project, which joins from an
+            // emulated mobile context for the decoded-frame evidence.
+            name: 'mobile-chrome',
+            testMatch: /ui-semantics\.spec\.mjs/,
+            use: {
+                ...devices['Pixel 5'],
+                launchOptions: {
+                    args: [
+                        '--autoplay-policy=no-user-gesture-required',
+                        '--host-resolver-rules=MAP nextra.cloudflare.test 127.0.0.1',
+                    ],
+                },
+            },
+        },
+    ],
     webServer: {
         command: 'npm run build && node server.js',
         url: `https://127.0.0.1:${port}/readyz`,

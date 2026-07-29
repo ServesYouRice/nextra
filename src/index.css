@@ -1590,6 +1590,38 @@ input.select-input {
   text-align: center;
 }
 
+.join-field {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  max-width: 100%;
+}
+
+.input-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.input-code[aria-invalid='true'] {
+  border-color: var(--err);
+}
+
+.error-detail {
+  margin-top: 0.5rem;
+}
+
+.error-detail code {
+  display: block;
+  margin-top: 0.35rem;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .input-group {
   display: flex;
   gap: 0.5rem;
@@ -2038,7 +2070,7 @@ input.select-input {
 }
 
 /* Small phones: keep the Watch flow usable at 320-400px without
-   horizontal scroll. */
+   horizontal scroll and tighten the shared page chrome. */
 @media (max-width: 400px) {
   .view-container {
     padding: 0.75rem;
@@ -2058,7 +2090,7 @@ input.select-input {
   }
 
   .copy-field-value.copy-field-strong {
-    font-size: 1.05rem;
+    font-size: 1.1rem;
   }
 
   .btn-large {
@@ -2068,21 +2100,9 @@ input.select-input {
   .video-overlay {
     font-size: 0.8rem;
   }
-}
-
-/* Very small phones: tighten padding and rein in the oversized room-code type so
-   nothing crowds the edges below ~400px. Additive to the 640px rules above. */
-@media (max-width: 400px) {
-  .view-container {
-    padding: 0.75rem;
-  }
 
   .room-links-row {
     gap: 1rem;
-  }
-
-  .copy-field-value.copy-field-strong {
-    font-size: 1.1rem;
   }
 
   .view-header h1 {

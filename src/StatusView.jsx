@@ -1,15 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import StatusPill from './components/StatusPill';
+import { createVisibilityPoller } from './lib/visibilityPoller.mjs';
+import { formatBytes } from './lib/formatBytes.mjs';
+import { STATUS_ACCESS_RESTRICTED_COPY } from './lib/statusCopy.mjs';
 
 const REFRESH_INTERVAL_MS = 5000;
-
-function formatBytes(value) {
-    const bytes = Number(value) || 0;
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
 
 function formatUptime(totalSeconds) {
     const seconds = Math.max(0, Number(totalSeconds) || 0);
@@ -77,11 +72,12 @@ export default function StatusView() {
     }, []);
 
     useEffect(() => {
-        const initialFetch = setTimeout(fetchMetrics, 0);
-        const interval = setInterval(fetchMetrics, REFRESH_INTERVAL_MS);
+        const poller = createVisibilityPoller({
+            poll: () => { void fetchMetrics(); },
+            intervalMs: REFRESH_INTERVAL_MS,
+        });
         return () => {
-            clearTimeout(initialFetch);
-            clearInterval(interval);
+            poller.close();
             abortRef.current?.abort();
         };
     }, [fetchMetrics]);
@@ -91,10 +87,7 @@ export default function StatusView() {
             <div className="status-container">
                 <div className="status-error-card">
                     <StatusPill tone="warn">Access restricted</StatusPill>
-                    <p>
-                        Server metrics are only available to the machine running Nextra
-                        (or with a metrics token). Open this page on the host machine to see live stats.
-                    </p>
+                    <p>{STATUS_ACCESS_RESTRICTED_COPY}</p>
                     <a href="#" className="btn btn-outline">Back to Home</a>
                 </div>
             </div>

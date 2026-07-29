@@ -57,6 +57,24 @@ Open `http://127.0.0.1:3000/#host` and choose either browser capture or OBS mode
 
 No install is required for viewers.
 
+### Tested browsers
+
+Nextra makes no general "any modern browser" claim. The table records only the
+paths this repository tests end to end (`npm run test:e2e`, Playwright Chromium
+and mobile Chrome projects). Untested browsers are not blocked: the client
+feature-detects WebRTC receive codecs and Media Source Extensions instead of
+sniffing the browser name, so an unsupported browser gets an explicit message.
+
+| Role and path | Desktop Chrome / Edge | Mobile Chrome | Other browsers |
+| --- | --- | --- | --- |
+| Host, browser capture | Tested | Not supported (no screen capture) | Not tested; `systemAudio` capture is Chromium-only |
+| Host, OBS (WHIP) | Tested | Not supported | Not tested |
+| Viewer, WebRTC | Tested | Tested | Not tested |
+| Viewer, relay (H.264/WebM) | Tested | Not tested | Not tested |
+
+Layout and keyboard flows are checked at 320, 375, 640, 900, and 1440 px
+viewport widths. No WCAG conformance level is claimed.
+
 ---
 
 ## OBS Streaming
@@ -357,7 +375,7 @@ Operational security:
 
 The default limits are intentionally conservative for one desktop process: 10 rooms, 10 direct viewers per room, and 2 simultaneous FFmpeg fallback pipelines. They are safety limits, not a benchmark guarantee. Raise them only after measuring CPU, memory, relay throughput, and event-loop delay on the target host through the local `/api/metrics` endpoint.
 
-Use `npm run benchmark:runtime` with a real room/media topology and `npm run churn:runtime` for the long-running room/transport leak gate. The release procedure, thresholds, repetitions, and evidence fields are tracked in [`implementation/T10-release-evidence.md`](implementation/T10-release-evidence.md).
+Maintainers and operators can use `npm run benchmark:runtime` with a real room/media topology and `npm run churn:runtime` for optional hardware-specific capacity and long-running room/transport validation. These measurements are not required for an open-source release and must not be presented as results unless they were actually observed.
 
 Production supervision means exactly one replica; a restart ends all in-memory rooms. Keep the verified `caxa` Windows package until it fails its gate or a supported platform change requires a replacement.
 
@@ -366,7 +384,7 @@ Production supervision means exactly one replica; a restart ends all in-memory r
 - An uncaught exception or mediasoup worker death terminates/restarts the process. Run production deployments under a supervisor such as Windows Service management, systemd, or a container restart policy.
 - Repeated FFmpeg failure is isolated to its room. Tunnel failures use bounded exponential restart backoff and do not stop LAN service.
 
-Tagged Windows releases run the complete gate, package the executable, require Authenticode signing secrets, timestamp the signature, regenerate the checksum, and publish the exact signed artifact. Pull-request CI also packages and smoke-tests the executable without publishing it.
+Tagged Windows releases run the complete CI gate, package the executable, generate a SHA-256 checksum, and smoke-test the exact unsigned artifact before uploading it. Pull-request CI runs the same packaging and smoke path without publishing it. Windows may warn when launching an unsigned executable. The packaged smoke replaces the mediasoup worker, waits for the replacement process, proves a short decoded-frame Host/view flow in Chromium, shuts the app down, and fails on leftover caxa extraction or cloudflared processes.
 | App closes immediately | Check `%LOCALAPPDATA%\\Nextra\\logs\\startup-latest.log`. |
 | Poor quality | Lower resolution/framerate, use a wired connection, and reduce host desktop load. |
 

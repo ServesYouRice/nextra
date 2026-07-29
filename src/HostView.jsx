@@ -8,8 +8,11 @@ import StatusPill from './components/StatusPill';
 import Modal from './components/Modal';
 import FirstRunGuide from './components/FirstRunGuide';
 import HostDiagnostics from './components/HostDiagnostics';
+import UserErrorAlert from './components/UserErrorAlert';
 import RoomSharePanel from './components/RoomSharePanel';
 import { useHostSessionController } from './hooks/useHostSessionController';
+import { formatBytes } from './lib/formatBytes.mjs';
+import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 
 const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 5_000 };
 const OBS_MAX_BITRATE_KBPS = 45_000;
@@ -44,14 +47,7 @@ const OBS_TUNING_PROFILES = {
 const OBS_WS_PASSWORD_STORAGE_KEY = 'nextra.obsWsPassword.v1';
 const BYOK_TURN_SESSION_STORAGE_KEY = 'nextra.byokTurnSession.v1';
 const HOST_RECOVERY_SESSION_STORAGE_KEY = 'nextra.hostRecovery.v1';
-const MEDIA_DEBUG_LOGS = (() => {
-    try {
-        const params = new URLSearchParams(window.location.search);
-        return params.has('debugMedia') || window.localStorage.getItem('nextra.debugMedia') === '1';
-    } catch {
-        return false;
-    }
-})();
+const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, window.localStorage);
 
 function mediaDebugLog(...args) {
     if (MEDIA_DEBUG_LOGS) {
@@ -242,13 +238,6 @@ function isLikelyLocalOrigin(origin) {
 function formatHostForUrl(host) {
     const value = String(host || '127.0.0.1').trim() || '127.0.0.1';
     return value.includes(':') && !value.startsWith('[') ? `[${value}]` : value;
-}
-
-function formatBytes(value) {
-    const bytes = Number(value) || 0;
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function parseTurnUrlInput(value) {
@@ -458,7 +447,9 @@ export default function HostView() {
 
     const bitratePerViewer = viewerCount > 0 ? hostUploadMbps / viewerCount : hostUploadMbps;
     const bandwidthWarning = viewerCount >= 3 && bitratePerViewer < 7
-        ? `${viewerCount} viewers x ~${bitratePerViewer.toFixed(1)} Mbps each. Consider 720p.`
+        // 1080p at 30 fps is the lowest profile Nextra offers; never recommend a
+        // resolution that is not in QUALITY_PROFILES.
+        ? `${viewerCount} viewers x ~${bitratePerViewer.toFixed(1)} Mbps each. Consider 1080p at 30 fps.`
         : '';
     const selectedProfile = getQualityProfile(qualityProfile);
     const profileRelayBits = getProfileRelayBitsPerSecond(qualityProfile, frameRate);
@@ -1098,12 +1089,14 @@ export default function HostView() {
             }
 
             if (ingestMode !== 'obs') {
-                const userAgent = navigator.userAgent || '';
+                // `systemAudio: 'include'` is a Chromium-only getDisplayMedia
+                // option with no feature-detection API, so this probe brands the
+                // capture option only. It never gates whether hosting is allowed.
                 const isChromiumBrand = !!navigator.userAgentData?.brands?.some((b) => /Chrom/i.test(b.brand));
-                const isChromium = isChromiumBrand || /Chrome|Chromium|Edg\//i.test(userAgent);
+                const isChromium = isChromiumBrand || /Chrome|Chromium|Edg\//i.test(navigator.userAgent || '');
 
                 if (!isChromium) {
-                    setError('System audio is best supported in Chrome or Edge.');
+                    setError('This browser cannot capture system audio; browser capture is tested on desktop Chrome and Edge. Sharing continues without system audio.');
                 }
 
                 const displayMediaOptions = {
@@ -1539,19 +1532,18 @@ export default function HostView() {
                                         ))}
                                     </select>
                                 )}
-                                <div className="mode-toggle">
-                                    <button
-                                        className={frameRate === 60 ? 'active' : ''}
-                                        onClick={() => setFrameRate(60)}
-                                    >
-                                        60fps
-                                    </button>
-                                    <button
-                                        className={frameRate === 30 ? 'active' : ''}
-                                        onClick={() => setFrameRate(30)}
-                                    >
-                                        30fps
-                                    </button>
+                                <div className="mode-toggle" role="group" aria-label="Frame rate">
+                                    {[60, 30].map((fps) => (
+                                        <button
+                                            key={fps}
+                                            type="button"
+                                            className={frameRate === fps ? 'active' : ''}
+                                            aria-pressed={frameRate === fps}
+                                            onClick={() => setFrameRate(fps)}
+                                        >
+                                            {fps} fps
+                                        </button>
+                                    ))}
                                 </div>
                             </>
                         )}
@@ -1769,7 +1761,7 @@ export default function HostView() {
                         </div>
                     )}
 
-                    {error && <div className="alert alert-error" role="alert">{error}</div>}
+                    <UserErrorAlert error={error} />
                     {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
 
                     {roomCode && (
@@ -1795,7 +1787,7 @@ export default function HostView() {
                             </div>
                             {roomMetrics && (
                                 <div className="room-meta">
-                                    WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0)}
+                                    WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0, { maxUnit: 'MB' })}
                                 </div>
                             )}
                             <HostDiagnostics metrics={roomMetrics} />
