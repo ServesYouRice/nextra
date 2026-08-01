@@ -24,7 +24,7 @@
     "start": "node server.js",
     "lint": "eslint .",
     "typecheck": "tsc -p jsconfig.lifecycle.json",
-    "test": "node --test",
+    "test": "node --test --test-concurrency=1",
     "test:e2e": "playwright test",
     "test:coverage": "node scripts/coverage-gate.js",
     "package": "npm run release:prep && node scripts/package-app.js",

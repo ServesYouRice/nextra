@@ -55,3 +55,9 @@ test('release compliance files are trackable and required package inputs', () =>
     assert.match(packager, /'SOURCE\.md'/);
     assert.match(packager, /'THIRD_PARTY_NOTICES\.md'/);
 });
+
+test('the release gate serializes process-spawning Node test files', () => {
+    const pkg = JSON.parse(read('package.json'));
+
+    assert.equal(pkg.scripts.test, 'node --test --test-concurrency=1');
+});
