@@ -1,6 +1,13 @@
 'use strict';
 
+const os = require('node:os');
 const { io } = require('socket.io-client');
+const {
+    minimumRequirementsForScenario,
+    validateBenchmarkDefinition,
+    buildThresholdHeadroom,
+    evaluateTopology,
+} = require('./runtime-benchmark-model');
 
 function numberArg(name, fallback) {
     const prefix = `--${name}=`;
@@ -9,13 +16,36 @@ function numberArg(name, fallback) {
     return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function nonNegativeIntegerArg(name, fallback) {
+    const prefix = `--${name}=`;
+    const raw = process.argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
+    if (raw === undefined) return fallback;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
+function stringArg(name, fallback = '') {
+    const prefix = `--${name}=`;
+    return process.argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length).trim() || fallback;
+}
+
 const baseUrl = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) || 'http://127.0.0.1:3000';
+const allowInsecureTls = process.argv.includes('--allow-insecure-tls');
+const scenario = stringArg('scenario');
+const label = stringArg('label');
 const durationMs = numberArg('duration-ms', 60_000);
 const sampleIntervalMs = numberArg('sample-ms', 1_000);
 const clients = Math.floor(numberArg('clients', 10));
 const ackIntervalMs = numberArg('ack-interval-ms', 250);
-const requiredRooms = Math.floor(numberArg('require-rooms', 0));
-const requiredFallbackPipelines = Math.floor(numberArg('require-fallback-pipelines', 0));
+const minimumRequirements = minimumRequirementsForScenario(scenario);
+const requirements = {
+    rooms: nonNegativeIntegerArg('require-rooms', minimumRequirements.rooms),
+    producers: nonNegativeIntegerArg('require-producers', minimumRequirements.producers),
+    consumers: nonNegativeIntegerArg('require-consumers', minimumRequirements.consumers),
+    relayViewers: nonNegativeIntegerArg('require-relay-viewers', minimumRequirements.relayViewers),
+    fallbackPipelines: nonNegativeIntegerArg('require-fallback-pipelines', minimumRequirements.fallbackPipelines),
+    relayBytesForwarded: nonNegativeIntegerArg('min-relay-bytes', minimumRequirements.relayBytesForwarded),
+};
 const thresholds = {
     ackP95Ms: numberArg('max-ack-p95-ms', 100),
     eventLoopP95Ms: numberArg('max-event-loop-p95-ms', 50),
@@ -45,6 +75,7 @@ function connectClient() {
             transports: ['websocket'],
             reconnection: false,
             timeout: 5_000,
+            rejectUnauthorized: !allowInsecureTls,
         });
         socket.once('connect', () => resolve(socket));
         socket.once('connect_error', reject);
@@ -67,7 +98,15 @@ function cpuPercent(first, last, elapsedMs, scale) {
     return ((last - first) / scale / elapsedMs) * 100;
 }
 
+function relayBytesForwarded(metrics) {
+    return (metrics.sockets?.rooms || []).reduce((sum, room) => sum + (room.relay?.bytesForwarded || 0), 0);
+}
+
 async function main() {
+    const definitionFailures = validateBenchmarkDefinition({ scenario, label, requirements });
+    if (definitionFailures.length > 0) {
+        throw new Error(`Invalid benchmark definition: ${definitionFailures.join('; ')}`);
+    }
     const sockets = await Promise.all(Array.from({ length: clients }, () => connectClient()));
     const ackLatencies = [];
     const errors = [];
@@ -124,34 +163,54 @@ async function main() {
     const memoryGrowth = firstRss > 0 ? ((lastRss - firstRss) / firstRss) * 100 : 0;
     const eventLoopP95 = Math.max(...samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.p95 || 0));
     const eventLoopMax = Math.max(...samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.max || 0));
+    const firstRelayBytes = relayBytesForwarded(first.metrics);
+    const lastRelayBytes = relayBytesForwarded(last.metrics);
+    const observedTopology = {
+        rooms: last.metrics.rooms?.active || 0,
+        producers: last.metrics.sockets?.counters?.activeProducers || 0,
+        consumers: last.metrics.rooms?.totalMediasoupConsumers || 0,
+        viewers: last.metrics.rooms?.totalViewers || 0,
+        relayViewers: last.metrics.rooms?.totalRelayViewers || 0,
+        fallbackPipelines: last.metrics.sockets?.counters?.activeFallbackPipelines || 0,
+        relayBytesForwarded: Math.max(0, lastRelayBytes - firstRelayBytes),
+    };
+    const observed = {
+        ackP50Ms: percentile(ackLatencies, 50),
+        ackP95Ms: percentile(ackLatencies, 95),
+        ackMaxMs: Math.max(0, ...ackLatencies),
+        eventLoopP95Ms: eventLoopP95,
+        eventLoopMaxMs: eventLoopMax,
+        workerCpuPercent: workerCpu,
+        processCpuPercent: processCpu,
+        memoryGrowthPercent: memoryGrowth,
+    };
     const summary = {
-        topology: {
-            clients,
-            rooms: last.metrics.rooms?.active || 0,
-            viewers: last.metrics.rooms?.totalViewers || 0,
-            relayViewers: last.metrics.rooms?.totalRelayViewers || 0,
-            fallbackPipelines: last.metrics.sockets?.counters?.activeFallbackPipelines || 0,
+        measurement: {
+            label,
+            scenario,
+            measuredAt: new Date().toISOString(),
+            durationMs,
+            sampleIntervalMs,
+            targetOrigin: new URL(baseUrl).origin,
+            tlsVerificationDisabled: allowInsecureTls,
+            runtime: {
+                node: process.version,
+                platform: process.platform,
+                arch: process.arch,
+                cpuModel: os.cpus()[0]?.model || 'unknown',
+                logicalCpuCount: os.cpus().length,
+            },
         },
+        expectedTopology: requirements,
+        topology: { clients, ...observedTopology },
         samples: samples.length,
         acknowledgements: ackLatencies.length,
         errors: errors.length,
-        observed: {
-            ackP50Ms: percentile(ackLatencies, 50),
-            ackP95Ms: percentile(ackLatencies, 95),
-            ackMaxMs: Math.max(0, ...ackLatencies),
-            eventLoopP95Ms: eventLoopP95,
-            eventLoopMaxMs: eventLoopMax,
-            workerCpuPercent: workerCpu,
-            processCpuPercent: processCpu,
-            memoryGrowthPercent: memoryGrowth,
-        },
+        observed,
         thresholds,
+        headroomPercent: buildThresholdHeadroom(observed, thresholds),
     };
-    const failures = [];
-    if (summary.topology.rooms < requiredRooms) failures.push(`required ${requiredRooms} rooms, observed ${summary.topology.rooms}`);
-    if (summary.topology.fallbackPipelines < requiredFallbackPipelines) {
-        failures.push(`required ${requiredFallbackPipelines} fallback pipelines, observed ${summary.topology.fallbackPipelines}`);
-    }
+    const failures = evaluateTopology(observedTopology, requirements);
     if (errors.length > 0) failures.push(`${errors.length} signalling acknowledgements failed`);
     if (summary.observed.ackP95Ms > thresholds.ackP95Ms) failures.push('ack p95 exceeded');
     if (eventLoopP95 > thresholds.eventLoopP95Ms) failures.push('event-loop p95 exceeded');

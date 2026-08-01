@@ -11,14 +11,21 @@ function read(relativePath) {
     return fs.readFileSync(path.join(root, relativePath), 'utf8');
 }
 
-test('tagged Windows builds package, smoke-test, and upload unsigned artifacts', () => {
+test('version-tagged Windows builds smoke-test and publish truthful unsigned artifacts', () => {
     const workflow = read('.github/workflows/release.yml');
 
+    assert.match(workflow, /tags: \['v\*\.\*\.\*', '\*\.\*\.\*'\]/);
     assert.match(workflow, /run: npm run package\r?$/m);
     assert.match(workflow, /npx playwright install chromium/);
     assert.match(workflow, /\.\\scripts\\smoke-packaged\.ps1/);
     assert.match(workflow, /Nextra\.exe\r?$/m);
     assert.match(workflow, /Nextra\.exe\.sha256\r?$/m);
+    assert.match(workflow, /contents: write/);
+    assert.match(workflow, /gh release create/);
+    assert.match(workflow, /gh release upload/);
+    assert.match(workflow, /This is an unsigned Windows build/);
+    assert.match(workflow, /other browsers are not tested/);
+    assert.match(workflow, /Corresponding GPL-3\.0 source/);
     assert.doesNotMatch(workflow, /SIGNING_PFX|signtool|Authenticode/);
 });
 
@@ -36,4 +43,15 @@ test('the packager generates a checksum for the artifact under smoke test', () =
 
     assert.match(packager, /writeReleaseChecksum\(\);/);
     assert.match(packager, /Nextra\.exe\.sha256/);
+});
+
+test('release compliance files are trackable and required package inputs', () => {
+    const ignore = read('.gitignore');
+    const packager = read('scripts/package-app.js');
+
+    assert.match(ignore, /^!SOURCE\.md$/m);
+    assert.match(ignore, /^!THIRD_PARTY_NOTICES\.md$/m);
+    assert.match(ignore, /^!implementation\/archive\/\*\*\/\*\.md$/m);
+    assert.match(packager, /'SOURCE\.md'/);
+    assert.match(packager, /'THIRD_PARTY_NOTICES\.md'/);
 });

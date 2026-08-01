@@ -74,6 +74,30 @@ test('each route sets its own title and user navigation moves focus without stea
     await expect(page).toHaveTitle('Page not found · Nextra');
 });
 
+test('the status route renders live metrics instead of the error boundary', async ({ page }) => {
+    const pageErrors = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+
+    await page.goto('/');
+    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Status' }).click();
+
+    await expect(page.getByRole('heading', { name: 'Server Status' })).toBeVisible();
+    await expect(page.getByText('Something went wrong')).toHaveCount(0);
+    await expect(page.getByText('Active rooms').first()).toBeVisible();
+    expect(pageErrors).toEqual([]);
+});
+
+test('Host downloads an allowlisted diagnostics JSON file', async ({ page }) => {
+    await page.goto('/#host');
+    await page.getByText('Troubleshooting diagnostics', { exact: true }).click();
+    const downloadPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Download redacted diagnostics' }).click();
+    const download = await downloadPromise;
+
+    expect(download.suggestedFilename()).toMatch(/^nextra-diagnostics-.*\.json$/);
+    await expect(page.locator('.host-diagnostics [role="status"]')).toContainText('Downloaded nextra-diagnostics-');
+});
+
 test('keyboard users can reach the main content and the join controls', async ({ page }) => {
     await page.goto('/#watch');
 

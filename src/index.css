@@ -287,7 +287,6 @@ code {
 
 /* ========== BRAND LOGO ========== */
 .brand-logo {
-  --brand-accent-blue: #a06bff;
   display: inline-flex;
   align-items: center;
   gap: var(--brand-logo-gap, 0.62rem);
@@ -295,97 +294,36 @@ code {
   min-width: 0;
 }
 
-.brand-logo-mark-image,
-.brand-logo-tra-image {
+/* The mark supplies the "n", so the wordmark only spells the trailing "extra".
+   Both are drawn on the same 120-unit grid and sized off --brand-mark-width,
+   so stroke weight and baseline line up without per-letter tuning. */
+.brand-logo-mark-image {
   display: block;
   height: auto;
+  width: var(--brand-mark-width, 2.35rem);
+  flex: 0 0 auto;
   user-select: none;
 }
 
-.brand-logo-mark-image {
-  width: var(--brand-mark-width, 2.35rem);
-  flex: 0 0 auto;
-}
-
-.brand-logo-copy {
-  display: inline-flex;
-  flex-direction: column;
-  justify-content: center;
-  min-width: 0;
-}
-
+/* Sized separately from the mark so the wordmark can sit back and let the "N"
+   carry the hero. */
 .brand-logo-word {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--brand-word-gap, 0.16rem);
-}
-
-.brand-logo-tra-image {
-  height: var(--brand-tra-height, 0.86rem);
-  flex: 0 0 auto;
-}
-
-.brand-e-mark {
-  display: inline-flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  justify-content: space-between;
-  width: var(--brand-e-width, 0.74rem);
-  height: var(--brand-e-height, 0.86rem);
-}
-
-.brand-e-mark span {
   display: block;
-  width: 100%;
-  height: var(--brand-e-stroke, 0.16rem);
-  border-radius: 999px;
-  background: var(--brand-accent-blue);
-}
-
-.brand-x-mark {
-  width: var(--brand-x-width, 1.1rem);
-  height: var(--brand-x-height, 0.86rem);
+  height: var(--brand-word-height, var(--brand-mark-width, 2.35rem));
+  width: auto;
   flex: 0 0 auto;
-  overflow: visible;
-}
-
-.brand-x-mark path {
-  fill: none;
-  stroke-width: 10;
-  stroke-linecap: butt;
-  stroke-linejoin: miter;
-}
-
-.brand-x-accent {
-  stroke: var(--brand-accent-blue);
-}
-
-.brand-x-light {
-  stroke: #f3f2ef;
+  color: var(--text-1);
 }
 
 .brand-logo-nav {
-  --brand-logo-gap: 0.52rem;
+  --brand-logo-gap: 0.1rem;
   --brand-mark-width: 2.35rem;
-  --brand-tra-height: 0.82rem;
-  --brand-x-width: 1.06rem;
-  --brand-x-height: 0.86rem;
-  --brand-e-width: 0.78rem;
-  --brand-e-height: 0.86rem;
-  --brand-e-stroke: 0.16rem;
-  --brand-word-gap: 0.05rem;
 }
 
 .brand-logo-hero {
-  --brand-logo-gap: 0.9rem;
+  --brand-logo-gap: 0.45rem;
   --brand-mark-width: 4.2rem;
-  --brand-tra-height: 1.5rem;
-  --brand-x-width: 1.9rem;
-  --brand-x-height: 1.55rem;
-  --brand-e-width: 1.4rem;
-  --brand-e-height: 1.55rem;
-  --brand-e-stroke: 0.28rem;
-  --brand-word-gap: 0.1rem;
+  --brand-word-height: 2.9rem;
 }
 
 /* ========== BUTTONS ========== */
@@ -475,8 +413,8 @@ code {
 
 /* ========== FORMS ========== */
 .select-input {
-  min-height: 3rem;
-  padding: 0.7rem 0.95rem;
+  min-height: 2.4rem;
+  padding: 0.5rem 0.85rem;
   font-size: 0.85rem;
   font-family: inherit;
   background: rgba(12, 13, 18, 0.54);
@@ -652,6 +590,8 @@ input.select-input {
 
 .setting-row-label {
   color: rgba(236, 236, 240, 0.86);
+  font-size: 0.9rem;
+  line-height: 1.38;
 }
 
 .setting-row .setting-hint {
@@ -730,6 +670,12 @@ input.select-input {
 .settings-wrapper.settings-expanded .settings-panel {
   width: var(--host-side-card-width);
   height: 100%;
+}
+
+/* Both cards stretch to the taller one, so let the OBS rows share the leftover
+   height instead of stacking at the top over an empty strip. */
+.settings-wrapper.settings-expanded .settings-panel.obs-config-panel .setting-row {
+  flex: 1 1 auto;
 }
 
 /* ========== MODE TOGGLE ========== */
@@ -849,15 +795,14 @@ input.select-input {
 .first-run-guide p { margin: 0; color: var(--text-2); font-size: 0.8rem; }
 .first-run-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
-.share-qr, .host-diagnostics, .connection-quality { margin-top: 0.75rem; color: var(--text-2); font-size: 0.75rem; }
-.share-qr summary, .host-diagnostics summary, .connection-quality summary { cursor: pointer; color: var(--text-1); }
-.share-qr img { display: block; margin-top: 0.5rem; padding: 0.35rem; border-radius: 0.35rem; background: #fff; }
-.share-qr p { margin: 0.25rem 0 0; color: var(--text-3); }
+.host-diagnostics, .connection-quality { margin-top: 0.75rem; color: var(--text-2); font-size: 0.75rem; }
+.host-diagnostics summary, .connection-quality summary { cursor: pointer; color: var(--text-1); }
 .host-diagnostics dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 0.5rem; }
 .host-diagnostics dl div { padding: 0.5rem; border-radius: var(--radius); background: var(--bg-3); }
 .host-diagnostics dt { color: var(--text-3); }
 .host-diagnostics dd { margin: 0.2rem 0 0; color: var(--text-1); }
 .diagnostic-error { color: var(--warn); }
+.diagnostic-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.75rem; }
 .connection-quality span { display: inline-block; margin: 0.4rem 1rem 0 0; }
 
 @media (max-width: 720px) {
@@ -1052,9 +997,10 @@ input.select-input {
 }
 
 .landing-hero h1 {
-  font-size: clamp(1.6rem, 4vw, 2.3rem);
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-size: clamp(1.25rem, 2.8vw, 1.65rem);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-2);
 }
 
 .landing-hero p {
@@ -1075,6 +1021,8 @@ input.select-input {
 .card {
   display: flex;
   flex-direction: column;
+  align-items: center;
+  text-align: center;
   padding: 1.5rem;
   position: relative;
   overflow: hidden;
@@ -1115,38 +1063,6 @@ input.select-input {
 
 .card-watch .card-badge {
   color: var(--ok);
-}
-
-.feature-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 0.75rem;
-}
-
-.feature-card {
-  padding: 0.95rem 1.05rem;
-  border-radius: var(--radius-xl);
-  border: 1px solid var(--border);
-  background: var(--bg-1);
-  transition: border-color var(--transition), background var(--transition);
-}
-
-.feature-card:hover {
-  border-color: var(--border-strong);
-  background: var(--bg-2);
-}
-
-.feature-card h3 {
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: var(--text-1);
-  margin-bottom: 0.25rem;
-}
-
-.feature-card p {
-  font-size: 0.75rem;
-  color: var(--text-3);
-  line-height: 1.5;
 }
 
 .landing-footer {
@@ -1325,6 +1241,36 @@ input.select-input {
   margin-bottom: 1rem;
 }
 
+/* Quality toggles sit under the start controls rather than in the side panel,
+   so the middle card carries only room options. Bare rows, no card shell. */
+.capture-settings {
+  display: flex;
+  justify-content: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.capture-settings .setting-row {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+  width: auto;
+}
+
+/* Hug the label and select instead of the side panel's fixed label column. */
+.capture-settings .setting-row-inline {
+  grid-template-columns: auto auto;
+  gap: 0.6rem;
+}
+
+/* Short labels ("1080p", "60 fps") do not need the tuning toggle's wider cells. */
+.capture-settings .mode-toggle button {
+  min-width: 5.25rem;
+}
+
 .status-bar {
   display: flex;
   align-items: center;
@@ -1489,6 +1435,20 @@ input.select-input {
   flex-wrap: wrap;
 }
 
+.room-lifetime-copy {
+  display: block;
+  margin-top: 0.5rem;
+  max-width: 52rem;
+}
+
+.viewer-room-share {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 0.75rem;
+  text-align: center;
+}
+
 .viewer-count {
   display: flex;
   align-items: center;
@@ -1611,6 +1571,14 @@ input.select-input {
   border-color: var(--err);
 }
 
+/* The alert is a flex row, so the message and this disclosure sat side by side
+   with the margin below shoving the summary out of line. Stack them instead. */
+.alert-error {
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
 .error-detail {
   margin-top: 0.5rem;
 }
@@ -1628,33 +1596,17 @@ input.select-input {
   align-items: center;
 }
 
-.live-settings-note {
-  font-size: 0.75rem;
-  color: var(--text-3);
-  margin-top: 0.6rem;
-  line-height: 1.45;
-}
-
 .advanced-settings {
   margin-top: 0.85rem;
   border-top: 1px solid var(--border);
   padding-top: 0.7rem;
 }
 
-.advanced-settings summary {
-  cursor: pointer;
-  font-size: 0.8rem;
-  color: var(--text-2);
-  user-select: none;
-  transition: color var(--transition);
-}
-
-.advanced-settings summary:hover {
-  color: var(--text-1);
-}
-
-.advanced-settings[open] summary {
-  margin-bottom: 0.6rem;
+/* First block in the panel, so it needs no separator above it. */
+.advanced-settings-lead {
+  margin-top: 0;
+  border-top: none;
+  padding-top: 0;
 }
 
 /* ========== STATUS PAGE ========== */
@@ -2047,15 +1999,8 @@ input.select-input {
   }
 
   .brand-logo-nav {
-    --brand-logo-gap: 0.42rem;
+    --brand-logo-gap: 0.08rem;
     --brand-mark-width: 1.85rem;
-    --brand-tra-height: 0.64rem;
-    --brand-x-width: 0.84rem;
-    --brand-x-height: 0.68rem;
-    --brand-e-width: 0.62rem;
-    --brand-e-height: 0.68rem;
-    --brand-e-stroke: 0.13rem;
-    --brand-word-gap: 0.04rem;
   }
 
   .setting-row-inline {

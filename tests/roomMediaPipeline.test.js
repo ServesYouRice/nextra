@@ -145,3 +145,32 @@ test('fallback startup releases every allocation when successive stages fail', {
         assert.equal(getSocketRuntimeMetrics().counters.activeFallbackPipelines, 0, failAt);
     }
 });
+
+test('the relay publishes its init segment when no Socket.IO server is attached', { concurrency: false }, async () => {
+    const closed = [];
+    const room = createFallbackRoom();
+    const router = createRouterFailureFixture('none', closed);
+
+    class StartingRelay extends EventEmitter {
+        stop() { closed.push('relay'); }
+        async start() {}
+    }
+
+    // The WHIP prewarm path starts the relay without a Socket.IO handle. An
+    // unguarded emit here throws inside the FFmpeg stdout parser callback, which
+    // the relay reports as a pipeline error and leaves viewers buffering forever.
+    await startFallbackRelay(room, router, null, { FFmpegRelay: StartingRelay });
+
+    const relay = room.fallbackWorker;
+    assert.ok(relay, 'relay should be running');
+
+    const errors = [];
+    relay.on('error', (err) => errors.push(err.message));
+    relay.emit('init', { initSegment: Buffer.from('ftypmoovavc1payload') });
+
+    assert.deepEqual(errors, []);
+    assert.equal(room.fallbackAvailable, true);
+    assert.equal(room.fallbackGeneration, 1);
+
+    room._mediaPipeline.close();
+});

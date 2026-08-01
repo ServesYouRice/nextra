@@ -137,3 +137,22 @@ test('close releases the interval and the visibility listener exactly once', asy
     environment.setVisibility('visible');
     assert.equal(polls, 1, 'a closed poller must not run again');
 });
+
+test('the default timers work when no timer pair is injected', async () => {
+    const { createVisibilityPoller } = await visibilityPollerModule;
+    let polls = 0;
+
+    // Browsers reject setInterval/clearInterval invoked with a plain object as
+    // `this` ("Illegal invocation"), so the defaults must not be bare method
+    // references on the options object.
+    const poller = createVisibilityPoller({
+        poll: () => { polls += 1; },
+        intervalMs: 5000,
+        visibilityTarget: null,
+    });
+
+    assert.equal(polls, 1);
+    assert.equal(poller.polling, true);
+    poller.close();
+    assert.equal(poller.polling, false);
+});

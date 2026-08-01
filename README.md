@@ -1,4 +1,15 @@
-# Nextra
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="public/brand/nextra-primary-logo.png">
+  <img src="public/brand/nextra-primary-logo-light.png" alt="Nextra" width="420">
+</picture>
+
+**Self-hosted, low-latency screen sharing from your browser or OBS.**
+
+</div>
+
+---
 
 Vibe coded this into existence because the usual screen sharing apps were either limited or paid. If you notice mistakes or want to contribute, feel free to jump in.
 
@@ -341,9 +352,10 @@ See `.env.example` for the full list.
 
 Important limits:
 
-- By default, anyone with the room code or share link can attempt to join. Hosts can set an optional passphrase under **Advanced settings**; browser viewers are prompted after entering the code, while WHEP clients send `Authorization: Bearer <passphrase>`. Only a salted scrypt hash is kept in ephemeral room state.
+- By default, anyone with the room code or share link can attempt to join. Hosts can set an optional passphrase in the host **Settings** panel; browser viewers are prompted after entering the code, while WHEP clients send `Authorization: Bearer <passphrase>`. Only a salted scrypt hash is kept in ephemeral room state.
 - Passphrase hashing runs asynchronously. Pending room creations count toward `MAX_ACTIVE_ROOMS`, and an existing room remains active unless its fully prepared replacement succeeds.
 - **Allow recovery after reload** stores the room code and reclaim token in tab-scoped session storage and preserves an opted-in room for the host reconnect grace (30 seconds by default). This only reclaims a room from the same running server process; a process replacement ends every in-memory room. OBS remains attached during same-process recovery; browser capture requires clicking **Resume Sharing** and selecting a screen again. Explicit stop still ends the room immediately.
+- Every Local/Public viewer link names one in-memory room. Explicit Host stop or a Nextra process restart retires that link; starting again creates a new room code and link. Joined viewers can copy the canonical current link, but protected-room passphrases are never embedded in it.
 - Tunnel providers, TURN servers, ISPs, and network operators are external parties.
 - Treat this as secure-by-default self-hosted software, not a zero-trust system.
 
@@ -353,6 +365,7 @@ Operational security:
 - Alert when `/readyz` is non-ready, the media-worker PID changes unexpectedly, relay restart/error counters rise, or the tunnel remains in an error/backoff state.
 - Run under a single-process supervisor. Unexpected unhandled rejections and uncaught exceptions log a shutdown reason and exit non-zero; mediasoup worker death replaces the process. Either event ends all in-memory rooms.
 - Rotate logs outside the process, restrict file access, and redact room codes, bearer capabilities, public capability URLs, TURN credentials, and request headers before sharing diagnostics.
+- The Host page's **Troubleshooting diagnostics** export downloads an allowlisted JSON snapshot of readiness, safe configuration flags, topology counts, runtime utilization, and current errors. It excludes room codes, room/public links, credentials, authorization headers, and raw room lists; review the file before sharing it outside your organization.
 - Store `OPERATOR_TOKEN`, `METRICS_TOKEN`, TURN secrets, tunnel tokens, and OBS credentials in protected environment/service-secret storage, never in command history, URLs, source control, or client storage.
 
 ---
@@ -362,6 +375,7 @@ Operational security:
 | Problem | Solution |
 |---|---|
 | No public link | Wait a few seconds after startup. In dev, set `AUTO_PUBLIC_TUNNEL=true`. Ensure `cloudflared` exists in the project root or on PATH. |
+| Host preflight blocks startup | Follow the path-specific message: Browser hosting needs desktop capture support on localhost/HTTPS; OBS needs the WHIP listener ready; AV1 additionally needs valid TURN credentials, OBS auto-configuration, and a reachable public media address when sharing publicly. Tunnel startup/failure is only a warning when the local/LAN room can still run. |
 | Viewers cannot connect | Check host firewall, keep the host app running, and verify whether the room expects TURN or relay. |
 | OBS H.264 viewer is black | Try **Switch to Relay Mode** or refresh. H.264 rooms can fall back to relay. |
 | AV1 room will not start | AV1 requires an AV1-capable GPU, **Use BYOK TURN (AV1)**, a valid TURN config, and OBS auto-configuration. |
@@ -375,7 +389,21 @@ Operational security:
 
 The default limits are intentionally conservative for one desktop process: 10 rooms, 10 direct viewers per room, and 2 simultaneous FFmpeg fallback pipelines. They are safety limits, not a benchmark guarantee. Raise them only after measuring CPU, memory, relay throughput, and event-loop delay on the target host through the local `/api/metrics` endpoint.
 
-Maintainers and operators can use `npm run benchmark:runtime` with a real room/media topology and `npm run churn:runtime` for optional hardware-specific capacity and long-running room/transport validation. These measurements are not required for an open-source release and must not be presented as results unless they were actually observed.
+Maintainers and operators can use `npm run benchmark:runtime` with a real room/media topology and `npm run churn:runtime` for optional hardware-specific capacity and long-running room/transport validation. The benchmark requires a named `webrtc`, `relay`, or `mixed` scenario and rejects runs that do not contain the expected producers/consumers or active relay bytes. Its JSON summary records the machine/runtime identity and remaining headroom against every configured threshold. These measurements are not required for an open-source release and must not be presented as portable results unless they were actually observed on the named target host.
+
+With the matching live topology already open, representative commands are:
+
+```powershell
+# Browser/WebRTC host with five actively consuming viewers
+npm run benchmark:runtime -- --scenario=webrtc --label=1080p60-5-viewers --require-consumers=5 --duration-ms=300000
+
+# OBS H.264 room with five viewers already switched to Relay mode
+npm run benchmark:runtime -- --scenario=relay --label=1080p60-h264-relay-5-viewers --require-relay-viewers=5 --require-fallback-pipelines=1 --min-relay-bytes=1048576 --duration-ms=300000
+```
+
+Run each profile on the deployment hardware, keep the complete JSON output with the profile name, and increase the conservative limits only when signalling, event-loop, CPU, memory, and relay-byte checks all retain acceptable headroom. A run with sockets but no flowing media fails topology validation rather than becoming a capacity claim.
+
+For a loopback-only test server using Nextra's self-signed local HTTPS certificate, `--allow-insecure-tls` disables Socket.IO certificate verification for that benchmark run; Node's HTTPS fetches also require `NODE_TLS_REJECT_UNAUTHORIZED=0`. Never use either setting against a remote or untrusted host. The JSON result records when Socket.IO TLS verification was disabled.
 
 Production supervision means exactly one replica; a restart ends all in-memory rooms. Keep the verified `caxa` Windows package until it fails its gate or a supported platform change requires a replacement.
 
@@ -384,7 +412,15 @@ Production supervision means exactly one replica; a restart ends all in-memory r
 - An uncaught exception or mediasoup worker death terminates/restarts the process. Run production deployments under a supervisor such as Windows Service management, systemd, or a container restart policy.
 - Repeated FFmpeg failure is isolated to its room. Tunnel failures use bounded exponential restart backoff and do not stop LAN service.
 
-Tagged Windows releases run the complete CI gate, package the executable, generate a SHA-256 checksum, and smoke-test the exact unsigned artifact before uploading it. Pull-request CI runs the same packaging and smoke path without publishing it. Windows may warn when launching an unsigned executable. The packaged smoke replaces the mediasoup worker, waits for the replacement process, proves a short decoded-frame Host/view flow in Chromium, shuts the app down, and fails on leftover caxa extraction or cloudflared processes.
+Version tags with or without the historical `v` prefix run the complete Windows CI
+gate, package the executable, generate a SHA-256 checksum, smoke-test the exact
+unsigned artifact, and publish or refresh its GitHub Release automatically. The
+release notes identify the unsigned status, tested browser scope, checksum, and
+tagged corresponding source. Pull-request CI runs the same packaging and smoke path
+without publishing it. Windows may warn when launching an unsigned executable. The
+packaged smoke replaces the mediasoup worker, waits for the replacement process,
+proves a short decoded-frame Host/view flow in Chromium, shuts the app down, and
+fails on leftover caxa extraction or cloudflared processes.
 | App closes immediately | Check `%LOCALAPPDATA%\\Nextra\\logs\\startup-latest.log`. |
 | Poor quality | Lower resolution/framerate, use a wired connection, and reduce host desktop load. |
 

@@ -11,7 +11,9 @@ import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
 import { createLifecycleController } from './lib/lifecycleController.mjs';
 import { useViewerSessionController } from './hooks/useViewerSessionController';
 import UserErrorAlert from './components/UserErrorAlert';
+import CopyField from './components/CopyField';
 import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
+import { buildViewerRoomUrl } from './lib/roomLink.mjs';
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
@@ -118,6 +120,10 @@ export default function WatchView({ initialCode = '' }) {
     const reconnectingRef = useRef(false);
     const joiningRef = useRef(false);
     const terminalRoomEndedRef = useRef(false);
+    // Latches a rejected fallback-consume-start so the auto-enter effect stops
+    // retrying. The rejection clears fallbackMode, which would otherwise satisfy
+    // the effect's guard again and spin as fast as the socket can round-trip.
+    const fallbackStartRejectedRef = useRef(false);
 
     useEffect(() => {
         if (passphraseRequired) passphraseInputRef.current?.focus();
@@ -740,6 +746,7 @@ export default function WatchView({ initialCode = '' }) {
 
         const onHostReconnected = () => {
             terminalRoomEndedRef.current = false;
+            fallbackStartRejectedRef.current = false;
             setHostReconnectingReason('');
             setHostDisconnected(false);
             setError('');
@@ -910,6 +917,8 @@ export default function WatchView({ initialCode = '' }) {
 
         joinedRoomCodeRef.current = cleanCode;
         setJoinedRoomCode(cleanCode);
+        terminalRoomEndedRef.current = false;
+        fallbackStartRejectedRef.current = false;
         setJoined(true);
         setHasProducer(response.hasProducer || false);
         setAllowMediaControl(response.allowMediaControl === true);
@@ -986,11 +995,14 @@ export default function WatchView({ initialCode = '' }) {
 
             if (response?.error) {
                 console.error('[WatchView] Fallback start error:', response.error);
+                fallbackStartRejectedRef.current = true;
                 setFallbackMode(false);
                 setFallbackState(null);
                 setError(response.error);
                 return;
             }
+
+            fallbackStartRejectedRef.current = false;
 
             cleanupPlayback(); // Tear down WebRTC only after the server knows this viewer is switching
             setPlaybackMode('');
@@ -1024,7 +1036,8 @@ export default function WatchView({ initialCode = '' }) {
     // Auto-enter fallback mode for OBS rooms only when media is actually ready.
     useEffect(() => {
         if (joined && ingestMode === 'obs' && !fallbackMode && !fmp4PlayerRef.current
-            && preferRelayFirst && hasProducer && !whipReconnecting && !watching && !watchLoading) {
+            && preferRelayFirst && hasProducer && !whipReconnecting && !watching && !watchLoading
+            && !terminalRoomEndedRef.current && !fallbackStartRejectedRef.current) {
             enterFallbackMode();
         }
     }, [joined, ingestMode, fallbackMode, enterFallbackMode, preferRelayFirst, hasProducer, whipReconnecting, watching, watchLoading]);
@@ -1306,6 +1319,7 @@ export default function WatchView({ initialCode = '' }) {
                     ? 'OBS WebRTC mode active (lowest latency).'
                     : 'WebRTC mode active (lowest latency).'
                 : '';
+    const viewerRoomLink = joinedRoomCode ? buildViewerRoomUrl(window.location, joinedRoomCode) : '';
     return (
         <div className="view-container">
             <div className="view-header">
@@ -1500,6 +1514,17 @@ export default function WatchView({ initialCode = '' }) {
                             Leave Room
                         </button>
 
+                    </div>
+
+                    <div className="viewer-room-share">
+                        {!hostDisconnected && viewerRoomLink && (
+                            <CopyField label="Room Link" value={viewerRoomLink} display="Copy room link" />
+                        )}
+                        <p className="copy-hint room-lifetime-copy">
+                            {hostDisconnected
+                                ? 'This room link is retired. The host must create and share a new room link.'
+                                : 'This link works only while the host keeps this in-memory room active and the current Nextra server process remains running. Protected rooms still require their passphrase, which is never included in the link.'}
+                        </p>
                     </div>
 
                     {playbackStatus && <div className="media-status" role="status">{playbackStatus}</div>}

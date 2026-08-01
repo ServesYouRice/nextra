@@ -1,4 +1,8 @@
 import { test, expect, devices } from '@playwright/test';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 async function installDeterministicDisplayCapture(page) {
     await page.addInitScript(() => {
@@ -30,18 +34,25 @@ async function installDeterministicDisplayCapture(page) {
     });
 }
 
+// The host panel shows only share links, so the room code is read back out of
+// the local watch link rather than a dedicated field.
+async function readRoomCode(hostPage) {
+    const localLink = await hostPage.locator('.copy-field', { hasText: 'Local Link' })
+        .locator('.copy-field-value').innerText();
+    const code = localLink.trim().split('#watch/')[1];
+    expect(code).toMatch(/^[A-Z0-9]{6}$/);
+    return code;
+}
+
 async function startHost(hostPage, { passphrase = '' } = {}) {
     await installDeterministicDisplayCapture(hostPage);
     await hostPage.goto('/#host');
     if (passphrase) {
-        await hostPage.getByText('Advanced settings', { exact: true }).click();
         await hostPage.getByLabel('Optional room passphrase').fill(passphrase);
     }
     await hostPage.getByRole('button', { name: 'Start Sharing' }).click();
     await expect(hostPage.getByText(/Streaming \(/)).toBeVisible();
-    const displayedCode = await hostPage.locator('.copy-field', { hasText: 'Room Code' })
-        .locator('.copy-field-value').innerText();
-    return displayedCode.replace(/-/g, '');
+    return readRoomCode(hostPage);
 }
 
 async function installFullscreenStub(page) {
@@ -101,6 +112,46 @@ async function getOnlyRoom(request) {
     return metrics.rooms.list.length === 1 ? metrics.rooms.list[0] : null;
 }
 
+async function measureLiveWebRtcTopology() {
+    const { stdout } = await execFileAsync(process.execPath, [
+        'scripts/benchmark-runtime.js',
+        '--url=https://127.0.0.1:3210',
+        '--scenario=webrtc',
+        '--label=e2e-360p30-one-viewer',
+        '--allow-insecure-tls',
+        '--duration-ms=1500',
+        '--sample-ms=250',
+        '--clients=2',
+        '--ack-interval-ms=100',
+        '--max-ack-p95-ms=1000',
+        '--max-event-loop-p95-ms=1000',
+        '--max-event-loop-max-ms=2000',
+        '--max-worker-cpu-percent=1000',
+        '--max-process-cpu-percent=1000',
+        '--max-memory-growth-percent=1000',
+    ], {
+        cwd: process.cwd(),
+        env: { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: '0' },
+        timeout: 15_000,
+    });
+    return JSON.parse(stdout);
+}
+
+test('Host preflight blocks an unavailable Browser capture path before room allocation', async ({ page, request }) => {
+    await page.addInitScript(() => {
+        Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', {
+            configurable: true,
+            value: undefined,
+        });
+    });
+    await page.goto('/#host');
+    await page.getByRole('button', { name: 'Start Sharing' }).click();
+
+    await expect(page.getByRole('alert')).toContainText('Screen capture is unavailable');
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+});
+
 test('host and viewer receive decoded frames through direct WebRTC and can rejoin', async ({ browser, request }) => {
     const hostContext = await browser.newContext();
     const viewerContext = await browser.newContext();
@@ -113,6 +164,17 @@ test('host and viewer receive decoded frames through direct WebRTC and can rejoi
     await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
     await expect(viewerPage.getByRole('button', { name: 'Join Room' })).toBeVisible();
     await joinAndWatch(viewerPage, code);
+
+    const measurement = await measureLiveWebRtcTopology();
+    expect(measurement.pass).toBe(true);
+    expect(measurement.measurement.scenario).toBe('webrtc');
+    expect(measurement.topology.producers).toBeGreaterThanOrEqual(1);
+    expect(measurement.topology.consumers).toBeGreaterThanOrEqual(1);
+    expect(measurement.headroomPercent).toEqual(expect.objectContaining({
+        ackP95: expect.any(Number),
+        eventLoopP95: expect.any(Number),
+        processCpu: expect.any(Number),
+    }));
 
     await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
     await hostPage.getByRole('dialog').getByRole('button', { name: 'Stop Sharing' }).click();
@@ -149,7 +211,7 @@ test('a mobile Chrome viewer joins and receives decoded frames', async ({ browse
 
 test('a protected room asks for its passphrase as a focused second step and keeps the code', async ({ browser, request }) => {
     const hostContext = await browser.newContext();
-    const viewerContext = await browser.newContext();
+    const viewerContext = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
     const hostPage = await hostContext.newPage();
     const viewerPage = await viewerContext.newPage();
     const code = await startHost(hostPage, { passphrase: 'open sesame' });
@@ -167,9 +229,19 @@ test('a protected room asks for its passphrase as a focused second step and keep
     await passphraseInput.press('Enter');
     await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toBeVisible();
 
-    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await expect(hostPage.getByText(/Room links work only while this room is active/)).toBeVisible();
+    const copyRoomLink = viewerPage.getByRole('button', { name: 'Copy room link' });
+    await copyRoomLink.click();
+    await expect(viewerPage.locator('.copy-field-feedback')).toHaveText('Copied!');
+    const copiedLink = await viewerPage.evaluate(() => navigator.clipboard.readText());
+    expect(copiedLink).toBe(`https://127.0.0.1:3210/#watch/${code}`);
+    expect(copiedLink).not.toContain('open sesame');
+
     await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
     await confirmStopIfPrompted(hostPage);
+    await expect(viewerPage.getByText(/This room link is retired/)).toBeVisible();
+    await expect(copyRoomLink).toHaveCount(0);
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
     await expect.poll(async () => (await request.get('/api/metrics')).json())
         .toMatchObject({ rooms: { active: 0 } });
     await viewerContext.close();
@@ -211,18 +283,27 @@ test('the streaming frame-rate control is a labelled group with programmatic sel
     const sixty = frameRateGroup.getByRole('button', { name: '60 fps' });
     const thirty = frameRateGroup.getByRole('button', { name: '30 fps' });
 
-    await expect(thirty).toHaveAttribute('aria-pressed', 'true');
-    await expect(sixty).toHaveAttribute('aria-pressed', 'false');
-
-    await sixty.click();
     await expect(sixty).toHaveAttribute('aria-pressed', 'true');
     await expect(thirty).toHaveAttribute('aria-pressed', 'false');
-    await expect(page.getByText(/Streaming \(.*@ 60fps\)/)).toBeVisible();
+
+    await thirty.click();
+    await expect(thirty).toHaveAttribute('aria-pressed', 'true');
+    await expect(sixty).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.getByText(/Streaming \(.*@ 30fps\)/)).toBeVisible();
 
     await page.getByRole('button', { name: 'Stop Sharing' }).click();
     await confirmStopIfPrompted(page);
     await expect.poll(async () => (await request.get('/api/metrics')).json())
         .toMatchObject({ rooms: { active: 0 } });
+
+    // Resolution and frame rate persist per browser, so a later host session in
+    // the same profile reopens with the last-used pair instead of the defaults.
+    const returningPage = await context.newPage();
+    await installDeterministicDisplayCapture(returningPage);
+    await returningPage.goto('/#host');
+    const returningFrameRate = returningPage.getByRole('group', { name: 'Frame rate' });
+    await expect(returningFrameRate.getByRole('button', { name: '30 fps' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(returningFrameRate.getByRole('button', { name: '60 fps' })).toHaveAttribute('aria-pressed', 'false');
     await context.close();
 });
 
@@ -256,12 +337,10 @@ test('reload recovery keeps the room code and concurrent stop/unmount is idempot
     const page = await context.newPage();
     await installDeterministicDisplayCapture(page);
     await page.goto('/#host');
-    await page.locator('details.advanced-settings summary').click();
     await page.getByLabel('Allow recovery after reload').check();
     await page.getByRole('button', { name: 'Start Sharing' }).click();
     await expect(page.getByText(/Streaming \(/)).toBeVisible();
-    const originalCode = (await page.locator('.copy-field', { hasText: 'Room Code' })
-        .locator('.copy-field-value').innerText()).replace(/-/g, '');
+    const originalCode = await readRoomCode(page);
     await expect.poll(() => page.evaluate(() => (
         window.sessionStorage.getItem('nextra.hostRecovery.v1')
     ))).not.toBeNull();
@@ -274,8 +353,7 @@ test('reload recovery keeps the room code and concurrent stop/unmount is idempot
         .toMatchObject({ rooms: { active: 1 } });
     await page.getByRole('button', { name: 'Resume Sharing' }).click();
     await expect(page.getByText(/Streaming \(/)).toBeVisible();
-    const resumedCode = (await page.locator('.copy-field', { hasText: 'Room Code' })
-        .locator('.copy-field-value').innerText()).replace(/-/g, '');
+    const resumedCode = await readRoomCode(page);
     expect(resumedCode).toBe(originalCode);
 
     await page.evaluate(() => {

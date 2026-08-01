@@ -132,33 +132,6 @@ function LoadingState() {
     );
 }
 
-const FEATURES = [
-    {
-        title: 'Browser capture',
-        text: 'Share your screen straight from Chrome or Edge with system audio — no install for anyone.',
-    },
-    {
-        title: 'OBS streaming (WHIP)',
-        text: 'Use OBS scenes, overlays, and hardware encoding. Nextra auto-configures OBS over WebSocket.',
-    },
-    {
-        title: 'Up to 4K @ 60 fps',
-        text: 'Quality profiles from 1080p to 4K that adapt to host upload and viewer count.',
-    },
-    {
-        title: 'WebRTC + relay fallback',
-        text: 'Lowest-latency WebRTC by default, with an fMP4 relay path when networks get in the way.',
-    },
-    {
-        title: 'Public links, no port forwarding',
-        text: 'A built-in Cloudflare Quick Tunnel provides a convenient best-effort link for personal sharing.',
-    },
-    {
-        title: 'No accounts',
-        text: 'Room-code access, media encrypted in transit, nothing stored by Nextra.',
-    },
-];
-
 function Landing() {
     return (
         <div className="landing">
@@ -184,15 +157,6 @@ function Landing() {
                         <p>Join a room and watch a live stream</p>
                         <span className="card-badge">Join Room -&gt;</span>
                     </a>
-                </div>
-
-                <div className="feature-grid">
-                    {FEATURES.map((feature) => (
-                        <div className="feature-card" key={feature.title}>
-                            <h3>{feature.title}</h3>
-                            <p>{feature.text}</p>
-                        </div>
-                    ))}
                 </div>
 
                 <div className="landing-footer">

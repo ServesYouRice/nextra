@@ -1,10 +1,15 @@
-# Implementation record
+# Implementation board
 
-Updated: 2026-07-29. This is the only active Markdown file in `implementation/`.
-Historical audits and superseded plans remain evidence under
-`../archive/2026-07-26-audit-consolidation/`.
+Updated: 2026-08-01. This is the only active Markdown file in `implementation/`.
+The completed T01–T16 cards and their evidence are archived in
+[`archive/2026-08-01-implementation-completion/COMPLETED-CARDS.md`](archive/2026-08-01-implementation-completion/COMPLETED-CARDS.md).
+Earlier audits and superseded plans remain historical evidence under
+`archive/2026-07-26-audit-consolidation/`.
 
 ## Current status
+
+All repository-local approved cards are complete. T17 is the only remaining card;
+it is blocked on an external network/TURN setup, not on a pending user decision.
 
 ### In progress
 
@@ -20,120 +25,58 @@ _None._
 
 ### Blocked
 
-_None._
+#### T17 — Real-network NAT/TURN validation
 
-## Decisions
+Dependencies: T05, T07, T10, T13, T14.
 
-| ID | Decision | Unblocked |
-| --- | --- | --- |
-| D01 | 2026-07-28: Loopback hosts by default; remote hosting requires an operator token; public WHIP is off. | T05, T06, T09 |
-| D02 | 2026-07-28: H.264 relay on non-loopback HTTP is allowed only for a declared trusted home LAN with a plaintext warning; TLS is required elsewhere. | T09 |
-| D03 | 2026-07-29: Hardware-specific OBS/FFmpeg sync measurement is optional operator validation, not an open-source release gate. | T10 |
-| D04 | 2026-07-29: Publish CI-built unsigned artifacts with checksums; signing, legal review, and dedicated release hardware are optional maintainer actions. | T10 |
-| D05 | 2026-07-29: Claim desktop Chrome/Edge plus mobile Chrome viewers with a retained mobile-Chrome E2E project; everything else remains “not tested.” | T08, T10 |
+Goal: validate the existing public H.264 relay and TURN-backed WebRTC paths from a
+viewer outside the host LAN without expanding the supported topology or limits.
 
-## Completed work
+Source/tests: `README.md` Internet Sharing and Operations sections,
+`tests/browser/media-flow.spec.mjs`, and `scripts/benchmark-runtime.js`.
 
-### T01 — Reproducible dependencies
+Acceptance criteria:
 
-Regenerated and validated the dependency graph on Node 20, aligned CI setup-node
-pins, and retained clean-install, inventory, lint, typecheck, unit, build,
-packaging, OSS, and production-audit gates. Evidence: Node 20 clean install and
-141-test release preparation passed.
+- an external-network viewer decodes H.264 relay media through the supported
+  public-tunnel path;
+- a configured TURN path is exercised across a real NAT boundary and its selected
+  route is recorded without exposing credentials;
+- the environment, topology, result, and any failure are recorded as
+  machine-specific evidence rather than a portable support claim; and
+- the default room, viewer, and relay-pipeline limits remain unchanged.
 
-### T02 — Clean build and truthful readiness
+Checks when unblocked: the focused decoded-frame browser flow, one labelled live
+WebRTC measurement, and manual external-network H.264 relay and TURN observations.
 
-Made integration/release checks independent of a stale ignored `dist/`; production
-readiness now reports named HTTP, Socket.IO, mediasoup, SPA, and required-WHIP
-components while `/healthz` remains liveness. Evidence: isolated SPA readiness
-tests and Node 20 release preparation with 142 tests passed.
+Blocker: the operator does not currently have the external network/TURN environment
+configured. No repository change can substitute for that topology.
 
-### T03 — Delayed H.264 relay generation
+## Standing product decisions
 
-Added a recorder/server generation contract: zero-to-one relay demand selects one
-fresh generation, later viewers reuse it, stale chunks cannot cross generations,
-and last-viewer cleanup clears bounded queues/listeners/timers/buffers/URLs.
-Evidence: ordering checks, the 159-test Node 20 suite, and delayed two-viewer
-decoded-frame/leave/rejoin Chromium coverage passed.
+| ID | Decision |
+| --- | --- |
+| D01 | 2026-07-28: Loopback hosts by default; remote hosting requires an operator token; public WHIP is off. |
+| D02 | 2026-07-28: H.264 relay on non-loopback HTTP is allowed only for a declared trusted home LAN with a plaintext warning; TLS is required elsewhere. |
+| D03 | 2026-07-29: Hardware-specific OBS/FFmpeg sync measurement is optional operator validation, not an open-source release gate. |
+| D04 | 2026-07-29: Publish CI-built unsigned artifacts with checksums; signing, legal review, and dedicated release hardware are optional maintainer actions. |
+| D05 | 2026-07-29: Claim desktop Chrome/Edge plus mobile Chrome viewers with a retained mobile-Chrome E2E project; everything else remains “not tested.” |
+| D06 | 2026-08-01: Keep Authenticode signing out of scope while it requires maintainer-provided credentials; retain the unattended unsigned/checksum path. |
+| D07 | 2026-08-01: Keep the conservative default capacity limits; raise them or change media concurrency/timing only for a demonstrated use case backed by target-host evidence. |
+| D08 | 2026-08-01: Public version tags publish the tested unsigned executable and checksum with accurate support/source notes; missing or new production dependency licenses fail review. |
 
-### T04 — Truthful restart and reclaim states
+## Future scope — requires a new user-approved card
 
-Distinguished recoverable same-process reconnect/reclaim from terminal room end
-after process replacement, worker-fatal restart, missing room, or invalid reclaim.
-Host and viewer teardown is idempotent and recovery wording no longer promises
-cross-process survival. Evidence: transition/recovery tests, lint, typecheck, and
-the 143-test Node 20 suite passed.
+These items are not a committed backlog and do not block the current board.
 
-### T05 — Operator, LAN, and WHIP boundary
-
-Centralized client classification and constant-time operator authorization before
-room allocation, sensitive metrics, TURN minting, and WHIP work. Loopback Host/OBS
-remains supported; forwarded spoofing, public host authority, secret leakage, and
-over-capacity pending starts are denied. Evidence: focused operator/network/WHIP/
-WHEP checks, lint, typecheck, and the 151-test Node 20 suite passed.
-
-### T06 — Contained backend correctness
-
-Marked viewer receive transports for conservative bandwidth, replaced synchronous
-room passphrase hashing with bounded asynchronous reservations, and reused the
-constant-time comparator while narrowing WebSocket CSP endpoints. Evidence:
-focused transport/room/socket/WHIP/server checks, lint, typecheck, the 159-test
-Node 20 suite, coverage thresholds, and four-case Chromium gate passed.
-
-### T07 — Authoritative AV1 capability
-
-WebRTC AV1 support now comes from loaded receive RTP capabilities; MSE checks stay
-on relay playback and WebGL is only an OBS encoder preference hint. OBS setup uses
-bounded set-and-verify candidates with complete H.264 rollback. Evidence: focused
-WebRTC/OBS capability tests, lint, typecheck, and the 146-test Node 20 suite passed.
-
-### T08 — UI correctness, accessibility, and support truth
-
-Added state-backed room codes, truthful Watch/quality copy, labelled and stateful
-join/fps controls, route titles/focus/announcement, tested support claims, and
-representative keyboard/reflow coverage. Evidence: 24-case desktop/mobile Chrome
-E2E, the 166-test suite, lint, typecheck, coverage, and build passed.
-
-### T09 — Relay security and bounded operations
-
-Applied the trusted-LAN plaintext relay policy, bounded long-lived collections,
-made unexpected rejections supervisor-fatal, suppressed absent-host metrics work,
-and stopped all Status polling while hidden with one immediate refresh/interval on
-resume. Evidence: focused security/cleanup/visibility checks and the 166-test suite passed.
-
-### T10 — Open-source release gate
-
-CI runs release preparation and retained desktop/mobile Chrome paths. Windows CI
-and tagged builds package with caxa, create a SHA-256 checksum, replace the real
-mediasoup worker, prove decoded frames and graceful cleanup, and publish unsigned
-artifacts without external credentials. Signing, capacity/churn, clean-VM, NAT/TURN,
-and hardware A/V sync checks remain optional operator validation. Evidence:
-3 workflow tests, 169-test release preparation, 24-case E2E, checksum verification,
-artifact build, and packaged worker-recovery/decoded-frame smoke passed.
-
-### T11 — Small polish and extraction
-
-Implemented the actionable low-priority items in independently testable seams:
-
-- protected rooms request a labelled, focused passphrase as an informational
-  second step while retaining the entered room code;
-- known capture, timeout, transport, and abort failures show a useful next action
-  with technical detail retained separately;
-- fullscreen exposes pressed state and a tested exit path;
-- restricted Status copy describes the local UI instead of a nonexistent token UI;
-- the duplicate 400 px CSS rules are one block with retained viewport assertions;
-- shared byte formatting, room metric payloads, fMP4 eviction, and media-debug URL
-  parsing have behavior tests around the former call-site differences;
-- the existing Host/viewer session-controller seam names relay, transport, media,
-  queue, listener, timer, and resource ownership; idempotent controller cleanup and
-  retained reconnect/rejoin paths cover it, so no broader lifecycle rewrite was made;
-- OBS live-region markup was intentionally unchanged because no retained
-  assistive-technology test fails, matching the card’s stop condition.
-
-Evidence: 7 focused utility/player/payload tests, lint, typecheck, the 175-test
-unit/integration suite, coverage, build, packaging evaluation, OSS checks, both
-production audits, all 26 desktop/mobile Chrome E2E cases, artifact build and
-SHA-256 verification, plus packaged worker-recovery/decoded-frame/shutdown smoke passed.
+| Area | Scope and start condition |
+| --- | --- |
+| Packaging | Replace caxa only after an explicit migration decision and compatibility proof. |
+| Hosting architecture | Add containers, multiple replicas, persistence, or accounts only for an approved hosted-product target. |
+| Product features | Recording, multiple presenters, chat/reactions, E2EE, and i18n require product scope and acceptance criteria. |
+| Media scaling | Add worker pools or relay worker threads only when operator measurements breach the documented thresholds. |
+| Media timing | Redesign A/V timestamps only when an operator-measured sync matrix demonstrates drift. |
+| Operations | Named-tunnel onboarding and configurable support/legal contacts require an operator-facing product decision. |
+| Protocols | Add formal protocol schemas when clients and servers need independent deployment. |
 
 ## Verification policy
 
@@ -146,14 +89,3 @@ current run. A partial change is **Blocked**, not Done.
 The standard gates are the focused test, then the smallest relevant subset of
 `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`, and
 `npm run test:e2e`; use `npm run release:prep` for the full release gate.
-
-## Parked — requires a new user-approved card
-
-- Packager migration, containers or multiple replicas, persistence, recording,
-  multiple presenters, chat/reactions, E2EE, accounts, and i18n.
-- Worker pools or relay worker threads unless operator measurements breach thresholds.
-- A/V timestamp redesign unless an operator-measured sync matrix shows drift.
-- Path-specific Host preflight, a redacted diagnostic bundle, measured capacity/
-  headroom, named-tunnel onboarding, viewer copy-link, clearer room/link lifetime,
-  and configurable support/legal contacts.
-- Protocol schemas until clients and servers can deploy independently.
