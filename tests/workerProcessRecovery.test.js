@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
 const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { io: createSocketClient } = require('socket.io-client');
@@ -18,7 +20,7 @@ function reserveTcpPort() {
     });
 }
 
-async function waitForJson(url, predicate, timeoutMs = 25_000) {
+async function waitForJson(url, predicate, timeoutMs = 25_000, getOutput = () => '') {
     const deadline = Date.now() + timeoutMs;
     let lastError = null;
     while (Date.now() < deadline) {
@@ -33,7 +35,7 @@ async function waitForJson(url, predicate, timeoutMs = 25_000) {
         }
         await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    throw new Error(`Timed out waiting for ${url}: ${lastError?.message || 'condition not met'}`);
+    throw new Error(`Timed out waiting for ${url}: ${lastError?.message || 'condition not met'}\n${getOutput()}`);
 }
 
 test('a killed real mediasoup subprocess is replaced with a ready process', {
@@ -44,6 +46,8 @@ test('a killed real mediasoup subprocess is replaced with a ready process', {
     let rtcPort = await reserveTcpPort();
     while (rtcPort === port) rtcPort = await reserveTcpPort();
     const baseUrl = `http://127.0.0.1:${port}`;
+    const testDistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-worker-dist-'));
+    await fs.writeFile(path.join(testDistDir, 'index.html'), '<!doctype html><div id="root"></div>');
     let output = '';
     let replacementStarted = false;
     let hostSocket = null;
@@ -68,6 +72,7 @@ test('a killed real mediasoup subprocess is replaced with a ready process', {
             WHIP_ENABLED: 'false',
             WHEP_ENABLED: 'false',
             NEXTRA_SMOKE_TEST: '1',
+            NEXTRA_TEST_DIST_DIR: testDistDir,
             WORKER_RECOVERY_MIN_UPTIME_SECONDS: '0',
             LOG_LEVEL: 'warn',
         },
@@ -79,9 +84,10 @@ test('a killed real mediasoup subprocess is replaced with a ready process', {
         hostSocket?.close();
         try { await fetch(`${baseUrl}/api/test/shutdown`, { method: 'POST' }); } catch {}
         if (!replacementStarted && child.exitCode === null) child.kill();
+        await fs.rm(testDistDir, { recursive: true, force: true });
     });
 
-    await waitForJson(`${baseUrl}/readyz`, (body) => body.status === 'ready');
+    await waitForJson(`${baseUrl}/readyz`, (body) => body.status === 'ready', 25_000, () => output);
     const before = await (await fetch(`${baseUrl}/api/metrics`)).json();
     assert.ok(Number.isInteger(before.process.pid));
     assert.ok(Number.isInteger(before.mediaWorker.pid));
@@ -119,11 +125,11 @@ test('a killed real mediasoup subprocess is replaced with a ready process', {
     const after = await waitForJson(`${baseUrl}/api/metrics`, (body) => (
         body.process?.pid !== before.process.pid
         && body.mediaWorker?.pid !== before.mediaWorker.pid
-    ));
+    ), 25_000, () => output);
     replacementStarted = true;
     assert.notEqual(after.process.pid, before.process.pid);
     assert.notEqual(after.mediaWorker.pid, before.mediaWorker.pid);
-    await waitForJson(`${baseUrl}/readyz`, (body) => body.status === 'ready');
+    await waitForJson(`${baseUrl}/readyz`, (body) => body.status === 'ready', 25_000, () => output);
 
     const shutdown = await fetch(`${baseUrl}/api/test/shutdown`, { method: 'POST' });
     assert.equal(shutdown.status, 202, output);
