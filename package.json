@@ -14,7 +14,7 @@
   },
   "homepage": "https://github.com/ServesYouRice/nextra#readme",
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "dev:client": "vite",
