@@ -182,6 +182,7 @@ function verifyCloudflared(filePath, expectedSha256) {
     const signature = spawnSync('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-Command',
         '$ErrorActionPreference = \'Stop\'; '
+        + "Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop; "
         + `$result = Get-AuthenticodeSignature -LiteralPath '${escapedPath}' -ErrorAction Stop; `
         + "if ($null -eq $result) { throw 'Get-AuthenticodeSignature returned no result.' }; "
         + '[pscustomobject]@{ status = [string]$result.Status; '
