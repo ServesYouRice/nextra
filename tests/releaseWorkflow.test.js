@@ -60,6 +60,16 @@ test('the packager generates a checksum for the artifact under smoke test', () =
     assert.match(packager, /Nextra\.exe\.sha256/);
 });
 
+test('cloudflared verification failures report checksum and signer diagnostics', () => {
+    const packager = read('scripts/package-app.js');
+
+    assert.match(packager, /SHA-256 mismatch \(expected \$\{expectedSha256\}, got \$\{actualSha256\}\)/);
+    assert.match(packager, /statusMessage = \[string\]\$result\.StatusMessage/);
+    assert.match(packager, /signerSubject = \[string\]\$result\.SignerCertificate\.Subject/);
+    assert.match(packager, /details\.status !== 'Valid'/);
+    assert.match(packager, /Downloaded cloudflared failed pinned verification: \$\{verification\.reason\}/);
+});
+
 test('release compliance files are trackable and required package inputs', () => {
     const ignore = read('.gitignore');
     const packager = read('scripts/package-app.js');
