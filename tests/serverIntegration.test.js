@@ -374,6 +374,10 @@ test('real server composition enforces HTTP and Socket.IO operational contracts'
     // generation may cross the server boundary.
     socket.emit('media-init', { mimeType: 'video/webm;codecs=vp8', generation: 2 });
     socket.emit('media-chunk', { generation: 2, chunk: Buffer.from([4, 5, 6]) });
+    const prewarmedMedia = await socketRequest(socket, 'get-media-init');
+    assert.equal(prewarmedMedia.success, true);
+    assert.deepEqual(prewarmedMedia.init, { mimeType: 'video/webm;codecs=vp8', generation: 2 });
+    assert.deepEqual(Buffer.from(prewarmedMedia.initChunk), Buffer.from([4, 5, 6]));
     const receivedGenerations = [];
     const onRelayChunk = ({ generation }) => receivedGenerations.push(generation);
     viewer.on('media-chunk', onRelayChunk);

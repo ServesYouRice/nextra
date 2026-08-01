@@ -66,6 +66,9 @@ test('cloudflared verification failures report checksum and signer diagnostics',
     assert.match(packager, /SHA-256 mismatch \(expected \$\{expectedSha256\}, got \$\{actualSha256\}\)/);
     assert.match(packager, /statusMessage = \[string\]\$result\.StatusMessage/);
     assert.match(packager, /signerSubject = \[string\]\$result\.SignerCertificate\.Subject/);
+    assert.match(packager, /ErrorActionPreference/);
+    assert.match(packager, /-ErrorAction Stop/);
+    assert.match(packager, /stderr \|\| stdout/);
     assert.match(packager, /details\.status !== 'Valid'/);
     assert.match(packager, /Downloaded cloudflared failed pinned verification: \$\{verification\.reason\}/);
 });
