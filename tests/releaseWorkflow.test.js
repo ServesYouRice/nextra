@@ -15,6 +15,8 @@ test('version-tagged Windows builds smoke-test and publish truthful unsigned art
     const workflow = read('.github/workflows/release.yml');
 
     assert.match(workflow, /tags: \['v\*\.\*\.\*', '\*\.\*\.\*'\]/);
+    assert.match(workflow, /runs-on: windows-2022/);
+    assert.match(workflow, /node-version: '22'/);
     assert.match(workflow, /run: npm run package\r?$/m);
     assert.match(workflow, /npx playwright install chromium/);
     assert.match(workflow, /\.\\scripts\\smoke-packaged\.ps1/);
@@ -33,9 +35,22 @@ test('pull-request Windows CI exercises the same packaged smoke path', () => {
     const workflow = read('.github/workflows/ci.yml');
 
     assert.match(workflow, /windows-package:/);
+    assert.match(workflow, /windows-package:\r?\n\s+runs-on: windows-2022/);
     assert.match(workflow, /run: npm run package:artifact\r?$/m);
     assert.match(workflow, /npx playwright install chromium/);
     assert.match(workflow, /run: \.\\scripts\\smoke-packaged\.ps1/);
+});
+
+test('workflows and package metadata use the dependency-supported Node 22 baseline', () => {
+    const ciWorkflow = read('.github/workflows/ci.yml');
+    const releaseWorkflow = read('.github/workflows/release.yml');
+    const pkg = JSON.parse(read('package.json'));
+    const lock = JSON.parse(read('package-lock.json'));
+
+    assert.doesNotMatch(ciWorkflow, /node-version: '20'/);
+    assert.doesNotMatch(releaseWorkflow, /node-version: '20'/);
+    assert.equal(pkg.engines.node, '>=22.0.0');
+    assert.equal(lock.packages[''].engines.node, '>=22.0.0');
 });
 
 test('the packager generates a checksum for the artifact under smoke test', () => {
