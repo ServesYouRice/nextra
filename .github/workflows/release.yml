@@ -2,10 +2,10 @@ name: Windows Release
 
 on:
   push:
-    tags: ['v*.*.*']
+    tags: ['v*.*.*', '*.*.*']
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   package-smoke:
@@ -31,3 +31,26 @@ jobs:
           path: |
             Nextra.exe
             Nextra.exe.sha256
+      - name: Publish GitHub Release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $titleVersion = $tag -replace '^v', ''
+          $notes = @"
+          This is an unsigned Windows build. Windows may show an unsigned-app warning.
+
+          Verify Nextra.exe with the attached Nextra.exe.sha256 before running it.
+          Desktop Chrome/Edge hosts and viewers plus mobile Chrome viewers are tested;
+          other browsers are not tested. Corresponding GPL-3.0 source is the $tag tag.
+          "@
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag Nextra.exe Nextra.exe.sha256 --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            gh release edit $tag --title "Nextra $titleVersion" --notes $notes
+          } else {
+            gh release create $tag Nextra.exe Nextra.exe.sha256 --verify-tag --title "Nextra $titleVersion" --notes $notes
+          }

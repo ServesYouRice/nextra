@@ -13,6 +13,8 @@ import RoomSharePanel from './components/RoomSharePanel';
 import { useHostSessionController } from './hooks/useHostSessionController';
 import { formatBytes } from './lib/formatBytes.mjs';
 import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
+import { evaluateHostPreflight } from './lib/hostPreflight.mjs';
+import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
 
 const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 5_000 };
 const OBS_MAX_BITRATE_KBPS = 45_000;
@@ -47,11 +49,25 @@ const OBS_TUNING_PROFILES = {
 const OBS_WS_PASSWORD_STORAGE_KEY = 'nextra.obsWsPassword.v1';
 const BYOK_TURN_SESSION_STORAGE_KEY = 'nextra.byokTurnSession.v1';
 const HOST_RECOVERY_SESSION_STORAGE_KEY = 'nextra.hostRecovery.v1';
+const CAPTURE_PREFS_STORAGE_KEY = 'nextra.capturePrefs.v1';
 const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, window.localStorage);
 
 function mediaDebugLog(...args) {
     if (MEDIA_DEBUG_LOGS) {
         console.log(...args);
+    }
+}
+
+async function fetchDiagnosticJson(path, { acceptErrorStatus = false } = {}) {
+    try {
+        const response = await fetch(path, {
+            headers: { accept: 'application/json' },
+            credentials: 'same-origin',
+        });
+        if (!response.ok && !acceptErrorStatus) return null;
+        return await response.json();
+    } catch {
+        return null;
     }
 }
 
@@ -81,6 +97,27 @@ const QUALITY_PROFILES = {
 
 function getQualityProfile(profileKey) {
     return QUALITY_PROFILES[profileKey] || QUALITY_PROFILES['1440p'];
+}
+
+function loadStoredCapturePrefs() {
+    try {
+        const parsed = JSON.parse(window.localStorage.getItem(CAPTURE_PREFS_STORAGE_KEY) || 'null');
+        if (!parsed || typeof parsed !== 'object') return null;
+        return {
+            qualityProfile: QUALITY_PROFILES[parsed.qualityProfile] ? parsed.qualityProfile : null,
+            frameRate: parsed.frameRate === 30 || parsed.frameRate === 60 ? parsed.frameRate : null,
+        };
+    } catch {
+        return null;
+    }
+}
+
+function persistCapturePrefs(prefs) {
+    try {
+        window.localStorage.setItem(CAPTURE_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+    } catch {
+        // Ignore storage write failures.
+    }
 }
 
 function getProfileRelayBitsPerSecond(profileKey, fps) {
@@ -384,20 +421,24 @@ export default function HostView() {
     const [relayMaxChunkSize, setRelayMaxChunkSize] = useState(4 * 1024 * 1024);
     const [relayViewerCount, setRelayViewerCount] = useState(0);
     const [error, setError] = useState('');
+    const [preflightWarnings, setPreflightWarnings] = useState([]);
+    const [diagnosticDownloading, setDiagnosticDownloading] = useState(false);
+    const [diagnosticDownloadStatus, setDiagnosticDownloadStatus] = useState('');
     const [status, setStatus] = useState('idle');
     const [terminalRoomEnded, setTerminalRoomEnded] = useState(false);
     const [showStopConfirm, setShowStopConfirm] = useState(false);
     const [whepEnabled, setWhepEnabled] = useState(false);
     const [qualityProfile, setQualityProfile] = useState(() => {
+        const stored = loadStoredCapturePrefs();
+        if (stored?.qualityProfile) return stored.qualityProfile;
         const h = window.screen.height * (window.devicePixelRatio || 1);
         if (h >= 2160) return '4k';
         if (h >= 1440) return '1440p';
         return '1080p';
     });
-    const [frameRate, setFrameRate] = useState(30);
+    const [frameRate, setFrameRate] = useState(() => loadStoredCapturePrefs()?.frameRate || 60);
     const [roomMetrics, setRoomMetrics] = useState(null);
     const [ingestMode, setIngestMode] = useState('browser');
-    const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
     const [whipConnected, setWhipConnected] = useState(false);
     const [fallbackViewerCount, setFallbackViewerCount] = useState(0);
     const [obsVideoCodec, setObsVideoCodec] = useState(null);
@@ -519,6 +560,10 @@ export default function HostView() {
     useEffect(() => {
         persistObsPassword(obsPassword);
     }, [obsPassword]);
+
+    useEffect(() => {
+        persistCapturePrefs({ qualityProfile, frameRate });
+    }, [qualityProfile, frameRate]);
 
     useEffect(() => {
         roomCodeRef.current = roomCode;
@@ -761,6 +806,7 @@ export default function HostView() {
         setWhepViewerCount(0);
         setRelayViewerCount(0);
         setRoomMetrics(null);
+        setPreflightWarnings([]);
         setWhipConnected(false);
         setFallbackViewerCount(0);
         setObsVideoCodec(null);
@@ -1061,16 +1107,15 @@ export default function HostView() {
 
     const handleStartSharing = useCallback(async () => {
         setError('');
+        setPreflightWarnings([]);
         setTerminalRoomEnded(false);
         setStatus('connecting');
         const resumedRoom = resumeRoomRef.current;
 
         try {
             let roomTurnConfig = null;
+            let turnConfigError = '';
             if (obsAv1Mode) {
-                if ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported) {
-                    throw new Error('Public AV1 is unavailable because this server has no publicly reachable media address. Use H.264 relay mode or configure PUBLIC_IP and RTC_LISTEN_IP.');
-                }
                 try {
                     roomTurnConfig = buildByokTurnConfig({
                         urlsInput: byokTurnUrls,
@@ -1081,24 +1126,37 @@ export default function HostView() {
                     });
                 } catch (turnError) {
                     setShowByokTurnModal(true);
-                    throw turnError;
+                    turnConfigError = turnError.message;
                 }
-                if (!obsApplySettings) {
-                    throw new Error('AV1 mode requires OBS auto-configuration so the encoder can be switched to AV1.');
-                }
+            }
+
+            const isChromiumBrand = !!navigator.userAgentData?.brands?.some((b) => /Chrom/i.test(b.brand));
+            const isChromium = isChromiumBrand || /Chrome|Chromium|Edg\//i.test(navigator.userAgent || '');
+            const preflight = evaluateHostPreflight({
+                ingestMode,
+                captureApiAvailable: typeof navigator.mediaDevices?.getDisplayMedia === 'function',
+                secureContext: window.isSecureContext === true,
+                chromium: isChromium,
+                whipHttpStatus,
+                whipHttpError,
+                obsAv1Mode,
+                obsApplySettings,
+                turnConfigValid: !obsAv1Mode || roomTurnConfig != null,
+                turnConfigError,
+                publicShareStatus,
+                publicShareError,
+                publicAv1Supported,
+                webSocketAvailable: typeof WebSocket === 'function',
+            });
+            setPreflightWarnings(preflight.warnings.map(({ message }) => message));
+            if (preflight.blockers.length > 0) {
+                throw new Error(preflight.blockers.map(({ message }) => message).join(' '));
             }
 
             if (ingestMode !== 'obs') {
                 // `systemAudio: 'include'` is a Chromium-only getDisplayMedia
                 // option with no feature-detection API, so this probe brands the
                 // capture option only. It never gates whether hosting is allowed.
-                const isChromiumBrand = !!navigator.userAgentData?.brands?.some((b) => /Chrom/i.test(b.brand));
-                const isChromium = isChromiumBrand || /Chrome|Chromium|Edg\//i.test(navigator.userAgent || '');
-
-                if (!isChromium) {
-                    setError('This browser cannot capture system audio; browser capture is tested on desktop Chrome and Edge. Sharing continues without system audio.');
-                }
-
                 const displayMediaOptions = {
                     video: {
                         width: selectedProfile.capture.width,
@@ -1281,6 +1339,7 @@ export default function HostView() {
         obsApplySettings,
         obsAv1Mode,
         publicShareStatus,
+        publicShareError,
         publicAv1Supported,
         whipHttpStatus,
         whipHttpError,
@@ -1381,6 +1440,74 @@ export default function HostView() {
         return () => socket.off('server-config', onServerConfig);
     }, [socket, applyServerConfig]);
 
+    const handleDownloadDiagnostics = useCallback(async () => {
+        setDiagnosticDownloading(true);
+        setDiagnosticDownloadStatus('');
+        try {
+            const [packageInfo, readiness, publicConfig, globalMetrics] = await Promise.all([
+                fetchDiagnosticJson('/api/package-info'),
+                fetchDiagnosticJson('/readyz', { acceptErrorStatus: true }),
+                fetchDiagnosticJson('/api/config'),
+                fetchDiagnosticJson('/api/metrics'),
+            ]);
+            const bundle = buildDiagnosticBundle({
+                packageInfo,
+                readiness,
+                publicConfig,
+                globalMetrics,
+                roomMetrics,
+                hostState: {
+                    ingestMode,
+                    obsAv1Mode,
+                    qualityProfile,
+                    frameRate,
+                    publicShareStatus,
+                    hasTurnServer,
+                    roomHasTurnServer,
+                    whipHttpStatus,
+                    reloadRecoveryEnabled,
+                },
+                clientRuntime: {
+                    userAgent: navigator.userAgent || '',
+                    platform: navigator.userAgentData?.platform || navigator.platform || '',
+                    language: navigator.language || '',
+                    secureContext: window.isSecureContext === true,
+                },
+                errors: [
+                    error,
+                    publicShareError,
+                    whipHttpError,
+                    obsAutoStatus === 'error' ? obsAutoMessage : '',
+                    roomMetrics?.fallbackLastError,
+                    ...preflightWarnings,
+                ],
+            });
+            const filename = downloadDiagnosticBundle(bundle);
+            setDiagnosticDownloadStatus(`Downloaded ${filename}.`);
+        } catch (downloadError) {
+            setDiagnosticDownloadStatus(`Could not prepare diagnostics: ${downloadError.message}`);
+        } finally {
+            setDiagnosticDownloading(false);
+        }
+    }, [
+        roomMetrics,
+        ingestMode,
+        obsAv1Mode,
+        qualityProfile,
+        frameRate,
+        publicShareStatus,
+        hasTurnServer,
+        roomHasTurnServer,
+        whipHttpStatus,
+        reloadRecoveryEnabled,
+        error,
+        publicShareError,
+        whipHttpError,
+        obsAutoStatus,
+        obsAutoMessage,
+        preflightWarnings,
+    ]);
+
     const handleStopSharing = useCallback((confirmed = false) => {
         // Guard against a misclick ending everyone's session: stopping tears down
         // the room and disconnects every viewer, and the next share gets a NEW code.
@@ -1424,7 +1551,6 @@ export default function HostView() {
             : publicShareStatus === 'error'
                 ? `Public link unavailable on this machine. ${publicShareError || 'Built-in tunnel startup failed.'}`
                 : 'Public link unavailable on this machine. Share the local link or room code instead.';
-    const formattedRoomCode = roomCode ? `${roomCode.slice(0, 3)}-${roomCode.slice(3)}` : '';
     const whepBaseUrl = shareBaseUrl || lanBaseUrl;
     const whepPlaybackUrl = whepEnabled && roomCode && whepBaseUrl
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
@@ -1474,9 +1600,9 @@ export default function HostView() {
                         )}
                     </div>
 
-                    <div className="controls">
-                        {!isSharing ? (
-                            <>
+                    {!isSharing ? (
+                        <>
+                            <div className="controls">
                                 <button
                                     className="btn btn-primary btn-large"
                                     onClick={handleStartSharing}
@@ -1505,9 +1631,44 @@ export default function HostView() {
                                         ))}
                                     </div>
                                 )}
-                            </>
-                        ) : (
-                            <>
+                            </div>
+                            <div className="capture-settings">
+                                <div className="setting-row setting-row-inline">
+                                    <span className="setting-row-label">Resolution</span>
+                                    <div className="mode-toggle" role="group" aria-label="Resolution">
+                                        {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
+                                            <button
+                                                key={key}
+                                                type="button"
+                                                className={qualityProfile === key ? 'active' : ''}
+                                                aria-pressed={qualityProfile === key}
+                                                onClick={() => setQualityProfile(key)}
+                                            >
+                                                {profile.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="setting-row setting-row-inline">
+                                    <span className="setting-row-label">Frame rate</span>
+                                    <div className="mode-toggle" role="group" aria-label="Frame rate">
+                                        {[60, 30].map((fps) => (
+                                            <button
+                                                key={fps}
+                                                type="button"
+                                                className={frameRate === fps ? 'active' : ''}
+                                                aria-pressed={frameRate === fps}
+                                                onClick={() => setFrameRate(fps)}
+                                            >
+                                                {fps} fps
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        </>
+                    ) : (
+                        <div className="controls">
                                 <button
                                     className="btn btn-danger"
                                     onClick={() => {
@@ -1521,16 +1682,19 @@ export default function HostView() {
                                     adjustable while streaming (mirrors the live fps
                                     toggle). OBS resolution is fixed at config time. */}
                                 {ingestMode !== 'obs' && (
-                                    <select
-                                        aria-label="Resolution"
-                                        value={qualityProfile}
-                                        onChange={(evt) => setQualityProfile(evt.target.value)}
-                                        className="select-input"
-                                    >
+                                    <div className="mode-toggle" role="group" aria-label="Resolution">
                                         {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                            <option key={key} value={key}>{profile.label}</option>
+                                            <button
+                                                key={key}
+                                                type="button"
+                                                className={qualityProfile === key ? 'active' : ''}
+                                                aria-pressed={qualityProfile === key}
+                                                onClick={() => setQualityProfile(key)}
+                                            >
+                                                {profile.label}
+                                            </button>
                                         ))}
-                                    </select>
+                                    </div>
                                 )}
                                 <div className="mode-toggle" role="group" aria-label="Frame rate">
                                     {[60, 30].map((fps) => (
@@ -1545,9 +1709,8 @@ export default function HostView() {
                                         </button>
                                     ))}
                                 </div>
-                            </>
-                        )}
-                    </div>
+                        </div>
+                    )}
 
                     {isSharing && (
                         <div className="status-bar">
@@ -1562,41 +1725,7 @@ export default function HostView() {
                         <div className={`settings-wrapper${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
                         <div className="settings-panel">
                             <h3>Settings</h3>
-                            <div className="setting-row setting-row-inline">
-                                <label htmlFor="qualityProfile" className="setting-row-label">
-                                    Resolution
-                                </label>
-                                <select
-                                    id="qualityProfile"
-                                    value={qualityProfile}
-                                    onChange={(evt) => setQualityProfile(evt.target.value)}
-                                    className="select-input"
-                                >
-                                    {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                        <option key={key} value={key}>{profile.label}</option>
-                                    ))}
-                                </select>
-                            </div>
-                            <div className="setting-row setting-row-inline">
-                                <label htmlFor="frameRate" className="setting-row-label">
-                                    Frame rate
-                                </label>
-                                <select
-                                    id="frameRate"
-                                    value={frameRate}
-                                    onChange={(evt) => setFrameRate(Number(evt.target.value))}
-                                    className="select-input"
-                                >
-                                    <option value={60}>60 fps</option>
-                                    <option value={30}>30 fps</option>
-                                </select>
-                            </div>
-                            <details
-                                className="advanced-settings"
-                                open={advancedSettingsOpen}
-                                onToggle={(evt) => setAdvancedSettingsOpen(evt.currentTarget.open)}
-                            >
-                                <summary>Advanced settings</summary>
+                            <div className="advanced-settings advanced-settings-lead">
                                 <div className="setting-row setting-row-toggle">
                                     <input
                                         type="checkbox"
@@ -1626,6 +1755,7 @@ export default function HostView() {
                                         maxLength={128}
                                         autoComplete="new-password"
                                         onChange={(evt) => setRoomPassphrase(evt.target.value)}
+                                        className="select-input"
                                     />
                                 </div>
                                 <div className="setting-row setting-row-toggle">
@@ -1654,7 +1784,7 @@ export default function HostView() {
                                         </span>
                                     </label>
                                 </div>
-                            </details>
+                            </div>
                         </div>
                             <div
                                 className="settings-panel obs-config-panel"
@@ -1726,49 +1856,27 @@ export default function HostView() {
                         </div>
                     )}
 
-                    {isSharing && (
-                        <div className="settings-panel">
-                            <h3>Live Settings</h3>
-                            {ingestMode === 'browser' ? (
-                                <>
-                                    <div className="setting-row setting-row-inline">
-                                        <label htmlFor="liveQualityProfile" className="setting-row-label">
-                                            Resolution
-                                        </label>
-                                        <select
-                                            id="liveQualityProfile"
-                                            value={qualityProfile}
-                                            onChange={(evt) => setQualityProfile(evt.target.value)}
-                                            className="select-input"
-                                        >
-                                            {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                                <option key={key} value={key}>{profile.label}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    <p className="live-settings-note">
-                                        Resolution and frame rate apply to the live stream immediately.
-                                    </p>
-                                </>
-                            ) : (
-                                <p className="live-settings-note">
-                                    Video quality is controlled by OBS while streaming.
-                                </p>
-                            )}
-                            <p className="live-settings-note">
-                                Stop sharing to change other settings (OBS mode, viewer media control).
-                            </p>
+                    <UserErrorAlert error={error} />
+                    {preflightWarnings.length > 0 && (
+                        <div className="alert alert-warning" role="status">
+                            <strong>Preflight notice</strong>
+                            <ul>
+                                {preflightWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+                            </ul>
                         </div>
                     )}
-
-                    <UserErrorAlert error={error} />
+                    <HostDiagnostics
+                        metrics={roomMetrics}
+                        onDownload={handleDownloadDiagnostics}
+                        downloading={diagnosticDownloading}
+                        downloadStatus={diagnosticDownloadStatus}
+                    />
                     {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
 
                     {roomCode && (
                         <div className={ingestMode === 'obs' ? 'streaming-info-row' : ''}>
                         <div className="room-info">
                             <RoomSharePanel
-                                formattedRoomCode={formattedRoomCode}
                                 localWatchLink={localWatchLink}
                                 publicWatchLink={publicWatchLink}
                                 showPublicLink={showPublicLink}
@@ -1790,7 +1898,6 @@ export default function HostView() {
                                     WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0, { maxUnit: 'MB' })}
                                 </div>
                             )}
-                            <HostDiagnostics metrics={roomMetrics} />
                             {ingestMode === 'obs' && (
                                 <div className="room-meta">
                                     Codec: {obsVideoCodec || 'waiting'} |{' '}

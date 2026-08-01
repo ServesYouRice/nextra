@@ -49,7 +49,11 @@ cloudflared
 !README.md
 !AGENTS.md
 !CLAUDE.md
+!SOURCE.md
+!THIRD_PARTY_NOTICES.md
 !archive/
 !archive/**/*.md
 !implementation/
 !implementation/*.md
+!implementation/archive/
+!implementation/archive/**/*.md

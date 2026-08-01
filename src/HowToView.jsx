@@ -133,6 +133,7 @@ export default function HowToView() {
                 <p>
                     Copy the <strong>Public Link</strong> for internet viewers, or the <strong>Local Link</strong> / room code for same-network viewers.
                     Packaged <code>Nextra.exe</code> creates a public tunnel link automatically. In dev, enable <code>AUTO_PUBLIC_TUNNEL=true</code> or configure <code>SHARE_BASE_URL</code>.
+                    Each link lasts only for that in-memory room: stopping the Host or restarting Nextra retires it and the next room gets a new link.
                 </p>
             </div>
 
@@ -200,7 +201,7 @@ export default function HowToView() {
                 <strong>1. Join</strong>
                 <p>
                     Open the link the host shared, or go to <strong>Watch</strong> and enter the room code.
-                    No install is required.
+                    No install is required. After joining, viewers can copy the current room link; a protected room&apos;s passphrase is never included.
                 </p>
             </div>
 

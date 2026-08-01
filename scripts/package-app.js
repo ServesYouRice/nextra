@@ -221,6 +221,34 @@ function getBuildIdentifier() {
     return `nextra-${hash.digest('hex').slice(0, 12)}`;
 }
 
+// Windows refuses to delete or overwrite a running executable, which fails the
+// packaging step after every gate has already passed. Renaming a running image
+// is allowed, so move the locked file aside and let caxa write a fresh one; the
+// already-running process keeps using its extracted copy.
+function clearOutputExe() {
+    const dir = path.dirname(outputExe);
+    const base = path.basename(outputExe);
+
+    for (const name of fs.readdirSync(dir)) {
+        if (!name.startsWith(`${base}.old-`)) continue;
+        try { fs.rmSync(path.join(dir, name), { force: true }); } catch { }
+    }
+
+    if (!fs.existsSync(outputExe)) return;
+
+    try {
+        fs.rmSync(outputExe, { force: true });
+        return;
+    } catch (err) {
+        if (err.code !== 'EPERM' && err.code !== 'EBUSY' && err.code !== 'EACCES') throw err;
+    }
+
+    const parked = `${outputExe}.old-${Date.now()}`;
+    fs.renameSync(outputExe, parked);
+    console.log(`${base} was locked by a running process; moved the old build to ${path.basename(parked)}.`);
+    console.log('Restart Nextra to pick up the new build.');
+}
+
 function writeReleaseChecksum() {
     const checksum = getFileSha256(outputExe);
     const line = `${checksum} *${path.basename(outputExe)}\n`;
@@ -371,6 +399,7 @@ async function main() {
         await bundleCloudflared();
         const buildIdentifier = getBuildIdentifier();
         iconStub = await prepareWindowsCaxaStub();
+        clearOutputExe();
 
         const caxaArgs = [
             'caxa',

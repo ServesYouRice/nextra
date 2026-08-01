@@ -15,7 +15,13 @@ export function createVisibilityPoller({
     poll,
     intervalMs,
     visibilityTarget = typeof document === 'undefined' ? null : document,
-    timers = { setInterval, clearInterval },
+    // Wrapped rather than referenced directly: browsers throw "Illegal
+    // invocation" when the global timer functions are called as methods of a
+    // plain object instead of the window.
+    timers = {
+        setInterval: (handler, ms) => setInterval(handler, ms),
+        clearInterval: (id) => clearInterval(id),
+    },
 }) {
     let intervalId = null;
     let closed = false;

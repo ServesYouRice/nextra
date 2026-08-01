@@ -39,8 +39,9 @@ test('packaged executable delivers decoded frames after media-worker replacement
     await hostPage.goto('/#host');
     await hostPage.getByRole('button', { name: 'Start Sharing' }).click();
     await expect(hostPage.getByText(/Streaming \(/)).toBeVisible();
-    const code = (await hostPage.locator('.copy-field', { hasText: 'Room Code' })
-        .locator('.copy-field-value').innerText()).replace(/-/g, '');
+    const localLink = await hostPage.locator('.copy-field', { hasText: 'Local Link' })
+        .locator('.copy-field-value').innerText();
+    const code = localLink.trim().split('#watch/')[1];
 
     await viewerPage.goto(`/#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
