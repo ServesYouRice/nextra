@@ -181,7 +181,9 @@ function verifyCloudflared(filePath, expectedSha256) {
     const escapedPath = filePath.replace(/'/g, "''");
     const signature = spawnSync('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-Command',
-        `$result = Get-AuthenticodeSignature -LiteralPath '${escapedPath}'; `
+        '$ErrorActionPreference = \'Stop\'; '
+        + `$result = Get-AuthenticodeSignature -LiteralPath '${escapedPath}' -ErrorAction Stop; `
+        + "if ($null -eq $result) { throw 'Get-AuthenticodeSignature returned no result.' }; "
         + '[pscustomobject]@{ status = [string]$result.Status; '
         + 'statusMessage = [string]$result.StatusMessage; '
         + 'signerSubject = [string]$result.SignerCertificate.Subject } '
@@ -193,7 +195,7 @@ function verifyCloudflared(filePath, expectedSha256) {
     if (signature.error || signature.status !== 0) {
         return {
             valid: false,
-            reason: `Authenticode query failed (exit ${signature.status ?? 'unknown'}; ${signature.error?.message || stderr || 'no error output'})`,
+            reason: `Authenticode query failed (exit ${signature.status ?? 'unknown'}; ${signature.error?.message || stderr || stdout || 'no error output'})`,
         };
     }
 
