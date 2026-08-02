@@ -21,8 +21,56 @@ export default function HowToView() {
                 <strong>Everyone</strong>
                 <ul>
                     <li><strong>Host:</strong> Windows machine running <code>Nextra.exe</code> or the project from source with <code>npm run dev</code> / <code>npm run build && npm start</code></li>
-                    <li><strong>Viewers:</strong> any modern browser, no install required</li>
+                    <li><strong>Viewers:</strong> desktop Chrome/Edge or mobile Chrome, no install required</li>
                 </ul>
+            </div>
+
+            <h2>Tested browsers</h2>
+
+            <p>
+                Nextra is tested end to end on the paths below. Other browsers are not tested:
+                they may work, and Nextra feature-detects WebRTC receive codecs and Media Source
+                Extensions rather than checking the browser name, so an unsupported browser gets
+                an explicit message instead of a silent failure.
+            </p>
+
+            <div className="table-wrap">
+                <table className="data-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Role and path</th>
+                            <th scope="col">Desktop Chrome / Edge</th>
+                            <th scope="col">Mobile Chrome</th>
+                            <th scope="col">Other browsers</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <th scope="row">Host, browser capture</th>
+                            <td>Tested</td>
+                            <td>Not supported (no screen capture)</td>
+                            <td>Not tested; system audio needs Chrome or Edge</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Host, OBS (WHIP)</th>
+                            <td>Tested</td>
+                            <td>Not supported</td>
+                            <td>Not tested</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Viewer, WebRTC</th>
+                            <td>Tested</td>
+                            <td>Tested</td>
+                            <td>Not tested</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Viewer, relay (H.264/WebM)</th>
+                            <td>Tested</td>
+                            <td>Not tested</td>
+                            <td>Not tested</td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
 
             <div className="article-step">
@@ -85,6 +133,7 @@ export default function HowToView() {
                 <p>
                     Copy the <strong>Public Link</strong> for internet viewers, or the <strong>Local Link</strong> / room code for same-network viewers.
                     Packaged <code>Nextra.exe</code> creates a public tunnel link automatically. In dev, enable <code>AUTO_PUBLIC_TUNNEL=true</code> or configure <code>SHARE_BASE_URL</code>.
+                    Each link lasts only for that in-memory room: stopping the Host or restarting Nextra retires it and the next room gets a new link.
                 </p>
             </div>
 
@@ -152,7 +201,7 @@ export default function HowToView() {
                 <strong>1. Join</strong>
                 <p>
                     Open the link the host shared, or go to <strong>Watch</strong> and enter the room code.
-                    No install is required.
+                    No install is required. After joining, viewers can copy the current room link; a protected room&apos;s passphrase is never included.
                 </p>
             </div>
 

@@ -2,13 +2,19 @@ import React, { useState, useRef, useEffect, useCallback, useContext } from 'rea
 import { SocketContext } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { configureObsStream, stopObsStream } from './lib/obsWebSocket';
+import { getAv1EncoderCandidates } from './lib/obsOutputModel.mjs';
 import CopyField from './components/CopyField';
 import StatusPill from './components/StatusPill';
 import Modal from './components/Modal';
 import FirstRunGuide from './components/FirstRunGuide';
 import HostDiagnostics from './components/HostDiagnostics';
+import UserErrorAlert from './components/UserErrorAlert';
 import RoomSharePanel from './components/RoomSharePanel';
 import { useHostSessionController } from './hooks/useHostSessionController';
+import { formatBytes } from './lib/formatBytes.mjs';
+import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
+import { evaluateHostPreflight } from './lib/hostPreflight.mjs';
+import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
 
 const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 5_000 };
 const OBS_MAX_BITRATE_KBPS = 45_000;
@@ -43,18 +49,25 @@ const OBS_TUNING_PROFILES = {
 const OBS_WS_PASSWORD_STORAGE_KEY = 'nextra.obsWsPassword.v1';
 const BYOK_TURN_SESSION_STORAGE_KEY = 'nextra.byokTurnSession.v1';
 const HOST_RECOVERY_SESSION_STORAGE_KEY = 'nextra.hostRecovery.v1';
-const MEDIA_DEBUG_LOGS = (() => {
-    try {
-        const params = new URLSearchParams(window.location.search);
-        return params.has('debugMedia') || window.localStorage.getItem('nextra.debugMedia') === '1';
-    } catch {
-        return false;
-    }
-})();
+const CAPTURE_PREFS_STORAGE_KEY = 'nextra.capturePrefs.v1';
+const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, window.localStorage);
 
 function mediaDebugLog(...args) {
     if (MEDIA_DEBUG_LOGS) {
         console.log(...args);
+    }
+}
+
+async function fetchDiagnosticJson(path, { acceptErrorStatus = false } = {}) {
+    try {
+        const response = await fetch(path, {
+            headers: { accept: 'application/json' },
+            credentials: 'same-origin',
+        });
+        if (!response.ok && !acceptErrorStatus) return null;
+        return await response.json();
+    } catch {
+        return null;
     }
 }
 
@@ -84,6 +97,27 @@ const QUALITY_PROFILES = {
 
 function getQualityProfile(profileKey) {
     return QUALITY_PROFILES[profileKey] || QUALITY_PROFILES['1440p'];
+}
+
+function loadStoredCapturePrefs() {
+    try {
+        const parsed = JSON.parse(window.localStorage.getItem(CAPTURE_PREFS_STORAGE_KEY) || 'null');
+        if (!parsed || typeof parsed !== 'object') return null;
+        return {
+            qualityProfile: QUALITY_PROFILES[parsed.qualityProfile] ? parsed.qualityProfile : null,
+            frameRate: parsed.frameRate === 30 || parsed.frameRate === 60 ? parsed.frameRate : null,
+        };
+    } catch {
+        return null;
+    }
+}
+
+function persistCapturePrefs(prefs) {
+    try {
+        window.localStorage.setItem(CAPTURE_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+    } catch {
+        // Ignore storage write failures.
+    }
 }
 
 function getProfileRelayBitsPerSecond(profileKey, fps) {
@@ -124,35 +158,16 @@ function createGpuCapability(overrides = {}) {
         gpu: 'unknown',
         h264EncoderIds: ['obs_x264'],
         h264Label: 'x264',
-        av1EncoderIds: [],
+        av1EncoderIds: getAv1EncoderCandidates(),
         av1Label: 'AV1',
-        av1Supported: false,
         ...overrides,
     };
 }
 
 /**
- * Detect host GPU and determine the preferred OBS encoder families.
+ * Detect the host GPU only to order OBS encoder attempts. OBS set-and-verify is
+ * authoritative because WebGL renderers may be masked or misleading.
  */
-function detectAv1Support(renderer) {
-    const normalized = String(renderer || '').toUpperCase();
-    if (!normalized) return false;
-
-    if (/NVIDIA|GEFORCE|RTX/.test(normalized)) {
-        return /\bRTX\s*40\d{2}\b|\bRTX\s*50\d{2}\b|\bRTX\s*(4000|4500|5000|6000)\s*ADA\b|\bADA\b|\bL4\b|\bL40\b/.test(normalized);
-    }
-
-    if (/AMD|RADEON/.test(normalized)) {
-        return /\bRX\s*7\d{3}\b|\bRADEON\s*7\d{3}\b|\b780M\b|\b880M\b|\b890M\b/.test(normalized);
-    }
-
-    if (/INTEL/.test(normalized)) {
-        return /\bARC\b|\bULTRA\b/.test(normalized);
-    }
-
-    return false;
-}
-
 function detectGpuCapability() {
     try {
         const canvas = document.createElement('canvas');
@@ -164,16 +179,15 @@ function detectGpuCapability() {
 
         const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '';
         canvas.remove();
-        const av1Supported = detectAv1Support(renderer);
+        const av1EncoderIds = getAv1EncoderCandidates(renderer);
 
         if (/GTX|NVIDIA|GeForce/i.test(renderer)) {
             return createGpuCapability({
                 gpu: renderer,
                 h264EncoderIds: ['obs_nvenc_h264_tex', 'jim_nvenc', 'obs_x264'],
                 h264Label: 'NVENC',
-                av1EncoderIds: av1Supported ? ['obs_nvenc_av1_tex', 'jim_av1_nvenc', 'ffmpeg_nvenc_av1'] : [],
+                av1EncoderIds,
                 av1Label: 'NVENC AV1',
-                av1Supported,
             });
         }
 
@@ -182,9 +196,8 @@ function detectGpuCapability() {
                 gpu: renderer,
                 h264EncoderIds: ['h264_texture_amf', 'obs_amf_h264', 'obs_x264'],
                 h264Label: 'AMF',
-                av1EncoderIds: av1Supported ? ['av1_texture_amf', 'obs_amf_av1', 'amd_amf_av1'] : [],
+                av1EncoderIds,
                 av1Label: 'AMF AV1',
-                av1Supported,
             });
         }
 
@@ -193,13 +206,12 @@ function detectGpuCapability() {
                 gpu: renderer,
                 h264EncoderIds: ['obs_qsv11', 'obs_x264'],
                 h264Label: 'QSV',
-                av1EncoderIds: av1Supported ? ['obs_qsv11_av1', 'obs_qsv_av1'] : [],
+                av1EncoderIds,
                 av1Label: 'QSV AV1',
-                av1Supported,
             });
         }
 
-        return createGpuCapability({ gpu: renderer, av1Supported });
+        return createGpuCapability({ gpu: renderer, av1EncoderIds });
     } catch {
         return createGpuCapability();
     }
@@ -263,13 +275,6 @@ function isLikelyLocalOrigin(origin) {
 function formatHostForUrl(host) {
     const value = String(host || '127.0.0.1').trim() || '127.0.0.1';
     return value.includes(':') && !value.startsWith('[') ? `[${value}]` : value;
-}
-
-function formatBytes(value) {
-    const bytes = Number(value) || 0;
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function parseTurnUrlInput(value) {
@@ -416,19 +421,24 @@ export default function HostView() {
     const [relayMaxChunkSize, setRelayMaxChunkSize] = useState(4 * 1024 * 1024);
     const [relayViewerCount, setRelayViewerCount] = useState(0);
     const [error, setError] = useState('');
+    const [preflightWarnings, setPreflightWarnings] = useState([]);
+    const [diagnosticDownloading, setDiagnosticDownloading] = useState(false);
+    const [diagnosticDownloadStatus, setDiagnosticDownloadStatus] = useState('');
     const [status, setStatus] = useState('idle');
+    const [terminalRoomEnded, setTerminalRoomEnded] = useState(false);
     const [showStopConfirm, setShowStopConfirm] = useState(false);
     const [whepEnabled, setWhepEnabled] = useState(false);
     const [qualityProfile, setQualityProfile] = useState(() => {
+        const stored = loadStoredCapturePrefs();
+        if (stored?.qualityProfile) return stored.qualityProfile;
         const h = window.screen.height * (window.devicePixelRatio || 1);
         if (h >= 2160) return '4k';
         if (h >= 1440) return '1440p';
         return '1080p';
     });
-    const [frameRate, setFrameRate] = useState(30);
+    const [frameRate, setFrameRate] = useState(() => loadStoredCapturePrefs()?.frameRate || 60);
     const [roomMetrics, setRoomMetrics] = useState(null);
     const [ingestMode, setIngestMode] = useState('browser');
-    const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
     const [whipConnected, setWhipConnected] = useState(false);
     const [fallbackViewerCount, setFallbackViewerCount] = useState(0);
     const [obsVideoCodec, setObsVideoCodec] = useState(null);
@@ -474,10 +484,13 @@ export default function HostView() {
     const pageHidingRef = useRef(false);
     const hostUnmountTimerRef = useRef(null);
     const prevRelayViewerCountRef = useRef(0);
+    const relayGenerationRef = useRef(0);
 
     const bitratePerViewer = viewerCount > 0 ? hostUploadMbps / viewerCount : hostUploadMbps;
     const bandwidthWarning = viewerCount >= 3 && bitratePerViewer < 7
-        ? `${viewerCount} viewers x ~${bitratePerViewer.toFixed(1)} Mbps each. Consider 720p.`
+        // 1080p at 30 fps is the lowest profile Nextra offers; never recommend a
+        // resolution that is not in QUALITY_PROFILES.
+        ? `${viewerCount} viewers x ~${bitratePerViewer.toFixed(1)} Mbps each. Consider 1080p at 30 fps.`
         : '';
     const selectedProfile = getQualityProfile(qualityProfile);
     const profileRelayBits = getProfileRelayBitsPerSecond(qualityProfile, frameRate);
@@ -545,14 +558,12 @@ export default function HostView() {
     }, [frameRate, obsApplySettings, obsAutoStart, obsAv1Mode, obsPassword, qualityProfile, obsTuningProfile]);
 
     useEffect(() => {
-        if (obsTryAv1 && !obsApplySettings) {
-            setObsApplySettings(true);
-        }
-    }, [obsTryAv1, obsApplySettings]);
-
-    useEffect(() => {
         persistObsPassword(obsPassword);
     }, [obsPassword]);
+
+    useEffect(() => {
+        persistCapturePrefs({ qualityProfile, frameRate });
+    }, [qualityProfile, frameRate]);
 
     useEffect(() => {
         roomCodeRef.current = roomCode;
@@ -583,12 +594,6 @@ export default function HostView() {
         byokTurnUsername,
         byokTurnCredential,
     ]);
-
-    useEffect(() => {
-        if (ingestMode !== 'obs' || !obsTryAv1) {
-            setShowByokTurnModal(false);
-        }
-    }, [ingestMode, obsTryAv1]);
 
     // WHEP enablement is only exposed via the HTTP config endpoint (the
     // socket server-config payload does not include it), so probe it once.
@@ -668,11 +673,11 @@ export default function HostView() {
         }
     }, []);
 
-    const emitRelayChunk = useCallback((blob) => {
+    const emitRelayChunk = useCallback((blob, generation) => {
         if (!blob || blob.size <= 0) return;
 
         if (blob.size <= relayMaxChunkSize) {
-            socket.emit('media-chunk', blob);
+            socket.emit('media-chunk', { generation, chunk: blob });
             return;
         }
 
@@ -680,7 +685,7 @@ export default function HostView() {
         for (let offset = 0; offset < blob.size; offset += relayChunkEmitSize) {
             const part = blob.slice(offset, Math.min(offset + relayChunkEmitSize, blob.size));
             if (part.size > 0) {
-                socket.emit('media-chunk', part);
+                socket.emit('media-chunk', { generation, chunk: part });
                 emittedParts += 1;
             }
         }
@@ -731,13 +736,14 @@ export default function HostView() {
             mimeType,
             videoBitsPerSecond: effectiveRelayBitsPerSecond,
         });
+        const generation = ++relayGenerationRef.current;
         mediaRecorderRef.current = recorder;
 
         let chunkCount = 0;
         let lastChunkAt = 0;
         recorder.onstart = () => {
             lastChunkAt = Date.now();
-            socket.emit('media-init', { mimeType });
+            socket.emit('media-init', { mimeType, generation });
         };
         recorder.ondataavailable = (evt) => {
             if (evt.data && evt.data.size > 0) {
@@ -746,7 +752,7 @@ export default function HostView() {
                 if (chunkCount % 20 === 0) {
                     mediaDebugLog(`[Nextra-Host] Emitted ${chunkCount} relay chunks. Latest size: ${evt.data.size}`);
                 }
-                emitRelayChunk(evt.data);
+                emitRelayChunk(evt.data, generation);
             }
         };
         recorder.onerror = (evt) => {
@@ -800,6 +806,7 @@ export default function HostView() {
         setWhepViewerCount(0);
         setRelayViewerCount(0);
         setRoomMetrics(null);
+        setPreflightWarnings([]);
         setWhipConnected(false);
         setFallbackViewerCount(0);
         setObsVideoCodec(null);
@@ -809,6 +816,7 @@ export default function HostView() {
         setObsAutoMessage('');
         setShowByokTurnModal(false);
         setStatus('idle');
+        setTerminalRoomEnded(false);
         resetDevice();
     }, []);
 
@@ -823,6 +831,13 @@ export default function HostView() {
         silentAudioTrackRef,
         resetState: resetHostSessionState,
     });
+
+    const terminateHostSession = useCallback((reason) => {
+        cleanup();
+        setResumePending(false);
+        setTerminalRoomEnded(true);
+        setError(reason || 'This room ended. Create a new room to share again.');
+    }, [cleanup]);
 
     useEffect(() => {
         if (hostUnmountTimerRef.current) {
@@ -875,12 +890,15 @@ export default function HostView() {
                 setRoomMetrics(metrics || null);
             } catch (err) {
                 console.warn('[Nextra] Failed to reclaim host room after reconnect:', err.message);
+                if (err.terminal === true) {
+                    terminateHostSession(err.reason || err.message);
+                }
             }
         };
 
         socket.on('connect', onReconnect);
         return () => socket.off('connect', onReconnect);
-    }, [socket, isSharing, roomCode]);
+    }, [socket, isSharing, roomCode, terminateHostSession]);
 
     useEffect(() => {
         const stored = loadHostRecoverySession();
@@ -907,7 +925,14 @@ export default function HostView() {
                 setIngestMode(response.ingestMode === 'obs' ? 'obs' : 'browser');
                 setObsVideoCodec(response.obsVideoCodec || null);
                 setRoomHasTurnServer(!!response.hasRoomTurnServer);
-                resumeRoomRef.current = { ...stored, ...response };
+                // Room-state responses also carry a stable `code` describing the
+                // transition (for example `host-reconnected`). Preserve the room
+                // identity from the authenticated recovery session explicitly.
+                resumeRoomRef.current = {
+                    ...response,
+                    code: stored.code,
+                    hostToken: stored.hostToken,
+                };
                 if (response.ingestMode === 'obs') {
                     setIsSharing(true);
                     setStatus('streaming');
@@ -916,14 +941,27 @@ export default function HostView() {
                     setResumePending(true);
                     setStatus('idle');
                 }
-            } catch {
-                clearHostRecoverySession();
+            } catch (err) {
+                if (cancelled) return;
+                terminateHostSession(err.reason || err.message || 'The previous room ended. Create a new room to continue.');
             }
         };
 
         reclaimStoredRoom();
         return () => { cancelled = true; };
-    }, [socket]);
+    }, [socket, terminateHostSession]);
+
+    useEffect(() => {
+        const onRoomEnded = ({ reason } = {}) => terminateHostSession(reason);
+        socket.on('room-ended', onRoomEnded);
+        // Older servers used this event for process replacement. In-memory
+        // rooms cannot survive either signal, so it is terminal as well.
+        socket.on('server-restarting', onRoomEnded);
+        return () => {
+            socket.off('room-ended', onRoomEnded);
+            socket.off('server-restarting', onRoomEnded);
+        };
+    }, [socket, terminateHostSession]);
 
     useEffect(() => {
         const onRoomMetrics = (data) => {
@@ -1035,10 +1073,14 @@ export default function HostView() {
             return;
         }
 
+        const previousRelayViewerCount = prevRelayViewerCountRef.current;
         prevRelayViewerCountRef.current = relayViewerCount;
 
         if (relayViewerCount > 0 || shouldPrewarmRelay) {
-            if (!mediaRecorderRef.current) {
+            if (relayViewerCount > 0 && previousRelayViewerCount === 0 && mediaRecorderRef.current) {
+                stopRelayRecorder();
+                startRelayRecorder();
+            } else if (!mediaRecorderRef.current) {
                 startRelayRecorder();
             }
         } else {
@@ -1065,15 +1107,15 @@ export default function HostView() {
 
     const handleStartSharing = useCallback(async () => {
         setError('');
+        setPreflightWarnings([]);
+        setTerminalRoomEnded(false);
         setStatus('connecting');
         const resumedRoom = resumeRoomRef.current;
 
         try {
             let roomTurnConfig = null;
+            let turnConfigError = '';
             if (obsAv1Mode) {
-                if ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported) {
-                    throw new Error('Public AV1 is unavailable because this server has no publicly reachable media address. Use H.264 relay mode or configure PUBLIC_IP and RTC_LISTEN_IP.');
-                }
                 try {
                     roomTurnConfig = buildByokTurnConfig({
                         urlsInput: byokTurnUrls,
@@ -1084,22 +1126,37 @@ export default function HostView() {
                     });
                 } catch (turnError) {
                     setShowByokTurnModal(true);
-                    throw turnError;
-                }
-                if (!obsApplySettings) {
-                    throw new Error('AV1 mode requires OBS auto-configuration so the encoder can be switched to AV1.');
+                    turnConfigError = turnError.message;
                 }
             }
 
+            const isChromiumBrand = !!navigator.userAgentData?.brands?.some((b) => /Chrom/i.test(b.brand));
+            const isChromium = isChromiumBrand || /Chrome|Chromium|Edg\//i.test(navigator.userAgent || '');
+            const preflight = evaluateHostPreflight({
+                ingestMode,
+                captureApiAvailable: typeof navigator.mediaDevices?.getDisplayMedia === 'function',
+                secureContext: window.isSecureContext === true,
+                chromium: isChromium,
+                whipHttpStatus,
+                whipHttpError,
+                obsAv1Mode,
+                obsApplySettings,
+                turnConfigValid: !obsAv1Mode || roomTurnConfig != null,
+                turnConfigError,
+                publicShareStatus,
+                publicShareError,
+                publicAv1Supported,
+                webSocketAvailable: typeof WebSocket === 'function',
+            });
+            setPreflightWarnings(preflight.warnings.map(({ message }) => message));
+            if (preflight.blockers.length > 0) {
+                throw new Error(preflight.blockers.map(({ message }) => message).join(' '));
+            }
+
             if (ingestMode !== 'obs') {
-                const userAgent = navigator.userAgent || '';
-                const isChromiumBrand = !!navigator.userAgentData?.brands?.some((b) => /Chrom/i.test(b.brand));
-                const isChromium = isChromiumBrand || /Chrome|Chromium|Edg\//i.test(userAgent);
-
-                if (!isChromium) {
-                    setError('System audio is best supported in Chrome or Edge.');
-                }
-
+                // `systemAudio: 'include'` is a Chromium-only getDisplayMedia
+                // option with no feature-detection API, so this probe brands the
+                // capture option only. It never gates whether hosting is allowed.
                 const displayMediaOptions = {
                     video: {
                         width: selectedProfile.capture.width,
@@ -1282,6 +1339,7 @@ export default function HostView() {
         obsApplySettings,
         obsAv1Mode,
         publicShareStatus,
+        publicShareError,
         publicAv1Supported,
         whipHttpStatus,
         whipHttpError,
@@ -1382,6 +1440,74 @@ export default function HostView() {
         return () => socket.off('server-config', onServerConfig);
     }, [socket, applyServerConfig]);
 
+    const handleDownloadDiagnostics = useCallback(async () => {
+        setDiagnosticDownloading(true);
+        setDiagnosticDownloadStatus('');
+        try {
+            const [packageInfo, readiness, publicConfig, globalMetrics] = await Promise.all([
+                fetchDiagnosticJson('/api/package-info'),
+                fetchDiagnosticJson('/readyz', { acceptErrorStatus: true }),
+                fetchDiagnosticJson('/api/config'),
+                fetchDiagnosticJson('/api/metrics'),
+            ]);
+            const bundle = buildDiagnosticBundle({
+                packageInfo,
+                readiness,
+                publicConfig,
+                globalMetrics,
+                roomMetrics,
+                hostState: {
+                    ingestMode,
+                    obsAv1Mode,
+                    qualityProfile,
+                    frameRate,
+                    publicShareStatus,
+                    hasTurnServer,
+                    roomHasTurnServer,
+                    whipHttpStatus,
+                    reloadRecoveryEnabled,
+                },
+                clientRuntime: {
+                    userAgent: navigator.userAgent || '',
+                    platform: navigator.userAgentData?.platform || navigator.platform || '',
+                    language: navigator.language || '',
+                    secureContext: window.isSecureContext === true,
+                },
+                errors: [
+                    error,
+                    publicShareError,
+                    whipHttpError,
+                    obsAutoStatus === 'error' ? obsAutoMessage : '',
+                    roomMetrics?.fallbackLastError,
+                    ...preflightWarnings,
+                ],
+            });
+            const filename = downloadDiagnosticBundle(bundle);
+            setDiagnosticDownloadStatus(`Downloaded ${filename}.`);
+        } catch (downloadError) {
+            setDiagnosticDownloadStatus(`Could not prepare diagnostics: ${downloadError.message}`);
+        } finally {
+            setDiagnosticDownloading(false);
+        }
+    }, [
+        roomMetrics,
+        ingestMode,
+        obsAv1Mode,
+        qualityProfile,
+        frameRate,
+        publicShareStatus,
+        hasTurnServer,
+        roomHasTurnServer,
+        whipHttpStatus,
+        reloadRecoveryEnabled,
+        error,
+        publicShareError,
+        whipHttpError,
+        obsAutoStatus,
+        obsAutoMessage,
+        preflightWarnings,
+    ]);
+
     const handleStopSharing = useCallback((confirmed = false) => {
         // Guard against a misclick ending everyone's session: stopping tears down
         // the room and disconnects every viewer, and the next share gets a NEW code.
@@ -1408,6 +1534,13 @@ export default function HostView() {
         setShowByokTurnModal(false);
     }, []);
 
+    const handleIngestModeChange = useCallback((mode) => {
+        setIngestMode(mode);
+        if (mode !== 'obs') {
+            setShowByokTurnModal(false);
+        }
+    }, []);
+
     const localWatchLink = roomCode ? `${lanBaseUrl}/#watch/${roomCode}` : '';
     const publicWatchLink = roomCode && shareBaseUrl ? `${shareBaseUrl}/#watch/${roomCode}` : '';
     const showPublicLink = !!publicWatchLink && publicWatchLink !== localWatchLink;
@@ -1418,7 +1551,6 @@ export default function HostView() {
             : publicShareStatus === 'error'
                 ? `Public link unavailable on this machine. ${publicShareError || 'Built-in tunnel startup failed.'}`
                 : 'Public link unavailable on this machine. Share the local link or room code instead.';
-    const formattedRoomCode = roomCode ? `${roomCode.slice(0, 3)}-${roomCode.slice(3)}` : '';
     const whepBaseUrl = shareBaseUrl || lanBaseUrl;
     const whepPlaybackUrl = whepEnabled && roomCode && whepBaseUrl
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
@@ -1438,7 +1570,7 @@ export default function HostView() {
 
             {showFirstRun && !isSharing && (
                 <FirstRunGuide
-                    onChoose={(mode) => { setIngestMode(mode); dismissFirstRun(); }}
+                    onChoose={(mode) => { handleIngestModeChange(mode); dismissFirstRun(); }}
                     onDismiss={dismissFirstRun}
                 />
             )}
@@ -1468,15 +1600,21 @@ export default function HostView() {
                         )}
                     </div>
 
-                    <div className="controls">
-                        {!isSharing ? (
-                            <>
+                    {!isSharing ? (
+                        <>
+                            <div className="controls">
                                 <button
                                     className="btn btn-primary btn-large"
                                     onClick={handleStartSharing}
                                     disabled={status === 'connecting'}
                                 >
-                                    {status === 'connecting' ? 'Connecting...' : (resumePending ? 'Resume Sharing' : 'Start Sharing')}
+                                    {status === 'connecting'
+                                        ? 'Connecting...'
+                                        : resumePending
+                                            ? 'Resume Sharing'
+                                            : terminalRoomEnded
+                                                ? 'Create new room'
+                                                : 'Start Sharing'}
                                 </button>
                                 {ingestMode === 'obs' && obsApplySettings && (
                                     <div className="mode-toggle" role="group" aria-label="OBS tuning profile">
@@ -1493,9 +1631,44 @@ export default function HostView() {
                                         ))}
                                     </div>
                                 )}
-                            </>
-                        ) : (
-                            <>
+                            </div>
+                            <div className="capture-settings">
+                                <div className="setting-row setting-row-inline">
+                                    <span className="setting-row-label">Resolution</span>
+                                    <div className="mode-toggle" role="group" aria-label="Resolution">
+                                        {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
+                                            <button
+                                                key={key}
+                                                type="button"
+                                                className={qualityProfile === key ? 'active' : ''}
+                                                aria-pressed={qualityProfile === key}
+                                                onClick={() => setQualityProfile(key)}
+                                            >
+                                                {profile.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="setting-row setting-row-inline">
+                                    <span className="setting-row-label">Frame rate</span>
+                                    <div className="mode-toggle" role="group" aria-label="Frame rate">
+                                        {[60, 30].map((fps) => (
+                                            <button
+                                                key={fps}
+                                                type="button"
+                                                className={frameRate === fps ? 'active' : ''}
+                                                aria-pressed={frameRate === fps}
+                                                onClick={() => setFrameRate(fps)}
+                                            >
+                                                {fps} fps
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        </>
+                    ) : (
+                        <div className="controls">
                                 <button
                                     className="btn btn-danger"
                                     onClick={() => {
@@ -1509,34 +1682,35 @@ export default function HostView() {
                                     adjustable while streaming (mirrors the live fps
                                     toggle). OBS resolution is fixed at config time. */}
                                 {ingestMode !== 'obs' && (
-                                    <select
-                                        aria-label="Resolution"
-                                        value={qualityProfile}
-                                        onChange={(evt) => setQualityProfile(evt.target.value)}
-                                        className="select-input"
-                                    >
+                                    <div className="mode-toggle" role="group" aria-label="Resolution">
                                         {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                            <option key={key} value={key}>{profile.label}</option>
+                                            <button
+                                                key={key}
+                                                type="button"
+                                                className={qualityProfile === key ? 'active' : ''}
+                                                aria-pressed={qualityProfile === key}
+                                                onClick={() => setQualityProfile(key)}
+                                            >
+                                                {profile.label}
+                                            </button>
                                         ))}
-                                    </select>
+                                    </div>
                                 )}
-                                <div className="mode-toggle">
-                                    <button
-                                        className={frameRate === 60 ? 'active' : ''}
-                                        onClick={() => setFrameRate(60)}
-                                    >
-                                        60fps
-                                    </button>
-                                    <button
-                                        className={frameRate === 30 ? 'active' : ''}
-                                        onClick={() => setFrameRate(30)}
-                                    >
-                                        30fps
-                                    </button>
+                                <div className="mode-toggle" role="group" aria-label="Frame rate">
+                                    {[60, 30].map((fps) => (
+                                        <button
+                                            key={fps}
+                                            type="button"
+                                            className={frameRate === fps ? 'active' : ''}
+                                            aria-pressed={frameRate === fps}
+                                            onClick={() => setFrameRate(fps)}
+                                        >
+                                            {fps} fps
+                                        </button>
+                                    ))}
                                 </div>
-                            </>
-                        )}
-                    </div>
+                        </div>
+                    )}
 
                     {isSharing && (
                         <div className="status-bar">
@@ -1551,41 +1725,7 @@ export default function HostView() {
                         <div className={`settings-wrapper${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
                         <div className="settings-panel">
                             <h3>Settings</h3>
-                            <div className="setting-row setting-row-inline">
-                                <label htmlFor="qualityProfile" className="setting-row-label">
-                                    Resolution
-                                </label>
-                                <select
-                                    id="qualityProfile"
-                                    value={qualityProfile}
-                                    onChange={(evt) => setQualityProfile(evt.target.value)}
-                                    className="select-input"
-                                >
-                                    {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                        <option key={key} value={key}>{profile.label}</option>
-                                    ))}
-                                </select>
-                            </div>
-                            <div className="setting-row setting-row-inline">
-                                <label htmlFor="frameRate" className="setting-row-label">
-                                    Frame rate
-                                </label>
-                                <select
-                                    id="frameRate"
-                                    value={frameRate}
-                                    onChange={(evt) => setFrameRate(Number(evt.target.value))}
-                                    className="select-input"
-                                >
-                                    <option value={60}>60 fps</option>
-                                    <option value={30}>30 fps</option>
-                                </select>
-                            </div>
-                            <details
-                                className="advanced-settings"
-                                open={advancedSettingsOpen}
-                                onToggle={(evt) => setAdvancedSettingsOpen(evt.currentTarget.open)}
-                            >
-                                <summary>Advanced settings</summary>
+                            <div className="advanced-settings advanced-settings-lead">
                                 <div className="setting-row setting-row-toggle">
                                     <input
                                         type="checkbox"
@@ -1615,6 +1755,7 @@ export default function HostView() {
                                         maxLength={128}
                                         autoComplete="new-password"
                                         onChange={(evt) => setRoomPassphrase(evt.target.value)}
+                                        className="select-input"
                                     />
                                 </div>
                                 <div className="setting-row setting-row-toggle">
@@ -1634,7 +1775,7 @@ export default function HostView() {
                                         type="checkbox"
                                         id="obsMode"
                                         checked={ingestMode === 'obs'}
-                                        onChange={(e) => setIngestMode(e.target.checked ? 'obs' : 'browser')}
+                                        onChange={(e) => handleIngestModeChange(e.target.checked ? 'obs' : 'browser')}
                                     />
                                     <label htmlFor="obsMode">
                                         Use OBS (WHIP ingest)
@@ -1643,7 +1784,7 @@ export default function HostView() {
                                         </span>
                                     </label>
                                 </div>
-                            </details>
+                            </div>
                         </div>
                             <div
                                 className="settings-panel obs-config-panel"
@@ -1671,18 +1812,13 @@ export default function HostView() {
                                             type="checkbox"
                                             id="obsTryAv1"
                                             checked={obsTryAv1}
-                                            disabled={!gpuInfo.av1Supported || ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported)}
+                                            disabled={(publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported}
                                             onChange={(e) => handleObsTryAv1Change(e.target.checked)}
                                         />
                                         <label htmlFor="obsTryAv1">
                                             Use BYOK TURN (AV1)
                                             <span className="setting-hint">Open TURN setup in a modal and switch OBS rooms to AV1 WebRTC-only mode</span>
-                                            {!gpuInfo.av1Supported && (
-                                                <span className="setting-hint">
-                                                    Disabled: AV1 encode was not detected on this host GPU.
-                                                </span>
-                                            )}
-                                            {gpuInfo.av1Supported && (publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported && (
+                                            {(publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported && (
                                                 <span className="setting-hint">
                                                     Disabled for public sharing: configure a reachable public media address first.
                                                 </span>
@@ -1720,49 +1856,27 @@ export default function HostView() {
                         </div>
                     )}
 
-                    {isSharing && (
-                        <div className="settings-panel">
-                            <h3>Live Settings</h3>
-                            {ingestMode === 'browser' ? (
-                                <>
-                                    <div className="setting-row setting-row-inline">
-                                        <label htmlFor="liveQualityProfile" className="setting-row-label">
-                                            Resolution
-                                        </label>
-                                        <select
-                                            id="liveQualityProfile"
-                                            value={qualityProfile}
-                                            onChange={(evt) => setQualityProfile(evt.target.value)}
-                                            className="select-input"
-                                        >
-                                            {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                                <option key={key} value={key}>{profile.label}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    <p className="live-settings-note">
-                                        Resolution and frame rate apply to the live stream immediately.
-                                    </p>
-                                </>
-                            ) : (
-                                <p className="live-settings-note">
-                                    Video quality is controlled by OBS while streaming.
-                                </p>
-                            )}
-                            <p className="live-settings-note">
-                                Stop sharing to change other settings (OBS mode, viewer media control).
-                            </p>
+                    <UserErrorAlert error={error} />
+                    {preflightWarnings.length > 0 && (
+                        <div className="alert alert-warning" role="status">
+                            <strong>Preflight notice</strong>
+                            <ul>
+                                {preflightWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+                            </ul>
                         </div>
                     )}
-
-                    {error && <div className="alert alert-error" role="alert">{error}</div>}
+                    <HostDiagnostics
+                        metrics={roomMetrics}
+                        onDownload={handleDownloadDiagnostics}
+                        downloading={diagnosticDownloading}
+                        downloadStatus={diagnosticDownloadStatus}
+                    />
                     {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
 
                     {roomCode && (
                         <div className={ingestMode === 'obs' ? 'streaming-info-row' : ''}>
                         <div className="room-info">
                             <RoomSharePanel
-                                formattedRoomCode={formattedRoomCode}
                                 localWatchLink={localWatchLink}
                                 publicWatchLink={publicWatchLink}
                                 showPublicLink={showPublicLink}
@@ -1781,10 +1895,9 @@ export default function HostView() {
                             </div>
                             {roomMetrics && (
                                 <div className="room-meta">
-                                    WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0)}
+                                    WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0, { maxUnit: 'MB' })}
                                 </div>
                             )}
-                            <HostDiagnostics metrics={roomMetrics} />
                             {ingestMode === 'obs' && (
                                 <div className="room-meta">
                                     Codec: {obsVideoCodec || 'waiting'} |{' '}

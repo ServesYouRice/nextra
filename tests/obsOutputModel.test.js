@@ -37,3 +37,25 @@ test('Simple Output mirroring stays disabled for AV1 encoders', async () => {
 
     assert.equal(getSimpleOutputEncoderId('obs_nvenc_av1_tex', 'nvenc', 'av1'), null);
 });
+
+test('masked GPU detection tries a bounded cross-vendor AV1 encoder list', async () => {
+    const { getAv1EncoderCandidates } = await obsOutputModelModule;
+
+    const masked = getAv1EncoderCandidates('ANGLE (masked renderer)');
+    assert.deepEqual(masked, [
+        'obs_nvenc_av1_tex',
+        'jim_av1_nvenc',
+        'ffmpeg_nvenc_av1',
+        'av1_texture_amf',
+        'obs_amf_av1',
+        'amd_amf_av1',
+        'obs_qsv11_av1',
+        'obs_qsv_av1',
+    ]);
+    assert.equal(new Set(masked).size, masked.length);
+
+    const amd = getAv1EncoderCandidates('AMD Radeon RX 7900');
+    assert.equal(amd[0], 'av1_texture_amf');
+    assert.ok(amd.includes('obs_nvenc_av1_tex'));
+    assert.ok(amd.includes('obs_qsv11_av1'));
+});

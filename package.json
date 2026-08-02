@@ -14,7 +14,7 @@
   },
   "homepage": "https://github.com/ServesYouRice/nextra#readme",
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "dev:client": "vite",
@@ -26,7 +26,7 @@
     "typecheck": "tsc -p jsconfig.lifecycle.json",
     "test": "node --test",
     "test:e2e": "playwright test",
-    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=70 --test-coverage-branches=60 --test-coverage-functions=75 --test-coverage-include=lib/roomMediaPipeline.js --test-coverage-include=src/lib/lifecycleController.mjs --test-coverage-include=src/lib/mediasoupClient.js --test-coverage-include=src/lib/fmp4RelayPlayer.js tests/roomMediaPipeline.test.js tests/lifecycleController.test.js tests/mediasoupClient.test.js tests/fmp4RelayPlayer.test.js",
+    "test:coverage": "node scripts/coverage-gate.js",
     "package": "npm run release:prep && node scripts/package-app.js",
     "package:artifact": "node scripts/package-app.js",
     "oss:check": "node scripts/opensource-preflight.js",

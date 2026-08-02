@@ -14,11 +14,12 @@ const {
     startRoomCleanup,
     stopRoomCleanup,
     verifyRoomPassphrase,
+    prepareRoom,
 } = require('../lib/rooms');
 const config = require('../config');
 
-test('room lifecycle tracks host and viewer membership', { concurrency: false }, () => {
-    const room = createRoom('host-a');
+test('room lifecycle tracks host and viewer membership', { concurrency: false }, async () => {
+    const room = await createRoom('host-a');
 
     try {
         assert.equal(findRoomByCode(room.code)?.code, room.code);
@@ -36,8 +37,8 @@ test('room lifecycle tracks host and viewer membership', { concurrency: false },
     }
 });
 
-test('reclaimHostRoom swaps host ownership using the host token', { concurrency: false }, () => {
-    const room = createRoom('host-old');
+test('reclaimHostRoom swaps host ownership using the host token', { concurrency: false }, async () => {
+    const room = await createRoom('host-old');
 
     try {
         const reclaimedRoom = reclaimHostRoom(room.code, 'host-new', room.hostToken);
@@ -50,8 +51,8 @@ test('reclaimHostRoom swaps host ownership using the host token', { concurrency:
 });
 
 test('optional room passphrases are salted, hashed, and asynchronously verified', { concurrency: false }, async () => {
-    const first = createRoom('host-protected-a', { passphrase: 'correct horse battery staple' });
-    const second = createRoom('host-protected-b', { passphrase: 'correct horse battery staple' });
+    const first = await createRoom('host-protected-a', { passphrase: 'correct horse battery staple' });
+    const second = await createRoom('host-protected-b', { passphrase: 'correct horse battery staple' });
     try {
         assert.ok(Buffer.isBuffer(first.passphraseSalt));
         assert.ok(Buffer.isBuffer(first.passphraseHash));
@@ -66,9 +67,35 @@ test('optional room passphrases are salted, hashed, and asynchronously verified'
     }
 });
 
+test('room passphrase hashing yields to the event loop and failures allocate nothing', { concurrency: false }, async () => {
+    let eventLoopAdvanced = false;
+    const tick = new Promise((resolve) => setImmediate(() => {
+        eventLoopAdvanced = true;
+        resolve();
+    }));
+    const roomPromise = createRoom('host-async-hash', { passphrase: 'responsive hashing' });
+    const room = await roomPromise;
+    try {
+        assert.equal(eventLoopAdvanced, true);
+        await tick;
+        assert.equal(await verifyRoomPassphrase(room, 'responsive hashing'), true);
+    } finally {
+        destroyRoom(room.code);
+    }
+
+    const before = findRoomByHost('host-hash-failure');
+    await assert.rejects(prepareRoom('host-hash-failure', {
+        passphrase: 'will fail',
+        scrypt: (_passphrase, _salt, _length, callback) => {
+            setImmediate(() => callback(new Error('injected scrypt failure')));
+        },
+    }), /injected scrypt failure/);
+    assert.equal(findRoomByHost('host-hash-failure'), before);
+});
+
 test('unprotected rooms remain joinable and reload recovery is opt-in', { concurrency: false }, async () => {
-    const defaultRoom = createRoom('host-default');
-    const recoverableRoom = createRoom('host-recoverable', { reloadRecoveryEnabled: true });
+    const defaultRoom = await createRoom('host-default');
+    const recoverableRoom = await createRoom('host-recoverable', { reloadRecoveryEnabled: true });
     try {
         assert.equal(await verifyRoomPassphrase(defaultRoom, ''), true);
         assert.equal(defaultRoom.reloadRecoveryEnabled, false);
@@ -79,8 +106,8 @@ test('unprotected rooms remain joinable and reload recovery is opt-in', { concur
     }
 });
 
-test('AV1 OBS rooms keep room-scoped TURN config in memory and disable relay fallback', { concurrency: false }, () => {
-    const room = createRoom('host-av1', {
+test('AV1 OBS rooms keep room-scoped TURN config in memory and disable relay fallback', { concurrency: false }, async () => {
+    const room = await createRoom('host-av1', {
         ingestMode: 'obs',
         obsAv1Mode: true,
         turnConfig: {
@@ -108,7 +135,7 @@ test('AV1 OBS rooms keep room-scoped TURN config in memory and disable relay fal
     assert.equal(findRoomByCode(room.code), null);
 });
 
-test('room-scoped TURN ICE overrides global TURN config and is cleared with the room', { concurrency: false }, () => {
+test('room-scoped TURN ICE overrides global TURN config and is cleared with the room', { concurrency: false }, async () => {
     const previousTurnUrl = config.TURN_URL;
     const previousTurnSecret = config.TURN_SECRET;
     const previousTurnUsername = config.TURN_USERNAME;
@@ -119,7 +146,7 @@ test('room-scoped TURN ICE overrides global TURN config and is cleared with the 
     config.TURN_USERNAME = '';
     config.TURN_CREDENTIAL = '';
 
-    const room = createRoom('host-room-turn', {
+    const room = await createRoom('host-room-turn', {
         ingestMode: 'obs',
         obsAv1Mode: true,
         turnConfig: {
@@ -142,7 +169,7 @@ test('room-scoped TURN ICE overrides global TURN config and is cleared with the 
         config.TURN_CREDENTIAL = previousTurnCredential;
     }
 
-    const plainRoom = createRoom('host-no-turn');
+    const plainRoom = await createRoom('host-no-turn');
     try {
         assert.equal(plainRoom.turnConfig, null);
     } finally {
@@ -151,7 +178,7 @@ test('room-scoped TURN ICE overrides global TURN config and is cleared with the 
 });
 
 test('startRoomCleanup can delegate stale-room teardown to a callback', { concurrency: false }, async () => {
-    const room = createRoom('host-stale');
+    const room = await createRoom('host-stale');
     const previousInterval = config.ROOM_HEARTBEAT_INTERVAL_MS;
     const previousTimeout = config.ROOM_STALE_TIMEOUT_MS;
     const cleanedRooms = [];

@@ -46,6 +46,8 @@ const {
     isLoopbackIp,
     shouldTrustForwardedHeaders,
     getTrustedForwardedClientIp,
+    classifyClient,
+    timingSafeTokenEqual,
 } = require('./lib/network');
 const { createWhipRouter, setIo: setWhipIo, setMediaLifecycle: setWhipMediaLifecycle } = require('./lib/whipRoutes');
 const { createWhepRouter } = require('./lib/whepRoutes');
@@ -54,24 +56,36 @@ const { findAvailablePort } = require('./lib/portResolver');
 const { resolveExecutablePath } = require('./lib/executable');
 const { renderOpenMetrics } = require('./lib/openMetrics');
 const { decideWorkerDeathAction } = require('./lib/workerRecovery');
+const { ROOM_STATE_CODES, createRoomState } = require('./lib/roomState');
+const { ExpiringTracker } = require('./lib/expiringTracker');
 const { execFile, execFileSync } = require('child_process');
 
 setWhipMediaLifecycle({ startFallbackRelay, stopFallbackRelay, emitHostMetrics });
 
-// Process-level safety net. Without these, a single stray promise rejection or
-// uncaught exception terminates the whole process on modern Node, dropping every
-// room and viewer — and the mediasoup worker-death auto-restart below does NOT
-// cover main-process crashes. An unhandled rejection is logged but not treated as
-// fatal (much of the codebase guards with .catch(); one stray rejection should not
-// nuke unrelated rooms). An uncaught exception leaves indeterminate state, so we
-// clean up listeners/worker and exit non-zero for a supervisor to restart us.
-process.on('unhandledRejection', (reason) => {
-    console.error('[fatal-guard] Unhandled promise rejection:', reason?.stack || reason);
-});
-process.on('uncaughtException', (err) => {
-    console.error('[fatal-guard] Uncaught exception:', err?.stack || err?.message || err);
+let requestFatalShutdown = null;
+
+function handleUnexpectedProcessError(shutdownReason, error) {
+    console.error(`[fatal] shutdownReason=${shutdownReason}:`, error?.stack || error?.message || error);
+    if (requestFatalShutdown) {
+        requestFatalShutdown(shutdownReason, error).catch((shutdownError) => {
+            console.error('[fatal] Fatal shutdown cleanup failed:', shutdownError?.stack || shutdownError);
+            try { cleanupGlobalResources(); } catch { }
+            process.exit(1);
+        });
+        return;
+    }
     try { cleanupGlobalResources(); } catch { }
     process.exit(1);
+}
+
+// Process-level safety net. A genuinely unowned rejection or uncaught exception
+// leaves runtime state indeterminate, so both paths end rooms, clean up, and exit
+// non-zero for the documented external supervisor to restart the process.
+process.on('unhandledRejection', (reason) => {
+    handleUnexpectedProcessError('unhandled-rejection', reason);
+});
+process.on('uncaughtException', (err) => {
+    handleUnexpectedProcessError('uncaught-exception', err);
 });
 
 const app = express();
@@ -145,10 +159,19 @@ app.use(helmet({
             scriptSrc: ["'self'", (_req, res) => `'nonce-${res.locals.cspNonce}'`],
             styleSrc: ["'self'"],
             fontSrc: ["'self'"],
-            connectSrc: ["'self'", 'ws:', 'wss:'],
+            connectSrc: [
+                "'self'",
+                'ws://127.0.0.1:4455',
+                'ws://localhost:4455',
+                'ws://[::1]:4455',
+            ],
             imgSrc: ["'self'", 'data:', 'blob:'],
             mediaSrc: ["'self'", 'blob:'],
             workerSrc: ["'self'", 'blob:'],
+            // Operators who explicitly allow plaintext relay on a declared LAN
+            // must be able to load the SPA over HTTP on that LAN. All other
+            // deployments keep Helmet's HTTPS-upgrade directive.
+            upgradeInsecureRequests: config.ALLOW_INSECURE_TRUSTED_LAN_RELAY ? null : [],
         },
     },
     crossOriginEmbedderPolicy: false,
@@ -293,6 +316,66 @@ function getRequestClientIp(req) {
         getRemoteAddressFromReq(req),
         !!req?.socket?.encrypted
     );
+}
+
+function getRequestClientClassification(req) {
+    return classifyClient({
+        ip: getRequestClientIp(req),
+        trustedLanCidrs: config.TRUSTED_LAN_CIDRS,
+        viaKnownProxy: isKnownPublicShareRequest(req?.headers || {}, !!req?.socket?.encrypted),
+    });
+}
+
+function getSocketClientClassification(socket) {
+    return classifyClient({
+        ip: getSocketHandshakeIp(socket),
+        trustedLanCidrs: config.TRUSTED_LAN_CIDRS,
+        viaKnownProxy: isKnownPublicShareRequest(
+            socket?.handshake?.headers || {},
+            !!socket?.request?.socket?.encrypted
+        ),
+    });
+}
+
+function extractOperatorToken(req) {
+    return typeof req?.headers?.['x-nextra-operator-token'] === 'string'
+        ? req.headers['x-nextra-operator-token'].trim()
+        : '';
+}
+
+function isOperatorAuthorized(classification, providedToken = '') {
+    if (classification?.kind === 'loopback' || classification?.kind === 'trusted-lan') return true;
+    return timingSafeTokenEqual(providedToken, config.OPERATOR_TOKEN);
+}
+
+function isOperatorRequestAuthorized(req) {
+    return isOperatorAuthorized(getRequestClientClassification(req), extractOperatorToken(req));
+}
+
+function isOperatorSocketAuthorized(socket, providedToken = '') {
+    const handshakeToken = typeof socket?.handshake?.auth?.operatorToken === 'string'
+        ? socket.handshake.auth.operatorToken
+        : '';
+    return isOperatorAuthorized(getSocketClientClassification(socket), providedToken || handshakeToken);
+}
+
+function isSocketExternallySecure(socket) {
+    if (socket?.request?.socket?.encrypted) return true;
+    const headers = socket?.handshake?.headers || {};
+    const remoteAddress = socket?.request?.socket?.remoteAddress
+        || socket?.conn?.remoteAddress
+        || socket?.handshake?.address
+        || '';
+    if (!shouldTrustRequestForwardedHeaders(headers, remoteAddress, false)) return false;
+    return parseForwardedFirst(headers['x-forwarded-proto']).toLowerCase() === 'https';
+}
+
+function isRelayAuthorizedForSocket(socket) {
+    if (isSocketExternallySecure(socket)) return true;
+    const classification = getSocketClientClassification(socket);
+    if (classification.kind === 'loopback') return true;
+    return classification.kind === 'trusted-lan'
+        && config.ALLOW_INSECURE_TRUSTED_LAN_RELAY === true;
 }
 
 function shouldExposeLanUrl(req) {
@@ -624,7 +707,8 @@ function buildSocketConfigPayload(socket) {
         hasTurnServer: getHasTurnServer(),
         remoteMediaControlEnabled: config.ALLOW_REMOTE_MEDIA_CONTROL,
         publicAv1Supported: config.RTC_LISTEN_IP !== '127.0.0.1' && !!config.PUBLIC_IP,
-        cloudflareTurnAutofillAvailable: config.hasCloudflareTurnCredentialSource(),
+        cloudflareTurnAutofillAvailable: isOperatorSocketAuthorized(socket)
+            && config.hasCloudflareTurnCredentialSource(),
         mediaMaxChunkSize: config.MEDIA_MAX_CHUNK_SIZE,
         relayFlushIntervalMs: config.RELAY_FLUSH_INTERVAL_MS,
         relayVideoBitsPerSecond: config.RELAY_VIDEO_BITS_PER_SECOND,
@@ -664,19 +748,11 @@ function extractMetricsToken(req) {
     return '';
 }
 
-function timingSafeStringEqual(a, b) {
-    const left = Buffer.from(typeof a === 'string' ? a : '', 'utf-8');
-    const right = Buffer.from(typeof b === 'string' ? b : '', 'utf-8');
-    if (left.length === 0 || right.length === 0) return false;
-    if (left.length !== right.length) return false;
-    return crypto.timingSafeEqual(left, right);
-}
-
 function isMetricsTokenAuthorized(req) {
     const expected = config.METRICS_TOKEN;
     if (!expected) return false;
     const provided = extractMetricsToken(req);
-    return timingSafeStringEqual(provided, expected);
+    return timingSafeTokenEqual(provided, expected);
 }
 
 // Summarize the process's active libuv resources for the churn/leak suite.
@@ -717,7 +793,8 @@ app.get('/api/config', (req, res) => {
         shareBaseUrl: getShareBaseUrl(req),
         lanUrl: shouldExposeLanUrl(req) ? getLocalBaseUrl() : '',
         hasTurnServer: getHasTurnServer(),
-        cloudflareTurnAutofillAvailable: config.hasCloudflareTurnCredentialSource(),
+        cloudflareTurnAutofillAvailable: isOperatorRequestAuthorized(req)
+            && config.hasCloudflareTurnCredentialSource(),
         // NOTE: ICE servers (with ephemeral TURN credentials) are intentionally
         // NOT exposed here. This endpoint is unauthenticated, so shipping TURN
         // credentials would hand them to any caller. Clients receive room-scoped
@@ -740,11 +817,16 @@ app.get('/api/config', (req, res) => {
 
 let cachedCloudflareTurnCredentials = null;
 let cachedCloudflareTurnCredentialsExpiresAt = 0;
-const cloudflareTurnMintByIp = new Map();
+const TURN_MINT_WINDOW_MS = 10_000;
+const cloudflareTurnMintByIp = new ExpiringTracker(TURN_MINT_WINDOW_MS);
+let cloudflareTurnMintCleanupInterval = setInterval(() => {
+    cloudflareTurnMintByIp.prune();
+}, TURN_MINT_WINDOW_MS);
+cloudflareTurnMintCleanupInterval.unref?.();
 
 app.post('/api/cloudflare-turn-credentials', async (req, res) => {
-    if (!isLocalClientIp(getRequestClientIp(req))) {
-        res.status(403).json({ error: 'Cloudflare TURN autofill is only available to local or LAN hosts.' });
+    if (!isOperatorRequestAuthorized(req)) {
+        res.status(403).json({ error: 'Operator authorization is required for TURN credential minting.' });
         return;
     }
 
@@ -761,8 +843,7 @@ app.post('/api/cloudflare-turn-credentials', async (req, res) => {
 
     const clientIp = getRequestClientIp(req);
     const now = Date.now();
-    const previousMint = cloudflareTurnMintByIp.get(clientIp) || 0;
-    if (now - previousMint < 10_000) {
+    if (cloudflareTurnMintByIp.hasActive(clientIp)) {
         res.status(429).json({ error: 'TURN credentials were requested too recently.' });
         return;
     }
@@ -773,7 +854,7 @@ app.post('/api/cloudflare-turn-credentials', async (req, res) => {
         return;
     }
 
-    cloudflareTurnMintByIp.set(clientIp, now);
+    cloudflareTurnMintByIp.record(clientIp);
 
     try {
         const result = await loadCloudflareTurnCredentials();
@@ -795,20 +876,14 @@ app.post('/api/cloudflare-turn-credentials', async (req, res) => {
 });
 
 app.get('/api/metrics', async (req, res) => {
-    const clientIp = getRequestClientIp(req);
-    const isLocalClient = isLocalClientIp(clientIp);
-    if (!config.ALLOW_REMOTE_METRICS && !isLocalClient) {
-        res.status(403).json({ error: 'Metrics access denied for remote clients.' });
-        return;
-    }
-
-    if (!isLocalClient && config.METRICS_TOKEN && !isMetricsTokenAuthorized(req)) {
-        res.status(401).json({ error: 'Metrics token required for remote access.' });
+    const operatorAuthorized = isOperatorRequestAuthorized(req);
+    if (!operatorAuthorized) {
+        res.status(403).json({ error: 'Operator authorization is required for sensitive metrics.' });
         return;
     }
 
     const rooms = getAllRoomStats();
-    const includeSensitiveRoomFields = isLocalClient || isMetricsTokenAuthorized(req);
+    const includeSensitiveRoomFields = operatorAuthorized;
     const roomList = includeSensitiveRoomFields
         ? rooms
         : rooms.map(({ code: _code, hostSocketId: _hostSocketId, ...room }) => room);
@@ -935,7 +1010,9 @@ app.post('/api/test/shutdown', (req, res) => {
         return;
     }
     res.status(202).json({ status: 'shutting-down' });
-    void requestGracefulShutdown('SMOKE_TEST');
+    requestGracefulShutdown('SMOKE_TEST').catch((err) => {
+        handleUnexpectedProcessError('graceful-shutdown-failed', err);
+    });
 });
 
 // Test-only destructive transition used by the real subprocess recovery gate.
@@ -962,20 +1039,63 @@ app.get('/healthz', (_req, res) => {
     res.set('Cache-Control', 'no-store').json({ status: 'ok' });
 });
 
+app.post('/api/test/unhandled-rejection', (req, res) => {
+    if (process.env.NEXTRA_SMOKE_TEST !== '1' || !isLocalClientIp(getRequestClientIp(req))) {
+        res.status(404).end();
+        return;
+    }
+    res.status(202).json({ status: 'triggered' });
+    setImmediate(() => Promise.reject(new Error('injected unhandled rejection')));
+});
+
+function isSpaReady() {
+    try {
+        return fs.statSync(indexHtmlPath).isFile();
+    } catch {
+        return false;
+    }
+}
+
 app.get('/readyz', (_req, res) => {
-    const ready = serviceReady && !!worker && !!ioServer;
+    const components = {
+        http: {
+            required: true,
+            status: serviceReady ? 'ready' : 'not-ready',
+        },
+        socketIo: {
+            required: true,
+            status: ioServer ? 'ready' : 'not-ready',
+        },
+        mediaWorker: {
+            required: true,
+            status: worker && !worker.closed ? 'ready' : 'not-ready',
+        },
+        spa: {
+            required: !isDevMode,
+            status: isDevMode ? 'external' : (isSpaReady() ? 'ready' : 'missing'),
+        },
+        whip: {
+            required: config.WHIP_ENABLED,
+            status: whipHttpStatus,
+            ...(whipHttpError ? { error: whipHttpError } : {}),
+        },
+    };
+    const ready = Object.values(components)
+        .filter((component) => component.required)
+        .every((component) => component.status === 'ready');
     res.set('Cache-Control', 'no-store').status(ready ? 200 : 503).json({
         status: ready ? 'ready' : 'not-ready',
-        mediaWorker: !!worker,
-        socketServer: !!ioServer,
-        whip: whipHttpStatus,
+        components,
         fallbackRelay: {
             nvencProbe: getNvencProbeStatus(),
         },
     });
 });
 
-const distDir = path.join(__dirname, 'dist');
+const testDistDir = process.env.NODE_ENV === 'test' && process.env.NEXTRA_SMOKE_TEST === '1'
+    ? process.env.NEXTRA_TEST_DIST_DIR
+    : '';
+const distDir = testDistDir ? path.resolve(testDistDir) : path.join(__dirname, 'dist');
 const indexHtmlPath = path.join(distDir, 'index.html');
 const buildRequiredCssPath = path.join(__dirname, 'public', 'build-required.css');
 let indexHtmlTemplate = null;
@@ -994,7 +1114,9 @@ function getIndexHtml(nonce) {
             indexHtmlMtimeMs = mtimeMs;
         }
     } catch {
-        return indexHtmlTemplate ? indexHtmlTemplate.replace(/<script/g, `<script nonce="${nonce}"`) : null;
+        indexHtmlTemplate = null;
+        indexHtmlMtimeMs = 0;
+        return null;
     }
     return indexHtmlTemplate.replace(/<script/g, `<script nonce="${nonce}"`);
 }
@@ -1113,6 +1235,11 @@ function cleanupGlobalResources() {
     publicTunnel.close();
     stopRoomCleanup();
     stopJoinCleanup();
+    cloudflareTurnMintByIp.clear();
+    if (cloudflareTurnMintCleanupInterval) {
+        clearInterval(cloudflareTurnMintCleanupInterval);
+        cloudflareTurnMintCleanupInterval = null;
+    }
     if (connectionCleanupInterval) {
         clearInterval(connectionCleanupInterval);
         connectionCleanupInterval = null;
@@ -1252,9 +1379,27 @@ async function startWhipHttpServer(whipRouter) {
         && !isLoopbackIp(config.WHIP_BIND_HOST)) {
         console.warn('[Security] Plaintext WHIP is bound beyond loopback by explicit acknowledgement. Protect it with an encrypted VPN or TLS reverse proxy.');
     }
+    if (config.ALLOW_INSECURE_TRUSTED_LAN_RELAY) {
+        console.warn(`[Security] Socket.IO relay payloads are plaintext on HTTP for trusted LAN ${config.TRUSTED_LAN_CIDRS}. WebRTC DTLS does not protect relay bytes.`);
+    }
 
     let appServer = null;
     let isShuttingDown = false;
+    requestFatalShutdown = async (shutdownReason) => {
+        if (isShuttingDown) return;
+        isShuttingDown = true;
+        serviceReady = false;
+        if (ioServer) {
+            ioServer.emit('room-ended', createRoomState(
+                ROOM_STATE_CODES.SERVER_FATAL,
+                'The server stopped unexpectedly. This room ended; create or join a new room after it restarts.'
+            ));
+            await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+        cleanupGlobalResources();
+        console.error(`[fatal] exiting after ${shutdownReason}; an external supervisor must restart Nextra.`);
+        process.exit(1);
+    };
     if (config.LOCAL_HTTPS) {
         const { cert, key } = await getOrCreateCert();
         appServer = https.createServer({ cert, key }, app);
@@ -1299,9 +1444,9 @@ async function startWhipHttpServer(whipRouter) {
             });
     }
 
-    // If the mediasoup worker subprocess dies, the media engine is gone and every
-    // room is dead. Rather than leave clients stuck, restart the whole process so
-    // viewers and OBS reconnect on their own (browser-capture hosts re-share).
+    // If the mediasoup worker subprocess dies, the media engine and every
+    // in-memory room are gone. Tell connected clients that their room ended,
+    // then replace the process so new rooms can be created.
     setWorkerDeathHandler(() => {
         const recoveryAction = decideWorkerDeathAction({
             isShuttingDown,
@@ -1317,7 +1462,14 @@ async function startWhipHttpServer(whipRouter) {
             return;
         }
 
-        console.error('[recovery] Media engine (mediasoup worker) crashed. Restarting Nextra automatically; viewers and OBS reconnect on their own.');
+        console.error('[recovery] Media engine (mediasoup worker) crashed. Ending active rooms and restarting Nextra automatically.');
+
+        if (ioServer) {
+            ioServer.emit('room-ended', createRoomState(
+                ROOM_STATE_CODES.MEDIA_WORKER_FATAL,
+                'The media engine restarted. This room ended; create or join a new room.'
+            ));
+        }
 
         let finished = false;
         const finish = () => {
@@ -1325,26 +1477,41 @@ async function startWhipHttpServer(whipRouter) {
             finished = true;
             try {
                 const { spawn } = require('child_process');
-                spawn(process.execPath, process.argv.slice(1), {
+                const replacement = spawn(process.execPath, [
+                    ...process.execArgv,
+                    ...process.argv.slice(1),
+                ], {
                     detached: true,
-                    stdio: 'inherit',
+                    stdio: 'ignore',
                     cwd: process.cwd(),
                     env: process.env,
-                }).unref();
+                    windowsHide: true,
+                });
+                replacement.once('spawn', () => {
+                    replacement.unref();
+                    process.exit(0);
+                });
+                replacement.once('error', (err) => {
+                    console.error('[recovery] Failed to relaunch automatically:', err.message);
+                    process.exit(1);
+                });
             } catch (err) {
                 console.error('[recovery] Failed to relaunch automatically:', err.message);
+                process.exit(1);
             }
-            process.exit(0);
         };
 
-        // Release listeners (frees the port) before the replacement process binds.
-        cleanupGlobalResources();
-        try {
-            appServer.close(() => finish());
-            setTimeout(finish, 2000).unref();
-        } catch {
-            finish();
-        }
+        // Give Socket.IO one event-loop turn to flush the terminal state before
+        // releasing listeners and allowing the replacement process to bind.
+        setTimeout(() => {
+            cleanupGlobalResources();
+            try {
+                appServer.close(() => finish());
+                setTimeout(finish, 2000).unref();
+            } catch {
+                finish();
+            }
+        }, 150).unref();
     });
 
     // Mount WHIP routes on the main app and a separate HTTP server.
@@ -1353,7 +1520,13 @@ async function startWhipHttpServer(whipRouter) {
     let whipRouter = null;
     if (config.WHIP_ENABLED) {
         whipRouter = createWhipRouter(result.router, { isAllowedOrigin: isAllowedSocketOrigin });
-        app.use('/whip', whipRouter);
+        if (config.PUBLIC_WHIP_ENABLED) {
+            app.use('/whip', createWhipRouter(result.router, {
+                isAllowedOrigin: isAllowedSocketOrigin,
+                publicEndpoint: true,
+                getClientIp: getRequestClientIp,
+            }));
+        }
     }
 
     // Mount WHEP routes on the main browser-facing server.
@@ -1396,7 +1569,13 @@ async function startWhipHttpServer(whipRouter) {
     setWhipIo(io);
 
     startRoomCleanup({
-        onStaleRoom: (room) => destroyRoomWithReason(io, room.code, 'Room timed out', false),
+        onStaleRoom: (room) => destroyRoomWithReason(
+            io,
+            room.code,
+            'Room timed out',
+            false,
+            ROOM_STATE_CODES.ROOM_TIMED_OUT
+        ),
     });
 
     io.engine.on('connection', (rawSocket) => {
@@ -1432,11 +1611,17 @@ async function startWhipHttpServer(whipRouter) {
         }
     }, 300000);
 
-    registerSocketHandlers(io, result.router, { getClientIp: getSocketHandshakeIp });
+    registerSocketHandlers(io, result.router, {
+        getClientIp: getSocketHandshakeIp,
+        authorizeCreateRoom: (socket, data) => isOperatorSocketAuthorized(socket, data?.operatorToken),
+        authorizeRelay: (socket) => isRelayAuthorizedForSocket(socket),
+    });
     startJoinCleanup();
 
     appServer.on('error', (err) => {
-        void handleAppServerError(err);
+        handleAppServerError(err).catch((handlerError) => {
+            handleUnexpectedProcessError('server-error-handler-failed', handlerError);
+        });
     });
 
     appServer.listen(config.PORT, config.BIND_HOST, () => {
@@ -1462,9 +1647,13 @@ async function startWhipHttpServer(whipRouter) {
         console.log(`   UDP:     ${config.RTC_MIN_PORT}-${config.RTC_MAX_PORT}`);
 
         // Start HTTP server for WHIP (OBS rejects self-signed HTTPS certs).
-        void startWhipHttpServer(whipRouter);
+        startWhipHttpServer(whipRouter).catch((err) => {
+            handleUnexpectedProcessError('whip-listener-start-failed', err);
+        });
 
-        void maybeStartPublicTunnel();
+        maybeStartPublicTunnel().catch((err) => {
+            console.error(`[Tunnel] Startup failed: ${err?.message || err}`);
+        });
         openBrowser(getHostPageUrl());
     });
 
@@ -1474,7 +1663,10 @@ async function startWhipHttpServer(whipRouter) {
         serviceReady = false;
         console.log(`\n${signal} received. Shutting down gracefully...`);
         if (ioServer) {
-            ioServer.emit('server-restarting', { reconnectAfterMs: 1500 });
+            ioServer.emit('room-ended', createRoomState(
+                ROOM_STATE_CODES.SERVER_SHUTDOWN,
+                'The server stopped. This room ended; create or join a new room.'
+            ));
             await new Promise((resolve) => setTimeout(resolve, 150));
         }
         cleanupGlobalResources();

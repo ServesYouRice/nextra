@@ -10,14 +10,20 @@ const {
     findRoomBySocket,
     joinRoom,
 } = require('../lib/rooms');
-const { __testing, registerSocketHandlers, stopJoinCleanup } = require('../lib/socket');
+const {
+    __testing,
+    destroyRoomWithReason,
+    emitAllHostsMetrics,
+    registerSocketHandlers,
+    stopJoinCleanup,
+} = require('../lib/socket');
 
 function request(client, event, data = {}) {
     return new Promise((resolve) => client.emit(event, data, resolve));
 }
 
-test('viewer transport failure is recoverable and keeps room membership', { concurrency: false }, () => {
-    const room = createRoom('host-recovery');
+test('viewer transport failure is recoverable and keeps room membership', { concurrency: false }, async () => {
+    const room = await createRoom('host-recovery');
     const viewerSocketId = 'viewer-recovery';
     joinRoom(room.code, viewerSocketId);
 
@@ -68,7 +74,9 @@ test('viewer transport failure is recoverable and keeps room membership', { conc
         assert.deepEqual(emittedToSocket, [{
             event: 'transport-failed',
             payload: {
+                code: 'viewer-transport-failed',
                 recoverable: true,
+                terminal: false,
                 reason: 'Stream connection interrupted. Reconnecting...',
             },
         }]);
@@ -130,6 +138,32 @@ test('missing Engine.IO writeBuffer logs one compatibility warning', { concurren
     assert.match(warnings[0], /writeBuffer is unavailable/);
 });
 
+test('metric broadcasts skip absent hosts and global cleanup clears ignored transports', { concurrency: false }, async () => {
+    const room = await createRoom('metrics-host');
+    let emissions = 0;
+    room.hostTransport = {
+        id: 'ignored-host-transport',
+        close() {},
+    };
+    const sockets = new Map();
+    const io = {
+        sockets: { sockets },
+        to: () => ({ emit: () => { emissions += 1; } }),
+    };
+
+    assert.equal(emitAllHostsMetrics(io), 0);
+    assert.equal(emissions, 0);
+    sockets.set(room.hostSocketId, {});
+    assert.equal(emitAllHostsMetrics(io), 1);
+    assert.equal(emissions, 1);
+
+    const ignoredBeforeDestroy = __testing.getIgnoredTransportCount();
+    destroyRoomWithReason(io, room.code, null);
+    assert.equal(__testing.getIgnoredTransportCount(), ignoredBeforeDestroy + 1);
+    stopJoinCleanup();
+    assert.equal(__testing.getIgnoredTransportCount(), 0);
+});
+
 test('opted-in reload reclaim resets stale browser media before capture resumes', { concurrency: false }, async () => {
     const httpServer = http.createServer();
     const ioServer = new Server(httpServer);
@@ -143,6 +177,7 @@ test('opted-in reload reclaim resets stale browser media before capture resumes'
     let transportClosed = false;
     let room = null;
     let secondClient = null;
+    let viewerClient = null;
     try {
         const created = await request(firstClient, 'create-room', {
             ingestMode: 'browser',
@@ -153,10 +188,22 @@ test('opted-in reload reclaim resets stale browser media before capture resumes'
         room.producer = { close: () => { producerClosed = true; } };
         room.hostTransport = { close: () => { transportClosed = true; } };
 
+        viewerClient = createClient(`http://127.0.0.1:${port}`, { transports: ['websocket'] });
+        await new Promise((resolve) => viewerClient.once('connect', resolve));
+        assert.equal((await request(viewerClient, 'join-room', { code: created.code })).success, true);
+        const disconnectedState = new Promise((resolve) => viewerClient.once('host-disconnected', resolve));
+
         firstClient.close();
+        assert.deepEqual(await disconnectedState, {
+            code: 'host-disconnected',
+            reason: 'Host connection lost. Attempting reconnect...',
+            recoverable: true,
+            terminal: false,
+        });
         await new Promise((resolve) => setTimeout(resolve, 20));
         secondClient = createClient(`http://127.0.0.1:${port}`, { transports: ['websocket'] });
         await new Promise((resolve) => secondClient.once('connect', resolve));
+        const reconnectedState = new Promise((resolve) => viewerClient.once('host-reconnected', resolve));
         const reclaimed = await request(secondClient, 'reclaim-host', {
             code: created.code,
             hostToken: created.hostToken,
@@ -164,13 +211,45 @@ test('opted-in reload reclaim resets stale browser media before capture resumes'
         });
 
         assert.equal(reclaimed.success, true);
+        assert.equal(reclaimed.code, 'host-reconnected');
+        assert.equal(reclaimed.recoverable, true);
+        assert.equal(reclaimed.terminal, false);
+        assert.deepEqual(await reconnectedState, {
+            code: 'host-reconnected',
+            reason: 'Host reconnected.',
+            recoverable: true,
+            terminal: false,
+        });
         assert.equal(producerClosed, true);
         assert.equal(transportClosed, true);
         assert.equal(room.producer, null);
         assert.equal(room.hostTransport, null);
+
+        const invalidToken = await request(viewerClient, 'reclaim-host', {
+            code: created.code,
+            hostToken: 'not-the-valid-host-token',
+            reloadRecovery: true,
+        });
+        assert.equal(invalidToken.success, false);
+        assert.equal(invalidToken.code, 'reclaim-rejected');
+        assert.equal(invalidToken.recoverable, false);
+        assert.equal(invalidToken.terminal, true);
+
+        destroyRoom(room.code);
+        room = null;
+        const missingRoom = await request(secondClient, 'reclaim-host', {
+            code: created.code,
+            hostToken: created.hostToken,
+            reloadRecovery: true,
+        });
+        assert.equal(missingRoom.success, false);
+        assert.equal(missingRoom.code, 'reclaim-rejected');
+        assert.equal(missingRoom.recoverable, false);
+        assert.equal(missingRoom.terminal, true);
     } finally {
         firstClient.close();
         secondClient?.close();
+        viewerClient?.close();
         if (room) destroyRoom(room.code);
         stopJoinCleanup();
         await ioServer.close();
