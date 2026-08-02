@@ -4,6 +4,7 @@ import BrandLogo from './components/BrandLogo';
 import ErrorBoundary from './components/ErrorBoundary';
 import { NotificationProvider } from './context/NotificationContext';
 import { routeName, routeTitle } from './lib/routeTitle.mjs';
+import { canLeaveRoute } from './lib/navigationGuard.mjs';
 import './index.css';
 
 const HostView = lazy(() => import('./HostView'));
@@ -33,10 +34,29 @@ function Router() {
     // focus from where the browser put it.
     const [navigationCount, setNavigationCount] = useState(0);
     const mainRef = useRef(null);
+    const routeRef = useRef(route);
+
+    useEffect(() => {
+        routeRef.current = route;
+    }, [route]);
 
     useEffect(() => {
         const onHashChange = () => {
-            setRoute(window.location.hash);
+            const nextRoute = window.location.hash;
+            const previousRoute = routeRef.current;
+            if (nextRoute === previousRoute) return;
+            if (!canLeaveRoute(nextRoute)) {
+                // The guard is prompting instead. Put the address bar back
+                // without firing another hashchange; replaceState also keeps
+                // repeatedly blocked clicks from stacking history entries.
+                window.history.replaceState(
+                    null,
+                    '',
+                    previousRoute || `${window.location.pathname}${window.location.search}`,
+                );
+                return;
+            }
+            setRoute(nextRoute);
             setNavigationCount((count) => count + 1);
         };
         window.addEventListener('hashchange', onHashChange);
@@ -49,7 +69,10 @@ function Router() {
 
     useEffect(() => {
         if (navigationCount === 0) return;
-        mainRef.current?.focus();
+        // Focusing <main> on its own scrolls it flush to the viewport top, where
+        // the sticky nav then covers the first heading. Scroll the page instead.
+        mainRef.current?.focus({ preventScroll: true });
+        window.scrollTo(0, 0);
     }, [navigationCount, route]);
 
     let view;

@@ -326,9 +326,36 @@ test('capture-track end and host route unmount reclaim the room', async ({ brows
 
     await startHost(page);
     await page.goto('/#privacy');
+    // Leaving mid-stream now asks first; the room is reclaimed on confirm.
+    await expect(page.getByRole('heading', { name: 'Leave the host page?' })).toBeVisible();
+    await page.getByRole('button', { name: 'Leave and Stop' }).click();
     await expect(page.getByRole('heading', { name: /Privacy/i })).toBeVisible();
     await expect.poll(async () => (await request.get('/api/metrics')).json())
         .toMatchObject({ rooms: { active: 0 } });
+    await context.close();
+});
+
+test('leaving the host route while sharing is warned and can be cancelled', async ({ browser, request }) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const code = await startHost(page);
+
+    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Status' }).click();
+    await expect(page.getByRole('heading', { name: 'Leave the host page?' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Stay Here' }).click();
+    // Declining keeps the stream up, the route on #host, and the address bar in
+    // step with it so a following click is not a same-hash no-op.
+    await expect(page.getByText(/Streaming \(/)).toBeVisible();
+    expect(await page.evaluate(() => window.location.hash)).toBe('#host');
+    expect(await readRoomCode(page)).toBe(code);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 1 } });
+
+    // Stopping first releases the guard, so the next navigation goes straight through.
+    await page.getByRole('button', { name: 'Stop Sharing' }).click();
+    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Status' }).click();
+    await expect(page.getByRole('heading', { name: 'Server Status' })).toBeVisible();
     await context.close();
 });
 

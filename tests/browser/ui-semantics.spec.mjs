@@ -1,9 +1,41 @@
 import { test, expect } from '@playwright/test';
 
 // Widths the README support table claims: small phone, common phone, tablet
-// breakpoint, small laptop, and wide desktop.
-const REFLOW_WIDTHS = [320, 375, 640, 900, 1440];
-const REFLOW_ROUTES = ['/', '/#watch', '/#how-to'];
+// breakpoint, small laptop, laptop/desktop tiers, and wide desktop.
+const REFLOW_WIDTHS = [320, 375, 640, 900, 1024, 1280, 1440, 1600, 2560];
+const REFLOW_ROUTES = ['/', '/#watch', '/#how-to', '/#host', '/#status', '/#privacy', '/#copyright'];
+
+// The host page is the densest layout: a video stage beside settings cards that
+// grow again when OBS ingest is selected. These are the widths where the side
+// panel used to squeeze the stage down to a thumbnail.
+const HOST_OBS_WIDTHS = [1024, 1280, 1440, 1600];
+const MIN_STAGE_WIDTH = 560;
+
+// Going to '/#host' while already on '/#host' is a same-document navigation, so
+// React never remounts and the previous ingest mode leaks into the next
+// assertion. Routing via another view unmounts HostView and gives a clean one,
+// without the socket churn a full document reload costs.
+async function remountHost(page) {
+    await page.goto('/#watch');
+    await expect(page.locator('.join-form')).toBeVisible();
+    await page.goto('/#host');
+    await expect(page.locator('.host-side-panel')).toBeVisible();
+}
+
+// Selecting OBS ingest animates the panels over --transition-panel (420ms).
+// Measuring before that settles reads a half-open layout, which is wider than
+// the final one and hides exactly the regression these tests exist to catch.
+async function settledBox(page, selector) {
+    const locator = page.locator(selector);
+    let previous = await locator.boundingBox();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+        await page.waitForTimeout(100);
+        const current = await locator.boundingBox();
+        if (previous && current && Math.abs(current.width - previous.width) < 0.5) return current;
+        previous = current;
+    }
+    return previous;
+}
 
 async function horizontalOverflow(page) {
     return page.evaluate(() => ({
@@ -125,5 +157,61 @@ for (const width of REFLOW_WIDTHS) {
             expect(metrics.bodyScrollWidth, `${route} at ${width}px`)
                 .toBeLessThanOrEqual(metrics.innerWidth + 1);
         }
+    });
+}
+
+// A laptop-height viewport has to show the host controls without the page
+// scrolling: the settings cards are the tallest thing on the page and used to
+// keep their full height no matter how short the viewport was.
+// Desktop-only: the mobile project emulates a phone, where these viewport sizes
+// describe nothing real.
+for (const { width, height } of [{ width: 1366, height: 768 }, { width: 1280, height: 720 }]) {
+    test(`the host page fits a ${width}x${height} viewport without page scroll`, async ({ page }, testInfo) => {
+        test.skip(testInfo.project.name !== 'chromium', 'desktop layout tiers');
+        await page.setViewportSize({ width, height });
+
+        for (const obsMode of [false, true]) {
+            await remountHost(page);
+            if (obsMode) {
+                await page.locator('#obsMode').check();
+                await expect(page.locator('.settings-wrapper')).toHaveClass(/settings-expanded/);
+            }
+
+            // Warning banners are content, not layout: this server runs with
+            // WHIP disabled, so selecting OBS raises a preflight notice that a
+            // WHIP-capable deployment would never show. Measure the layout by
+            // allowing for whatever alerts are actually on screen.
+            const metrics = await page.evaluate(() => {
+                const alerts = [...document.querySelectorAll('.alert')]
+                    .reduce((total, el) => total + el.getBoundingClientRect().height, 0);
+                return {
+                    scrollHeight: document.documentElement.scrollHeight,
+                    innerHeight: window.innerHeight,
+                    alerts: Math.ceil(alerts),
+                };
+            });
+            expect(metrics.scrollHeight, `${width}x${height} with OBS ${obsMode ? 'on' : 'off'}`)
+                .toBeLessThanOrEqual(metrics.innerHeight + metrics.alerts + 1);
+        }
+    });
+}
+
+for (const width of HOST_OBS_WIDTHS) {
+    test(`the host video stage stays usable at ${width}px with OBS ingest selected`, async ({ page }, testInfo) => {
+        test.skip(testInfo.project.name !== 'chromium', 'desktop layout tiers');
+        await page.setViewportSize({ width, height: 900 });
+        await remountHost(page);
+
+        await page.locator('#obsMode').check();
+        await expect(page.locator('.settings-wrapper')).toHaveClass(/settings-expanded/);
+        await expect(page.locator('.obs-config-panel')).toBeVisible();
+
+        const stage = await settledBox(page, '.video-container');
+        expect(stage.width, `video stage at ${width}px with OBS on`)
+            .toBeGreaterThanOrEqual(MIN_STAGE_WIDTH);
+
+        const metrics = await horizontalOverflow(page);
+        expect(metrics.documentScrollWidth, `host OBS layout at ${width}px`)
+            .toBeLessThanOrEqual(metrics.innerWidth + 1);
     });
 }
