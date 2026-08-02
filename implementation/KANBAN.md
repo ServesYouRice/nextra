@@ -8,8 +8,8 @@ Earlier audits and superseded plans remain historical evidence under
 
 ## Current status
 
-All repository-local approved cards are complete. T17 is the only remaining card;
-it is blocked on an external network/TURN setup, not on a pending user decision.
+T18 is done. T17 is the only remaining card; it is blocked on an external
+network/TURN setup, not on a pending user decision.
 
 ### In progress
 
@@ -22,6 +22,60 @@ _None._
 ### Backlog
 
 _None._
+
+### Done
+
+#### T18 — Responsive layout pass across all views
+
+User-reported: the How to Use and Host tabs did not scale across resolutions,
+and the Host settings cards kept their height until the page grew a scrollbar.
+
+Measured before the change (Playwright, `src/index.css` as shipped):
+
+- `/#host` with OBS ingest selected: video stage 160 px wide at 1024 px, 416 px
+  at 1280 px. The side panel is `flex: 0 0 auto` with a hard width, so the stage
+  absorbed every pixel the two settings cards took.
+- `/#host` page height a constant 965 px: +197 px over a 1366x768 viewport and
+  +245 px over 1280x720, in both ingest modes. No `max-height` media query
+  existed anywhere in the stylesheet.
+- `/#how-to`: prose fixed at 680 px (27% of a 2560 px screen) while the browser
+  support table overflowed into a sideways scroll at *every* width, 1024 through
+  2560.
+
+After:
+
+- Stage ≥ 560 px at 1024/1280/1440/1600 px with OBS on (was 160/416/576/672).
+- `/#host` fits 1366x768 and 1280x720 with no page scroll, both ingest modes.
+- Support table no longer overflows at any width (630 px → 899-1118 px).
+- Article prose 640 px, legal 704 px — within 8 px of the previous design.
+
+Changes, all in `src/index.css` except the last two:
+
+- Shared layout tokens; vertical rhythm clamps on `vh` so it compresses on short
+  viewports, `vh` rather than `dvh` to avoid mobile URL-bar reflow.
+- Host tiers at 1280 px (cards stop sharing a row) and 900 px (column stacks).
+  1280 is where two side-by-side cards still leave the stage above 560 px;
+  keeping them side by side also keeps the page short, since stacked cards sum
+  their heights instead of the taller one winning.
+- `--stage-chrome` bounds the 16:9 stage by leftover viewport height.
+- Articles became a breakout grid: prose at `--article-measure`, the support
+  table spanning the full width. `h2`/`.article-cta` top margins were reduced to
+  compensate for grid items not collapsing margins.
+- Fixed a specificity bug: the `@media (max-width: 900px)` `.host-side-panel`
+  override lost to `.host-side-panel:has(.settings-expanded)` and never applied.
+- `tests/browser/ui-semantics.spec.mjs`: reflow matrix widened to 9 widths x 7
+  routes, plus vertical-fit and stage-width tests for `/#host`. The two new test
+  groups were confirmed failing on the pre-change tree before any CSS was edited.
+- `README.md`: tested-width list and the two host breakpoints.
+
+Checks: `npm run lint`, `npm run typecheck`, `npm test` (194 pass),
+`npx playwright test` (46 pass, both projects), `npm run build`.
+
+Known gap: at 1280x720 with OBS selected the page still scrolls ~38 px, because
+a WHIP preflight warning banner is showing. That banner only appears when the
+server has WHIP disabled, as the test server does; the layout itself fits. The
+vertical-fit test allows for visible `.alert` height rather than encoding that
+environment quirk.
 
 ### Blocked
 

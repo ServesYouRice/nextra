@@ -15,6 +15,7 @@ import { formatBytes } from './lib/formatBytes.mjs';
 import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 import { evaluateHostPreflight } from './lib/hostPreflight.mjs';
 import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
+import { setNavigationGuard } from './lib/navigationGuard.mjs';
 
 const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 5_000 };
 const OBS_MAX_BITRATE_KBPS = 45_000;
@@ -427,6 +428,7 @@ export default function HostView() {
     const [status, setStatus] = useState('idle');
     const [terminalRoomEnded, setTerminalRoomEnded] = useState(false);
     const [showStopConfirm, setShowStopConfirm] = useState(false);
+    const [pendingNavRoute, setPendingNavRoute] = useState(null);
     const [whepEnabled, setWhepEnabled] = useState(false);
     const [qualityProfile, setQualityProfile] = useState(() => {
         const stored = loadStoredCapturePrefs();
@@ -482,6 +484,8 @@ export default function HostView() {
     const ingestModeRef = useRef('browser');
     const resumeRoomRef = useRef(null);
     const pageHidingRef = useRef(false);
+    const isSharingRef = useRef(false);
+    const releaseNavGuardRef = useRef(null);
     const hostUnmountTimerRef = useRef(null);
     const prevRelayViewerCountRef = useRef(0);
     const relayGenerationRef = useRef(0);
@@ -569,6 +573,7 @@ export default function HostView() {
         roomCodeRef.current = roomCode;
         reloadRecoveryEnabledRef.current = reloadRecoveryEnabled;
         ingestModeRef.current = ingestMode;
+        isSharingRef.current = isSharing;
         if (isSharing && reloadRecoveryEnabled && roomCode && hostToken) {
             persistHostRecoverySession({ code: roomCode, hostToken, ingestMode });
         }
@@ -597,6 +602,7 @@ export default function HostView() {
 
     // WHEP enablement is only exposed via the HTTP config endpoint (the
     // socket server-config payload does not include it), so probe it once.
+    // Everything else here also arrives over 'server-config'.
     useEffect(() => {
         const controller = new AbortController();
         fetch('/api/config', {
@@ -608,11 +614,6 @@ export default function HostView() {
             .then((data) => {
                 if (data) {
                     if (typeof data.whepEnabled === 'boolean') setWhepEnabled(data.whepEnabled);
-                    if (typeof data.remoteMediaControlEnabled === 'boolean') {
-                        setRemoteMediaControlEnabled(data.remoteMediaControlEnabled);
-                        if (!data.remoteMediaControlEnabled) setAllowMediaControl(false);
-                    }
-                    if (typeof data.publicAv1Supported === 'boolean') setPublicAv1Supported(data.publicAv1Supported);
                 }
             })
             .catch(() => { });
@@ -839,6 +840,28 @@ export default function HostView() {
         setError(reason || 'This room ended. Create a new room to share again.');
     }, [cleanup]);
 
+    // Leaving #host unmounts this view, which stops the stream and retires the
+    // room code, so hold the route change until the host confirms.
+    useEffect(() => {
+        if (!isSharing) return undefined;
+        const release = setNavigationGuard((targetRoute) => {
+            // Re-check at call time: a stop that lands in the same task as the
+            // navigation has not flushed through React state yet, and a room
+            // that is already torn down has nothing left to warn about.
+            if (!isSharingRef.current) return true;
+            setPendingNavRoute(targetRoute);
+            return false;
+        });
+        releaseNavGuardRef.current = release;
+        return () => {
+            releaseNavGuardRef.current = null;
+            release();
+            // Capture can end outside this view (the browser's own stop bar),
+            // which drops the guard while the prompt is still open.
+            setPendingNavRoute(null);
+        };
+    }, [isSharing]);
+
     useEffect(() => {
         if (hostUnmountTimerRef.current) {
             clearTimeout(hostUnmountTimerRef.current);
@@ -857,12 +880,29 @@ export default function HostView() {
             socket.emit('host-stopped');
             cleanup();
         };
+        // Prompt only; tearing the room down here would strand the host on a
+        // cancelled prompt with no stream. pagehide does the teardown once the
+        // page is actually going away. Reload recovery makes the room
+        // reclaimable, so an opted-in host is not warned.
+        const confirmUnload = (event) => {
+            if (isSharingRef.current && !reloadRecoveryEnabledRef.current) {
+                // Leave pageHidingRef alone: a cancelled prompt would strand it
+                // set and suppress the unmount teardown on a later in-app exit.
+                event.preventDefault();
+                event.returnValue = '';
+                return;
+            }
+            // Unwarned paths keep the original early flag. Chromium ends
+            // display-capture tracks while unloading, and the track 'ended'
+            // handler must not destroy a room reload recovery will reclaim.
+            pageHidingRef.current = true;
+        };
         const onPageShow = () => { pageHidingRef.current = false; };
-        window.addEventListener('beforeunload', closeHostSession);
+        window.addEventListener('beforeunload', confirmUnload);
         window.addEventListener('pagehide', closeHostSession);
         window.addEventListener('pageshow', onPageShow);
         return () => {
-            window.removeEventListener('beforeunload', closeHostSession);
+            window.removeEventListener('beforeunload', confirmUnload);
             window.removeEventListener('pagehide', closeHostSession);
             window.removeEventListener('pageshow', onPageShow);
             // Defer non-pagehide teardown by one task so React StrictMode's
@@ -1186,6 +1226,7 @@ export default function HostView() {
                     // would immediately destroy the room before the new page can
                     // reclaim it.
                     if (pageHidingRef.current && reloadRecoveryEnabledRef.current) return;
+                    isSharingRef.current = false;
                     socket.emit('host-stopped');
                     cleanup();
                 });
@@ -1389,6 +1430,13 @@ export default function HostView() {
         if (typeof data.hostUploadMbps === 'number') {
             setHostUploadMbps(data.hostUploadMbps);
         }
+        if (typeof data.remoteMediaControlEnabled === 'boolean') {
+            setRemoteMediaControlEnabled(data.remoteMediaControlEnabled);
+            if (!data.remoteMediaControlEnabled) setAllowMediaControl(false);
+        }
+        if (typeof data.publicAv1Supported === 'boolean') {
+            setPublicAv1Supported(data.publicAv1Supported);
+        }
         if (typeof data.lanUrl === 'string' && data.lanUrl) {
             setLanBaseUrl(data.lanUrl.replace(/\/$/, ''));
         }
@@ -1520,6 +1568,10 @@ export default function HostView() {
         if (ingestMode === 'obs') {
             stopObsStream({ password: obsPassword }).catch(() => {});
         }
+        // Drop the nav guard now rather than waiting for the isSharing effect, so
+        // a navigation issued in this same task is not warned about a room that
+        // is already gone.
+        isSharingRef.current = false;
         socket.emit('host-stopped');
         cleanup();
     }, [socket, cleanup, ingestMode, obsPassword, viewerCount, whepViewerCount]);
@@ -1865,12 +1917,6 @@ export default function HostView() {
                             </ul>
                         </div>
                     )}
-                    <HostDiagnostics
-                        metrics={roomMetrics}
-                        onDownload={handleDownloadDiagnostics}
-                        downloading={diagnosticDownloading}
-                        downloadStatus={diagnosticDownloadStatus}
-                    />
                     {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
 
                     {roomCode && (
@@ -1985,6 +2031,15 @@ export default function HostView() {
                     )}
                         </div>
                     )}
+                    {/* Stays last in the side panel: the settings card unmounts and
+                        the room card mounts when sharing starts, so anything above
+                        the room card visibly jumps to the top on that swap. */}
+                    <HostDiagnostics
+                        metrics={roomMetrics}
+                        onDownload={handleDownloadDiagnostics}
+                        downloading={diagnosticDownloading}
+                        downloadStatus={diagnosticDownloadStatus}
+                    />
                 </div>
             </div>
             {showByokTurnModal && (
@@ -2148,6 +2203,43 @@ export default function HostView() {
                             }}
                         >
                             Stop Sharing
+                        </button>
+                    </div>
+                </Modal>
+            )}
+            {pendingNavRoute !== null && (
+                <Modal titleId="leaveWhileSharingTitle" onClose={() => setPendingNavRoute(null)}>
+                    <div className="settings-modal-head">
+                        <div>
+                            <h3 id="leaveWhileSharingTitle">Leave the host page?</h3>
+                            <p>
+                                {totalViewers} viewer{totalViewers !== 1 ? 's are' : ' is'} currently watching.
+                                Leaving ends the stream for everyone and retires this room code —
+                                sharing again creates a new code you&apos;ll need to send out.
+                            </p>
+                        </div>
+                    </div>
+                    <div className="settings-modal-actions">
+                        <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={() => setPendingNavRoute(null)}
+                        >
+                            Stay Here
+                        </button>
+                        <button
+                            type="button"
+                            className="btn btn-danger"
+                            onClick={() => {
+                                const target = pendingNavRoute;
+                                setPendingNavRoute(null);
+                                // Release before navigating: isSharing has not
+                                // changed yet, so the guard would block the retry.
+                                releaseNavGuardRef.current?.();
+                                window.location.hash = target;
+                            }}
+                        >
+                            Leave and Stop
                         </button>
                     </div>
                 </Modal>

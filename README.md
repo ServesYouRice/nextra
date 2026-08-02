@@ -83,8 +83,13 @@ sniffing the browser name, so an unsupported browser gets an explicit message.
 | Viewer, WebRTC | Tested | Tested | Not tested |
 | Viewer, relay (H.264/WebM) | Tested | Not tested | Not tested |
 
-Layout and keyboard flows are checked at 320, 375, 640, 900, and 1440 px
-viewport widths. No WCAG conformance level is claimed.
+Layout and keyboard flows are checked at 320, 375, 640, 900, 1024, 1280, 1440,
+1600, and 2560 px viewport widths, and the host page is checked for vertical fit
+at 1366x768 and 1280x720. No WCAG conformance level is claimed.
+
+The host page changes shape at two widths: below 1280 px the OBS settings card
+moves under the room settings card instead of beside it, and below 900 px the
+settings column moves under the video stage.
 
 ---
 
