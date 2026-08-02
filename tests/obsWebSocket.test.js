@@ -257,6 +257,7 @@ test('configureObsStream restores the previous service after a later validation 
 
         assert.equal(result.success, false);
         assert.match(result.message, /No AV1 OBS encoders/);
+        assert.match(result.message, /settings were restored.*use H\.264/i);
         assert.deepEqual(serviceWrites, [
             {
                 streamServiceType: 'whip_custom',
@@ -273,6 +274,134 @@ test('configureObsStream restores the previous service after a later validation 
                 },
             },
         ]);
+    } finally {
+        globalThis.WebSocket = previousWebSocket;
+    }
+});
+
+test('configureObsStream accepts the first AV1 encoder OBS can set and verify', async () => {
+    const profile = new Map([
+        ['Output/Mode', 'Simple'],
+        ['AdvOut/Encoder', 'obs_x264'],
+    ]);
+    const encoderWrites = [];
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        const { requestType, requestData = {} } = request;
+        const key = `${requestData.parameterCategory}/${requestData.parameterName}`;
+        if (requestType === 'GetStreamServiceSettings') {
+            queueMicrotask(() => ws.respond(request, {
+                streamServiceType: 'rtmp_custom',
+                streamServiceSettings: { server: 'rtmp://previous.example/live' },
+            }));
+            return;
+        }
+        if (requestType === 'GetProfileParameter') {
+            queueMicrotask(() => ws.respond(request, { parameterValue: profile.get(key) || '' }));
+            return;
+        }
+        if (requestType === 'SetProfileParameter') {
+            if (key === 'AdvOut/Encoder') encoderWrites.push(requestData.parameterValue);
+            // Simulate a missing NVENC plugin: OBS accepts the write request but
+            // read-back keeps the previous value. The AMF candidate verifies.
+            if (requestData.parameterValue !== 'obs_nvenc_av1_tex') {
+                profile.set(key, requestData.parameterValue);
+            }
+            queueMicrotask(() => ws.respond(request));
+            return;
+        }
+        if (requestType === 'GetOutputList') {
+            queueMicrotask(() => ws.respond(request, { outputs: [] }));
+            return;
+        }
+        if (requestType === 'GetOutputSettings') {
+            queueMicrotask(() => ws.respond(request, {}, { result: false, comment: 'not found' }));
+            return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    });
+    const previousWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = WebSocketImpl;
+    const { configureObsStream } = await obsWebSocketModule;
+
+    try {
+        const result = await configureObsStream({
+            whipUrl: 'http://127.0.0.1:8889/whip/room',
+            bearerToken: 'new-token',
+            encoderSettings: {
+                videoCodec: 'av1',
+                obsEncoderIds: ['obs_nvenc_av1_tex', 'av1_texture_amf'],
+                bitrateKbps: 12_000,
+            },
+        });
+
+        assert.equal(result.success, true);
+        assert.match(result.message, /AV1 AMF/);
+        assert.deepEqual(encoderWrites, ['obs_nvenc_av1_tex', 'av1_texture_amf']);
+        assert.equal(profile.get('AdvOut/Encoder'), 'av1_texture_amf');
+    } finally {
+        globalThis.WebSocket = previousWebSocket;
+    }
+});
+
+test('rejected AV1 encoder candidates roll back to the prior H.264 route', async () => {
+    let streamService = {
+        streamServiceType: 'rtmp_custom',
+        streamServiceSettings: { server: 'rtmp://previous.example/live' },
+    };
+    const profile = new Map([
+        ['Output/Mode', 'Simple'],
+        ['AdvOut/Encoder', 'obs_x264'],
+    ]);
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        const { requestType, requestData = {} } = request;
+        const key = `${requestData.parameterCategory}/${requestData.parameterName}`;
+        if (requestType === 'GetStreamServiceSettings') {
+            queueMicrotask(() => ws.respond(request, streamService));
+            return;
+        }
+        if (requestType === 'SetStreamServiceSettings') {
+            streamService = requestData;
+            queueMicrotask(() => ws.respond(request));
+            return;
+        }
+        if (requestType === 'GetProfileParameter') {
+            queueMicrotask(() => ws.respond(request, { parameterValue: profile.get(key) || '' }));
+            return;
+        }
+        if (requestType === 'SetProfileParameter') {
+            if (key === 'AdvOut/Encoder' && requestData.parameterValue !== 'obs_x264') {
+                queueMicrotask(() => ws.respond(request, {}, { result: false, comment: 'encoder plugin unavailable' }));
+                return;
+            }
+            profile.set(key, requestData.parameterValue);
+            queueMicrotask(() => ws.respond(request));
+            return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    });
+    const previousWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = WebSocketImpl;
+    const { configureObsStream } = await obsWebSocketModule;
+
+    try {
+        const result = await configureObsStream({
+            whipUrl: 'http://127.0.0.1:8889/whip/room',
+            bearerToken: 'new-token',
+            encoderSettings: {
+                videoCodec: 'av1',
+                obsEncoderIds: ['obs_nvenc_av1_tex', 'av1_texture_amf'],
+            },
+        });
+
+        assert.equal(result.success, false);
+        assert.match(result.message, /Tried: AV1 NVENC, AV1 AMF/);
+        assert.match(result.message, /settings were restored.*use H\.264/i);
+        assert.deepEqual(streamService, {
+            streamServiceType: 'rtmp_custom',
+            streamServiceSettings: { server: 'rtmp://previous.example/live' },
+        });
+        assert.equal(profile.get('Output/Mode'), 'Simple');
+        assert.equal(profile.get('AdvOut/Encoder'), 'obs_x264');
     } finally {
         globalThis.WebSocket = previousWebSocket;
     }

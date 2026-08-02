@@ -36,6 +36,27 @@ export function getEncoderKind(encoderId) {
     return 'other';
 }
 
+const AV1_ENCODERS_BY_VENDOR = Object.freeze({
+    nvenc: ['obs_nvenc_av1_tex', 'jim_av1_nvenc', 'ffmpeg_nvenc_av1'],
+    amf: ['av1_texture_amf', 'obs_amf_av1', 'amd_amf_av1'],
+    qsv: ['obs_qsv11_av1', 'obs_qsv_av1'],
+});
+
+export function getAv1EncoderCandidates(renderer = '') {
+    const normalized = String(renderer || '').toLowerCase();
+    const preferredVendor = /nvidia|geforce|rtx/.test(normalized)
+        ? 'nvenc'
+        : /amd|radeon/.test(normalized)
+            ? 'amf'
+            : /intel/.test(normalized)
+                ? 'qsv'
+                : null;
+    const vendorOrder = preferredVendor
+        ? [preferredVendor, ...Object.keys(AV1_ENCODERS_BY_VENDOR).filter((vendor) => vendor !== preferredVendor)]
+        : Object.keys(AV1_ENCODERS_BY_VENDOR);
+    return vendorOrder.flatMap((vendor) => AV1_ENCODERS_BY_VENDOR[vendor]);
+}
+
 export function buildLiveOutputPatch({
     encoderKind,
     videoCodec,

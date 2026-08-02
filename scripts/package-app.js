@@ -170,13 +170,54 @@ function getFileSha256(filePath) {
 
 function verifyCloudflared(filePath, expectedSha256) {
     const actualSha256 = getFileSha256(filePath);
-    if (actualSha256 !== expectedSha256) return false;
-    if (process.platform !== 'win32') return true;
+    if (actualSha256 !== expectedSha256) {
+        return {
+            valid: false,
+            reason: `SHA-256 mismatch (expected ${expectedSha256}, got ${actualSha256})`,
+        };
+    }
+    if (process.platform !== 'win32') return { valid: true, reason: '' };
+
+    const escapedPath = filePath.replace(/'/g, "''");
     const signature = spawnSync('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-Command',
-        `(Get-AuthenticodeSignature -LiteralPath '${filePath.replace(/'/g, "''")}').Status`,
+        '$ErrorActionPreference = \'Stop\'; '
+        + "Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop; "
+        + `$result = Get-AuthenticodeSignature -LiteralPath '${escapedPath}' -ErrorAction Stop; `
+        + "if ($null -eq $result) { throw 'Get-AuthenticodeSignature returned no result.' }; "
+        + '[pscustomobject]@{ status = [string]$result.Status; '
+        + 'statusMessage = [string]$result.StatusMessage; '
+        + 'signerSubject = [string]$result.SignerCertificate.Subject } '
+        + '| ConvertTo-Json -Compress',
     ], { encoding: 'utf8', windowsHide: true });
-    return signature.status === 0 && signature.stdout.trim() === 'Valid';
+    const stdout = (signature.stdout || '').replace(/^\uFEFF/, '').trim();
+    const stderr = (signature.stderr || '').trim();
+
+    if (signature.error || signature.status !== 0) {
+        return {
+            valid: false,
+            reason: `Authenticode query failed (exit ${signature.status ?? 'unknown'}; ${signature.error?.message || stderr || stdout || 'no error output'})`,
+        };
+    }
+
+    let details;
+    try {
+        details = JSON.parse(stdout);
+    } catch {
+        return {
+            valid: false,
+            reason: `Authenticode query returned invalid JSON: ${JSON.stringify(stdout)}`,
+        };
+    }
+
+    if (details.status !== 'Valid') {
+        return {
+            valid: false,
+            reason: `Authenticode status ${details.status || 'unknown'} (${details.statusMessage || 'no status message'}; signer ${details.signerSubject || 'unavailable'})`,
+        };
+    }
+
+    return { valid: true, reason: '' };
 }
 
 function hashPathRecursive(hash, fullPath, relativePath) {
@@ -219,6 +260,34 @@ function getBuildIdentifier() {
     }
 
     return `nextra-${hash.digest('hex').slice(0, 12)}`;
+}
+
+// Windows refuses to delete or overwrite a running executable, which fails the
+// packaging step after every gate has already passed. Renaming a running image
+// is allowed, so move the locked file aside and let caxa write a fresh one; the
+// already-running process keeps using its extracted copy.
+function clearOutputExe() {
+    const dir = path.dirname(outputExe);
+    const base = path.basename(outputExe);
+
+    for (const name of fs.readdirSync(dir)) {
+        if (!name.startsWith(`${base}.old-`)) continue;
+        try { fs.rmSync(path.join(dir, name), { force: true }); } catch { }
+    }
+
+    if (!fs.existsSync(outputExe)) return;
+
+    try {
+        fs.rmSync(outputExe, { force: true });
+        return;
+    } catch (err) {
+        if (err.code !== 'EPERM' && err.code !== 'EBUSY' && err.code !== 'EACCES') throw err;
+    }
+
+    const parked = `${outputExe}.old-${Date.now()}`;
+    fs.renameSync(outputExe, parked);
+    console.log(`${base} was locked by a running process; moved the old build to ${path.basename(parked)}.`);
+    console.log('Restart Nextra to pick up the new build.');
 }
 
 function writeReleaseChecksum() {
@@ -311,8 +380,9 @@ async function bundleCloudflared() {
         if (!fs.existsSync(explicitCloudflaredPath)) {
             throw new Error(`CLOUDFLARED_PATH does not exist: ${explicitCloudflaredPath}`);
         }
-        if (!verifyCloudflared(explicitCloudflaredPath, expectedSha256)) {
-            throw new Error(`CLOUDFLARED_PATH is not the signed, pinned cloudflared ${cloudflaredManifest.version} asset.`);
+        const verification = verifyCloudflared(explicitCloudflaredPath, expectedSha256);
+        if (!verification.valid) {
+            throw new Error(`CLOUDFLARED_PATH is not the signed, pinned cloudflared ${cloudflaredManifest.version} asset: ${verification.reason}.`);
         }
         copyCloudflaredToStage(explicitCloudflaredPath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
         console.log(`Bundled cloudflared from CLOUDFLARED_PATH: ${explicitCloudflaredPath}`);
@@ -328,7 +398,7 @@ async function bundleCloudflared() {
     if (allowLocalCloudflared) {
         for (const candidate of localCandidates) {
             if (!fs.existsSync(candidate)) continue;
-            if (!verifyCloudflared(candidate, expectedSha256)) continue;
+            if (!verifyCloudflared(candidate, expectedSha256).valid) continue;
             copyCloudflaredToStage(candidate, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
             console.log(`Bundled cloudflared from project file: ${path.basename(candidate)}`);
             return;
@@ -341,7 +411,7 @@ async function bundleCloudflared() {
     }
 
     const pathCandidate = findCloudflaredOnPath();
-    if (pathCandidate && fs.existsSync(pathCandidate) && verifyCloudflared(pathCandidate, expectedSha256)) {
+    if (pathCandidate && fs.existsSync(pathCandidate) && verifyCloudflared(pathCandidate, expectedSha256).valid) {
         copyCloudflaredToStage(pathCandidate, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
         console.log(`Bundled cloudflared from PATH: ${pathCandidate}`);
         return;
@@ -350,9 +420,10 @@ async function bundleCloudflared() {
     const downloadUrl = `https://github.com/cloudflare/cloudflared/releases/download/${cloudflaredManifest.version}/${assetName}`;
     console.log(`Downloading cloudflared for packaging: ${downloadUrl}`);
     await downloadFileWithRedirects(downloadUrl, stageCloudflaredPath);
-    if (!verifyCloudflared(stageCloudflaredPath, expectedSha256)) {
+    const verification = verifyCloudflared(stageCloudflaredPath, expectedSha256);
+    if (!verification.valid) {
         try { fs.unlinkSync(stageCloudflaredPath); } catch { }
-        throw new Error('Downloaded cloudflared failed pinned checksum or Authenticode verification.');
+        throw new Error(`Downloaded cloudflared failed pinned verification: ${verification.reason}.`);
     }
     copyCloudflaredToStage(stageCloudflaredPath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
     console.log('Bundled cloudflared via verified download.');
@@ -371,6 +442,7 @@ async function main() {
         await bundleCloudflared();
         const buildIdentifier = getBuildIdentifier();
         iconStub = await prepareWindowsCaxaStub();
+        clearOutputExe();
 
         const caxaArgs = [
             'caxa',

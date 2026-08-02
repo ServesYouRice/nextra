@@ -1,4 +1,15 @@
-# Nextra
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="public/brand/nextra-primary-logo.png">
+  <img src="public/brand/nextra-primary-logo-light.png" alt="Nextra" width="420">
+</picture>
+
+**Self-hosted, low-latency screen sharing from your browser or OBS.**
+
+</div>
+
+---
 
 Vibe coded this into existence because the usual screen sharing apps were either limited or paid. If you notice mistakes or want to contribute, feel free to jump in.
 
@@ -7,7 +18,7 @@ TL;DR: there are 2 host modes:
 1. Browser capture: easiest setup, direct from Chrome/Edge, lower requirements.
 2. OBS ingest: better scenes, overlays, and hardware encoding.
    - H.264 is the stable default path and keeps relay fallback available.
-   - AV1 is available for capable GPUs, but it is WebRTC-only and requires BYOK TURN.
+   - AV1 is available when OBS can set and verify an AV1 encoder, but it is WebRTC-only and requires BYOK TURN.
 
 You can grab `Nextra.exe` from [GitHub Releases](../../releases), run it, and start sharing. Install OBS only if you want the OBS workflow.
 
@@ -17,7 +28,7 @@ You can grab `Nextra.exe` from [GitHub Releases](../../releases), run it, and st
 
 - **Browser capture** - share your screen directly from Chrome/Edge with system audio
 - **OBS streaming** - use OBS Studio as the capture source via WHIP ingest, with auto-configuration over OBS WebSocket
-- **AV1 OBS rooms** - switch capable NVIDIA, AMD, and Intel GPUs into AV1 for WebRTC-only playback
+- **AV1 OBS rooms** - try bounded NVIDIA, AMD, and Intel encoder candidates and keep the first one OBS verifies for WebRTC-only playback
 - **BYOK TURN for AV1** - room-scoped TURN credentials, optional session-only storage, and optional Cloudflare TURN autofill
 - **Up to 4K @ 60 fps** - quality profiles adapt to host upload and viewer count
 - **WebRTC + Relay playback** - browser capture and AV1 stay on WebRTC; H.264 OBS rooms can fall back to fMP4 relay
@@ -57,6 +68,24 @@ Open `http://127.0.0.1:3000/#host` and choose either browser capture or OBS mode
 
 No install is required for viewers.
 
+### Tested browsers
+
+Nextra makes no general "any modern browser" claim. The table records only the
+paths this repository tests end to end (`npm run test:e2e`, Playwright Chromium
+and mobile Chrome projects). Untested browsers are not blocked: the client
+feature-detects WebRTC receive codecs and Media Source Extensions instead of
+sniffing the browser name, so an unsupported browser gets an explicit message.
+
+| Role and path | Desktop Chrome / Edge | Mobile Chrome | Other browsers |
+| --- | --- | --- | --- |
+| Host, browser capture | Tested | Not supported (no screen capture) | Not tested; `systemAudio` capture is Chromium-only |
+| Host, OBS (WHIP) | Tested | Not supported | Not tested |
+| Viewer, WebRTC | Tested | Tested | Not tested |
+| Viewer, relay (H.264/WebM) | Tested | Not tested | Not tested |
+
+Layout and keyboard flows are checked at 320, 375, 640, 900, and 1440 px
+viewport widths. No WCAG conformance level is claimed.
+
 ---
 
 ## OBS Streaming
@@ -75,7 +104,7 @@ Use OBS Studio instead of browser screen capture for higher quality, custom scen
 1. On the host page, enable **Use OBS (WHIP ingest)**.
 2. Choose your OBS path:
    - **Stable H.264**: leave **Use BYOK TURN (AV1)** off. This keeps relay fallback available and is the best compatibility path.
-   - **AV1 WebRTC-only**: enable **Use BYOK TURN (AV1)**. This requires an AV1-capable GPU, OBS auto-configuration, and a TURN config in the modal. Relay fallback is disabled for that room.
+   - **AV1 WebRTC-only**: enable **Use BYOK TURN (AV1)**. This requires an AV1 encoder that OBS can verify, OBS auto-configuration, and a TURN config in the modal. Relay fallback is disabled for that room.
 3. Choose your settings:
    - **Resolution / Frame rate** - determines the quality profile and recommended OBS output settings
    - **Apply recommended output settings** - auto-configures OBS output over WebSocket; required for AV1 mode
@@ -93,7 +122,8 @@ Use OBS Studio instead of browser screen capture for higher quality, custom scen
 | **OBS AV1 + BYOK TURN** | Capable GPUs and browsers, lowest-latency OBS playback | No | Required |
 
 - H.264 rooms can still use direct WebRTC when it works, and viewers can switch into relay mode when needed.
-- AV1 rooms are WebRTC-only. Every viewer needs AV1 playback support and the server must expose a reachable media plane (`PUBLIC_IP` plus non-loopback `RTC_LISTEN_IP`). A generic external TURN service does not make a loopback-only mediasoup listener public.
+- Relay playback starts a fresh recorder generation when its audience changes from zero to one, so late viewers receive current initialization data and a decodable frame without restarting viewers already connected.
+- AV1 rooms are WebRTC-only. Every viewer's loaded WebRTC receive RTP capabilities must include `video/AV1`, and the server must expose a reachable media plane (`PUBLIC_IP` plus non-loopback `RTC_LISTEN_IP`). MP4/MSE support does not prove WebRTC AV1 support. A generic external TURN service does not make a loopback-only mediasoup listener public.
 - Room-scoped TURN credentials override any global TURN setting for that room only and are cleared when the room ends.
 
 ### How It Works
@@ -189,7 +219,7 @@ Open `http://127.0.0.1:3000/#status` on the host machine to see active rooms, We
 
 The JSON metrics and readiness responses also report `fallbackRelay.nvencProbe`. The probe is warmed in the background during startup; `probing` does not make the service unready because the relay can use libx264 when NVENC is unavailable. For capacity tests, record `/api/metrics` repeatedly and correlate room/viewer topology with `process.cpuUsageMicroseconds`, `process.eventLoopDelayMs`, `mediaWorker.resourceUsage`, memory, relay throughput, and signaling acknowledgement latency measured by the load client. CPU counters are cumulative, so calculate the change between samples over the sample interval.
 
-Remote metrics are disabled by default. The in-app dashboard is intended for host/local use; if you expose `/api/metrics` for API access, use `ALLOW_REMOTE_METRICS` and `METRICS_TOKEN` deliberately, and avoid sharing room codes or runtime diagnostics with untrusted viewers.
+Sensitive JSON metrics at `/api/metrics` use the operator boundary: loopback and explicitly trusted LAN clients are allowed, while other clients must send `X-Nextra-Operator-Token`. The Prometheus/OpenMetrics endpoint at `/metrics` keeps its separate `METRICS_TOKEN` bearer capability.
 
 ---
 
@@ -228,6 +258,9 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 | Variable | Default | Description |
 |---|---|---|
 | `WHIP_ENABLED` | `true` | Enable WHIP ingest endpoint |
+| `PUBLIC_WHIP_ENABLED` | `false` | Also mount WHIP on the main/public server; the dedicated loopback endpoint remains available when this is off |
+| `PUBLIC_WHIP_RATE_LIMIT_MAX` | `5` | Public WHIP start attempts per IP per window |
+| `PUBLIC_WHIP_MAX_PENDING_STARTS` | `2` | Global cap on concurrent public WHIP startups before SDP/media allocation |
 | `WHIP_HTTP_PORT` | `3001` | HTTP port for WHIP endpoint |
 | `WHIP_BIND_HOST` | `127.0.0.1` | Bind address for the plaintext OBS-compatible WHIP endpoint |
 | `WHIP_ALLOW_INSECURE_REMOTE` | `false` | Explicitly acknowledge a non-loopback plaintext WHIP bind; use only behind an encrypted VPN or TLS reverse proxy |
@@ -262,7 +295,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 Notes:
 
 - `TURN_URL` can contain multiple comma-separated `turn:` or `turns:` URLs.
-- Cloudflare TURN autofill is only exposed to local/LAN hosts.
+- Cloudflare TURN autofill uses the operator boundary; remote operators send `X-Nextra-Operator-Token`.
 - The browser never receives the long-lived Cloudflare API token; it only gets short-lived TURN credentials.
 
 ### Public Sharing
@@ -290,8 +323,10 @@ Notes:
 | `SOCKET_PING_TIMEOUT_MS` | `60000` | Grace period before a quiet watcher socket is considered disconnected |
 | `METRICS_BROADCAST_INTERVAL_MS` | `5000` | Room metrics broadcast interval |
 | `ALLOW_REMOTE_MEDIA_CONTROL` | `false` | Permit hosts to opt viewers into remote Play/Pause keyboard control |
-| `ALLOW_REMOTE_METRICS` | `false` | Allow `/api/metrics` from non-local clients |
-| `METRICS_TOKEN` | - | Optional bearer token for remote `/api/metrics` API access (send it in the `Authorization` header) |
+| `OPERATOR_TOKEN` | - | At least 32 high-entropy characters; required for remote room creation, sensitive JSON metrics, and TURN minting |
+| `TRUSTED_LAN_CIDRS` | - | Comma-separated explicit operator IPs or IPv4 CIDRs; private addresses are not trusted automatically |
+| `ALLOW_INSECURE_TRUSTED_LAN_RELAY` | `false` | Permit plaintext Socket.IO relay bytes only on `TRUSTED_LAN_CIDRS`; WebRTC DTLS does not protect relay payloads |
+| `METRICS_TOKEN` | - | Bearer capability for `/metrics` when OpenMetrics is enabled |
 | `ENABLE_OPENMETRICS` | `false` | Enable token-gated Prometheus/OpenMetrics output at `/metrics`; requires `METRICS_TOKEN` |
 | `LOG_LEVEL` | `info` | Minimum server log level: `debug`, `info`, `warn`, or `error` |
 | `LOG_FORMAT` | text | Set to `json` for structured JSON logs with HTTP request correlation fields |
@@ -310,14 +345,28 @@ See `.env.example` for the full list.
 - Remote media control is host-controllable per room
 - Media is not persisted by Nextra
 - Cloudflare TURN API tokens remain server-side; only short-lived TURN credentials are sent to the host UI
+- Room creation is loopback-only by default. Remote hosts need the operator capability; public viewers never receive host authority.
+- Rotate `OPERATOR_TOKEN` by replacing it and restarting Nextra. Existing in-memory rooms keep their room-scoped host tokens until the restart ends them.
+- On HTTP, Socket.IO WebM/fMP4 relay payloads are plaintext. Leave insecure relay disabled except on a declared trusted home LAN; use HTTPS for every other non-loopback path.
 - `.env`, TLS keys, and binaries are gitignored
 
 Important limits:
 
-- By default, anyone with the room code or share link can attempt to join. Hosts can set an optional passphrase under **Advanced settings**; browser viewers are prompted after entering the code, while WHEP clients send `Authorization: Bearer <passphrase>`. Only a salted scrypt hash is kept in ephemeral room state.
-- **Allow recovery after reload** stores the room code and reclaim token in tab-scoped session storage and preserves an opted-in room for the host reconnect grace (30 seconds by default). OBS remains attached; browser capture requires clicking **Resume Sharing** and selecting a screen again. Explicit stop still ends the room immediately.
+- By default, anyone with the room code or share link can attempt to join. Hosts can set an optional passphrase in the host **Settings** panel; browser viewers are prompted after entering the code, while WHEP clients send `Authorization: Bearer <passphrase>`. Only a salted scrypt hash is kept in ephemeral room state.
+- Passphrase hashing runs asynchronously. Pending room creations count toward `MAX_ACTIVE_ROOMS`, and an existing room remains active unless its fully prepared replacement succeeds.
+- **Allow recovery after reload** stores the room code and reclaim token in tab-scoped session storage and preserves an opted-in room for the host reconnect grace (30 seconds by default). This only reclaims a room from the same running server process; a process replacement ends every in-memory room. OBS remains attached during same-process recovery; browser capture requires clicking **Resume Sharing** and selecting a screen again. Explicit stop still ends the room immediately.
+- Every Local/Public viewer link names one in-memory room. Explicit Host stop or a Nextra process restart retires that link; starting again creates a new room code and link. Joined viewers can copy the canonical current link, but protected-room passphrases are never embedded in it.
 - Tunnel providers, TURN servers, ISPs, and network operators are external parties.
 - Treat this as secure-by-default self-hosted software, not a zero-trust system.
+
+Operational security:
+
+- A quick tunnel pointing at self-signed local HTTPS may need cloudflared's local-origin `--no-tls-verify`; this relaxes only cloudflared-to-Nextra certificate verification, so never use it for an unrelated upstream.
+- Alert when `/readyz` is non-ready, the media-worker PID changes unexpectedly, relay restart/error counters rise, or the tunnel remains in an error/backoff state.
+- Run under a single-process supervisor. Unexpected unhandled rejections and uncaught exceptions log a shutdown reason and exit non-zero; mediasoup worker death replaces the process. Either event ends all in-memory rooms.
+- Rotate logs outside the process, restrict file access, and redact room codes, bearer capabilities, public capability URLs, TURN credentials, and request headers before sharing diagnostics.
+- The Host page's **Troubleshooting diagnostics** export downloads an allowlisted JSON snapshot of readiness, safe configuration flags, topology counts, runtime utilization, and current errors. It excludes room codes, room/public links, credentials, authorization headers, and raw room lists; review the file before sharing it outside your organization.
+- Store `OPERATOR_TOKEN`, `METRICS_TOKEN`, TURN secrets, tunnel tokens, and OBS credentials in protected environment/service-secret storage, never in command history, URLs, source control, or client storage.
 
 ---
 
@@ -326,11 +375,12 @@ Important limits:
 | Problem | Solution |
 |---|---|
 | No public link | Wait a few seconds after startup. In dev, set `AUTO_PUBLIC_TUNNEL=true`. Ensure `cloudflared` exists in the project root or on PATH. |
+| Host preflight blocks startup | Follow the path-specific message: Browser hosting needs desktop capture support on localhost/HTTPS; OBS needs the WHIP listener ready; AV1 additionally needs valid TURN credentials, OBS auto-configuration, and a reachable public media address when sharing publicly. Tunnel startup/failure is only a warning when the local/LAN room can still run. |
 | Viewers cannot connect | Check host firewall, keep the host app running, and verify whether the room expects TURN or relay. |
 | OBS H.264 viewer is black | Try **Switch to Relay Mode** or refresh. H.264 rooms can fall back to relay. |
 | AV1 room will not start | AV1 requires an AV1-capable GPU, **Use BYOK TURN (AV1)**, a valid TURN config, and OBS auto-configuration. |
 | Public viewers cannot join an AV1 room | Configure `PUBLIC_IP` and a non-loopback `RTC_LISTEN_IP`, plus suitable ICE/TURN connectivity, or use H.264 relay mode. |
-| Viewer browser says AV1 is unsupported | Use an AV1-capable browser/device or switch the host back to H.264. |
+| Viewer browser says AV1 is unsupported | Its loaded WebRTC receive capabilities do not include `video/AV1`; use a compatible browser/device or switch the host back to H.264. |
 | OBS auto-config fails | Make sure OBS is running and WebSocket is enabled in **Tools > WebSocket Server Settings**. H.264 rooms can fall back to manual WHIP; AV1 rooms cannot. |
 | Audio missing | Ensure OBS is capturing audio in the Audio Mixer. For browser capture, use Chrome or Edge. |
 | Buffering or stalls | Lower the quality profile or frame rate. H.264 rooms can use relay; AV1 rooms need a stable TURN-backed WebRTC path. |
@@ -339,16 +389,38 @@ Important limits:
 
 The default limits are intentionally conservative for one desktop process: 10 rooms, 10 direct viewers per room, and 2 simultaneous FFmpeg fallback pipelines. They are safety limits, not a benchmark guarantee. Raise them only after measuring CPU, memory, relay throughput, and event-loop delay on the target host through the local `/api/metrics` endpoint.
 
-Use `npm run benchmark:runtime` with a real room/media topology and `npm run churn:runtime` for the long-running room/transport leak gate. The release procedure, thresholds, repetitions, and evidence fields are tracked in [`implementation/T10-release-evidence.md`](implementation/T10-release-evidence.md).
+Maintainers and operators can use `npm run benchmark:runtime` with a real room/media topology and `npm run churn:runtime` for optional hardware-specific capacity and long-running room/transport validation. The benchmark requires a named `webrtc`, `relay`, or `mixed` scenario and rejects runs that do not contain the expected producers/consumers or active relay bytes. Its JSON summary records the machine/runtime identity and remaining headroom against every configured threshold. These measurements are not required for an open-source release and must not be presented as portable results unless they were actually observed on the named target host.
+
+With the matching live topology already open, representative commands are:
+
+```powershell
+# Browser/WebRTC host with five actively consuming viewers
+npm run benchmark:runtime -- --scenario=webrtc --label=1080p60-5-viewers --require-consumers=5 --duration-ms=300000
+
+# OBS H.264 room with five viewers already switched to Relay mode
+npm run benchmark:runtime -- --scenario=relay --label=1080p60-h264-relay-5-viewers --require-relay-viewers=5 --require-fallback-pipelines=1 --min-relay-bytes=1048576 --duration-ms=300000
+```
+
+Run each profile on the deployment hardware, keep the complete JSON output with the profile name, and increase the conservative limits only when signalling, event-loop, CPU, memory, and relay-byte checks all retain acceptable headroom. A run with sockets but no flowing media fails topology validation rather than becoming a capacity claim.
+
+For a loopback-only test server using Nextra's self-signed local HTTPS certificate, `--allow-insecure-tls` disables Socket.IO certificate verification for that benchmark run; Node's HTTPS fetches also require `NODE_TLS_REJECT_UNAUTHORIZED=0`. Never use either setting against a remote or untrusted host. The JSON result records when Socket.IO TLS verification was disabled.
 
 Production supervision means exactly one replica; a restart ends all in-memory rooms. Keep the verified `caxa` Windows package until it fails its gate or a supported platform change requires a replacement.
 
 - `/healthz` is an unauthenticated process-liveness check.
-- `/readyz` returns 200 only after the HTTP, Socket.IO, and mediasoup worker layers are ready; it returns 503 during startup and shutdown.
+- `/readyz` returns 200 only when every component required by the active profile is ready: HTTP, Socket.IO, the mediasoup worker, the production SPA bundle, and WHIP when enabled. Development marks the Vite-served SPA as external; disabled WHIP and optional FFmpeg/NVENC fallback do not block readiness. A 503 response includes each component's required flag, state, and WHIP startup error when present.
 - An uncaught exception or mediasoup worker death terminates/restarts the process. Run production deployments under a supervisor such as Windows Service management, systemd, or a container restart policy.
 - Repeated FFmpeg failure is isolated to its room. Tunnel failures use bounded exponential restart backoff and do not stop LAN service.
 
-Tagged Windows releases run the complete gate, package the executable, require Authenticode signing secrets, timestamp the signature, regenerate the checksum, and publish the exact signed artifact. Pull-request CI also packages and smoke-tests the executable without publishing it.
+Version tags with or without the historical `v` prefix run the complete Windows CI
+gate, package the executable, generate a SHA-256 checksum, smoke-test the exact
+unsigned artifact, and publish or refresh its GitHub Release automatically. The
+release notes identify the unsigned status, tested browser scope, checksum, and
+tagged corresponding source. Pull-request CI runs the same packaging and smoke path
+without publishing it. Windows may warn when launching an unsigned executable. The
+packaged smoke replaces the mediasoup worker, waits for the replacement process,
+proves a short decoded-frame Host/view flow in Chromium, shuts the app down, and
+fails on leftover caxa extraction or cloudflared processes.
 | App closes immediately | Check `%LOCALAPPDATA%\\Nextra\\logs\\startup-latest.log`. |
 | Poor quality | Lower resolution/framerate, use a wired connection, and reduce host desktop load. |
 

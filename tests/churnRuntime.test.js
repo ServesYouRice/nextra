@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
 const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 const { spawn, execFile } = require('node:child_process');
 
@@ -17,16 +19,19 @@ function reserveTcpPort() {
     });
 }
 
-async function waitForReady(baseUrl, timeoutMs = 20_000) {
+async function waitForReady(baseUrl, child, getOutput, timeoutMs = 20_000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+        if (child.exitCode !== null) {
+            throw new Error(`server exited before readiness (code ${child.exitCode})\n${getOutput()}`);
+        }
         try {
             const response = await fetch(`${baseUrl}/readyz`);
             if (response.ok) return;
         } catch {}
         await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    throw new Error('server did not become ready');
+    throw new Error(`server did not become ready within ${timeoutMs}ms\n${getOutput()}`);
 }
 
 function runHarness(baseUrl) {
@@ -56,10 +61,13 @@ test('churn harness completes real room/transport cycles and returns to baseline
     let rtcPort = await reserveTcpPort();
     while (rtcPort === port) rtcPort = await reserveTcpPort();
     const baseUrl = `http://127.0.0.1:${port}`;
+    const testDistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-churn-dist-'));
+    await fs.writeFile(path.join(testDistDir, 'index.html'), '<!doctype html><div id="root"></div>');
+    let output = '';
     const server = spawn(process.execPath, ['server.js'], {
         cwd: projectRoot,
         windowsHide: true,
-        stdio: 'ignore',
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: {
             ...process.env,
             NODE_ENV: 'test',
@@ -79,15 +87,19 @@ test('churn harness completes real room/transport cycles and returns to baseline
             JOIN_RATE_LIMIT_MAX: '100000',
             MAX_CONNECTIONS_PER_IP: '1000',
             NEXTRA_SMOKE_TEST: '1',
+            NEXTRA_TEST_DIST_DIR: testDistDir,
             LOG_LEVEL: 'warn',
         },
     });
+    server.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    server.stderr.on('data', (chunk) => { output += chunk.toString(); });
     t.after(async () => {
         try { await fetch(`${baseUrl}/api/test/shutdown`, { method: 'POST' }); } catch {}
         if (server.exitCode === null) server.kill();
+        await fs.rm(testDistDir, { recursive: true, force: true });
     });
 
-    await waitForReady(baseUrl);
+    await waitForReady(baseUrl, server, () => output);
     const result = await runHarness(baseUrl);
     assert.equal(result.pass, true, JSON.stringify(result.failures));
     assert.equal(result.churnErrors, 0);

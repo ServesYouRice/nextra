@@ -25,7 +25,7 @@ const evaluation = {
         format: 'Windows executable',
         packager: 'caxa',
         version: caxa?.version || null,
-        verifiedBy: ['scripts/package-app.js', 'scripts/smoke-packaged.ps1', 'Windows CI', 'tagged post-signing smoke test'],
+        verifiedBy: ['scripts/package-app.js', 'scripts/smoke-packaged.ps1', 'Windows CI', 'tagged artifact smoke test'],
         status: missingInputs.length === 0 && caxa?.version ? 'retain-verified-path' : 'invalid',
     },
     constraints: {
@@ -37,7 +37,7 @@ const evaluation = {
             'mediasoup worker subprocess starts',
             'runtime assets and compliance files are embedded',
             'FFmpeg/cloudflared child processes and graceful shutdown work',
-            'Authenticode signing and timestamping preserve the tested artifact',
+            'the published executable matches its generated SHA-256 checksum',
             'startup logging and writable runtime directories work on a clean host',
         ],
     },

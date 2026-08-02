@@ -8,11 +8,37 @@ const {
     isLocalHostname,
     shouldTrustForwardedHeaders,
     getTrustedForwardedClientIp,
+    classifyClient,
+    isIpInTrustedLan,
+    timingSafeTokenEqual,
 } = require('../lib/network');
 
 test('normalizeIp strips IPv4-mapped IPv6 prefixes', () => {
     assert.equal(normalizeIp('::ffff:192.168.0.5'), '192.168.0.5');
     assert.equal(normalizeIp('203.0.113.5'), '203.0.113.5');
+});
+
+test('operator client classification separates loopback, explicit LAN, proxy, and remote clients', () => {
+    assert.deepEqual(classifyClient({ ip: '127.0.0.1' }), { kind: 'loopback', ip: '127.0.0.1' });
+    assert.deepEqual(classifyClient({
+        ip: '192.168.50.42',
+        trustedLanCidrs: '192.168.50.0/24',
+    }), { kind: 'trusted-lan', ip: '192.168.50.42' });
+    assert.deepEqual(classifyClient({
+        ip: '203.0.113.20',
+        viaKnownProxy: true,
+    }), { kind: 'known-proxy', ip: '203.0.113.20' });
+    assert.deepEqual(classifyClient({ ip: '192.168.50.42' }), { kind: 'remote', ip: '192.168.50.42' });
+    assert.equal(isIpInTrustedLan('10.20.30.40', '10.20.0.0/16'), true);
+    assert.equal(isIpInTrustedLan('10.21.30.40', '10.20.0.0/16'), false);
+});
+
+test('operator capability comparison rejects missing, truncated, and different tokens', () => {
+    const expected = '0123456789abcdef0123456789abcdef';
+    assert.equal(timingSafeTokenEqual(expected, expected), true);
+    assert.equal(timingSafeTokenEqual('', expected), false);
+    assert.equal(timingSafeTokenEqual(expected.slice(1), expected), false);
+    assert.equal(timingSafeTokenEqual('x'.repeat(expected.length), expected), false);
 });
 
 test('parseForwardedFirst returns the first forwarded value', () => {

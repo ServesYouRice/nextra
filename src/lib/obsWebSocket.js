@@ -496,6 +496,7 @@ export function createObsConfigurationTransaction(sendRequest) {
 export async function configureObsStream({ whipUrl, bearerToken, password = '', autoStart = false, videoSettings = null, encoderSettings = null }) {
     return withObsConnection(password, async (rawSendRequest, done) => {
         const transaction = createObsConfigurationTransaction(rawSendRequest);
+        const requestedAv1 = String(encoderSettings?.videoCodec || encoderSettings?.encoder || '').toLowerCase() === 'av1';
         const sendRequest = transaction.request;
         let finishing = false;
         const finish = async (result) => {
@@ -509,6 +510,11 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
                     result = {
                         ...result,
                         message: `${result.message} Rollback incomplete: ${rollbackFailures.join('; ')}`,
+                    };
+                } else if (requestedAv1) {
+                    result = {
+                        ...result,
+                        message: `${result.message} OBS settings were restored. Disable AV1 mode and retry to use H.264.`,
                     };
                 }
             }

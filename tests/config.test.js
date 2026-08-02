@@ -157,3 +157,35 @@ test('config accepts an explicitly acknowledged remote WHIP bind', () => {
 
     assert.equal(result.status, 0, result.stderr);
 });
+
+test('operator capabilities must be high entropy and public WHIP is opt-in', () => {
+    assert.equal(config.PUBLIC_WHIP_ENABLED, false);
+    assert.equal(config.PUBLIC_WHIP_MAX_PENDING_STARTS, 2);
+
+    const configPath = path.join(__dirname, '..', 'config.js');
+    const result = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(configPath)})`], {
+        encoding: 'utf8',
+        env: {
+            ...process.env,
+            OPERATOR_TOKEN: 'too-short',
+        },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /OPERATOR_TOKEN.*32 high-entropy characters/);
+});
+
+test('plaintext LAN relay requires an explicit trusted LAN declaration', () => {
+    const configPath = path.join(__dirname, '..', 'config.js');
+    const result = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(configPath)})`], {
+        encoding: 'utf8',
+        env: {
+            ...process.env,
+            TRUSTED_LAN_CIDRS: '',
+            ALLOW_INSECURE_TRUSTED_LAN_RELAY: 'true',
+        },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /declare TRUSTED_LAN_CIDRS first/);
+});
