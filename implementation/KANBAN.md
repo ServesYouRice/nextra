@@ -1,15 +1,15 @@
 # Implementation board
 
-Updated: 2026-08-01. This is the only active Markdown file in `implementation/`.
-The completed T01–T16 cards and their evidence are archived in
-[`archive/2026-08-01-implementation-completion/COMPLETED-CARDS.md`](archive/2026-08-01-implementation-completion/COMPLETED-CARDS.md).
-Earlier audits and superseded plans remain historical evidence under
-`archive/2026-07-26-audit-consolidation/`.
+Updated: 2026-08-04. This is the only Markdown file in `implementation/`.
 
 ## Current status
 
 T18 and T19 are done. T17 is the only remaining card; it is blocked on an
 external network/TURN setup, not on a pending user decision.
+
+Cards T01–T16 are complete. Their completion records, along with the 2026-07-26
+audit consolidation that produced them, were removed on 2026-08-04 and remain
+retrievable from git history at commit `84b1634`.
 
 ### In progress
 
