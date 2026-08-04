@@ -55,5 +55,3 @@ cloudflared
 !archive/**/*.md
 !implementation/
 !implementation/*.md
-!implementation/archive/
-!implementation/archive/**/*.md
