@@ -41,6 +41,13 @@
   --info: #5b8def;
   --info-muted: rgba(91, 141, 239, 0.08);
 
+  /* Brand gradient stops, mirroring public/brand/nextra-mark.svg: the "N"
+     upstroke runs cyan -> blue, the downstroke magenta -> violet. */
+  --brand-cyan: #4de3ff;
+  --brand-blue: #3b82f6;
+  --brand-magenta: #ff5ce1;
+  --brand-violet: #a06bff;
+
   /* Layout.
      Inline gutters come in two flavours: reading pages align with the nav and
      footer, stage pages keep the width for the video. The vh terms are what make
@@ -230,9 +237,15 @@ code {
   color: var(--text-2);
 }
 
+/* The current tab takes the mark's upstroke gradient, cyan -> blue. `color` is
+   the fallback wherever background-clip: text is unsupported. */
 .nav-links a.active,
 .nav-links a[aria-current='page'] {
-  color: var(--accent);
+  color: var(--brand-blue);
+  background-image: linear-gradient(100deg, var(--brand-cyan), var(--brand-blue));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 .site-footer {
@@ -269,9 +282,20 @@ code {
   transition: color var(--transition);
 }
 
-.footer-links a:hover,
-.footer-links a.active {
+.footer-links a:hover {
   color: var(--accent);
+}
+
+/* The current page reads the same here as in the nav: the mark's upstroke
+   gradient, cyan -> blue, with `color` as the fallback wherever
+   background-clip: text is unsupported. */
+.footer-links a.active,
+.footer-links a.active:hover {
+  color: var(--brand-blue);
+  background-image: linear-gradient(100deg, var(--brand-cyan), var(--brand-blue));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 /* ========== LOADING STATE ========== */
@@ -335,8 +359,14 @@ code {
   user-select: none;
 }
 
+/* The nav shows the mark alone, so the "N" carries the brand next to the links
+   and the wordmark is left to the hero. */
 .brand-logo-nav {
   --brand-mark-height: 1.75rem;
+}
+
+.brand-logo-nav .brand-logo-word {
+  display: none;
 }
 
 .brand-logo-hero {
@@ -416,6 +446,18 @@ code {
 .btn-outline:hover:not(:disabled) {
   border-color: var(--border-focus);
   color: var(--text-2);
+}
+
+/* Label span for buttons that take the mark's downstroke gradient, magenta ->
+   violet. It sits inside the button so the button keeps its own background;
+   background-clip: text would otherwise clip that away too. `color` is the
+   fallback wherever background-clip: text is unsupported. */
+.btn-brand-label {
+  color: var(--brand-magenta);
+  background-image: linear-gradient(100deg, var(--brand-magenta), var(--brand-violet));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 .btn-large {
@@ -806,22 +848,6 @@ input.select-input {
 .notification-error { border-color: rgba(229, 91, 91, 0.4); }
 .notification button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 1.2rem; }
 
-.first-run-guide {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 1rem;
-  margin-bottom: 1rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-2);
-}
-
-.first-run-guide h2 { margin: 0 0 0.25rem; font-size: 1rem; }
-.first-run-guide p { margin: 0; color: var(--text-2); font-size: 0.8rem; }
-.first-run-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-
 .host-diagnostics, .connection-quality { margin-top: 0.75rem; color: var(--text-2); font-size: 0.75rem; }
 .host-diagnostics summary, .connection-quality summary { cursor: pointer; color: var(--text-1); }
 .host-diagnostics dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 0.5rem; }
@@ -831,10 +857,6 @@ input.select-input {
 .diagnostic-error { color: var(--warn); }
 .diagnostic-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.75rem; }
 .connection-quality span { display: inline-block; margin: 0.4rem 1rem 0 0; }
-
-@media (max-width: 720px) {
-  .first-run-guide { align-items: flex-start; flex-direction: column; }
-}
 
 .status-pill {
   display: inline-flex;
@@ -1026,7 +1048,7 @@ input.select-input {
 /* The hero steps logo -> headline -> lead -> cards so each level is clearly
    larger than the one under it instead of everything landing near 1rem. */
 .landing-hero h1 {
-  font-size: clamp(1.9rem, 4vw, 2.75rem);
+  font-size: clamp(1.45rem, 2.9vw, 2rem);
   font-weight: 600;
   line-height: 1.15;
   letter-spacing: -0.02em;
@@ -1090,14 +1112,22 @@ input.select-input {
   flex: 1;
 }
 
+/* Each badge takes one half of the mark's gradient, so the landing cards read
+   as the two strokes of the "N". `color` is the fallback wherever
+   background-clip: text is unsupported. */
 .card-badge {
   font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--accent);
+  font-weight: 600;
+  color: var(--brand-cyan);
+  background-image: linear-gradient(100deg, var(--brand-cyan), var(--brand-blue));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 .card-watch .card-badge {
-  color: var(--ok);
+  color: var(--brand-magenta);
+  background-image: linear-gradient(100deg, var(--brand-magenta), var(--brand-violet));
 }
 
 .landing-footer {
@@ -1492,23 +1522,9 @@ input.select-input {
 
 .room-links-row {
   display: flex;
-  gap: 2rem;
+  gap: 0.85rem 2rem;
   margin-top: 1rem;
   flex-wrap: wrap;
-}
-
-.room-lifetime-copy {
-  display: block;
-  margin-top: 0.5rem;
-  max-width: 52rem;
-}
-
-.viewer-room-share {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  margin-top: 0.75rem;
-  text-align: center;
 }
 
 .viewer-count {
@@ -2196,14 +2212,8 @@ input.select-input {
     font-size: inherit;
   }
 
-  /* Five nav links plus the wordmark cannot share one row at 360px, so the
-     mark stands in for the logo and stays large enough to read. */
   .brand-logo-nav {
     --brand-mark-height: 1.6rem;
-  }
-
-  .brand-logo-nav .brand-logo-word {
-    display: none;
   }
 
   .setting-row-inline {

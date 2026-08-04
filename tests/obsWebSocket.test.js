@@ -144,6 +144,133 @@ test('the complete OBS setup transaction has an overall deadline', async () => {
     });
 });
 
+test('a live OBS output is stopped before its settings are rewritten, without auto-start', async () => {
+    const order = [];
+    let outputActive = true;
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        const { requestType } = request;
+        if (requestType === 'GetStreamStatus') {
+            queueMicrotask(() => ws.respond(request, { outputActive, outputReconnecting: false }));
+            return;
+        }
+        if (requestType === 'StopStream') {
+            outputActive = false;
+            order.push('StopStream');
+            queueMicrotask(() => ws.respond(request));
+            return;
+        }
+        if (requestType === 'GetStreamServiceSettings') {
+            queueMicrotask(() => ws.respond(request, {
+                streamServiceType: 'rtmp_custom',
+                streamServiceSettings: { server: 'rtmp://previous.example/live' },
+            }));
+            return;
+        }
+        if (requestType === 'SetStreamServiceSettings' || requestType === 'SetVideoSettings') {
+            order.push(requestType);
+        }
+        if (requestType === 'GetVideoSettings') {
+            queueMicrotask(() => ws.respond(request, { outputWidth: 1920, outputHeight: 1080 }));
+            return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    });
+    const previousWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = WebSocketImpl;
+    const { configureObsStream } = await obsWebSocketModule;
+
+    try {
+        const result = await configureObsStream({
+            whipUrl: 'http://127.0.0.1:8889/whip/broadcast/ABC123',
+            bearerToken: 'token',
+            autoStart: false,
+            videoSettings: { outputWidth: 1280, outputHeight: 720, fpsNumerator: 60, fpsDenominator: 1 },
+        });
+
+        assert.equal(result.success, true);
+        assert.match(result.message, /previous stream stopped/);
+        // The stale stream must be down before anything it depends on changes.
+        assert.deepEqual(order, ['StopStream', 'SetStreamServiceSettings', 'SetVideoSettings']);
+    } finally {
+        globalThis.WebSocket = previousWebSocket;
+    }
+});
+
+test('configuration is abandoned when a stale OBS stream refuses to stop', async () => {
+    let serviceWritten = false;
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        const { requestType } = request;
+        if (requestType === 'GetStreamStatus') {
+            queueMicrotask(() => ws.respond(request, { outputActive: true, outputReconnecting: false }));
+            return;
+        }
+        if (requestType === 'StopStream') {
+            queueMicrotask(() => ws.respond(request, {}, { result: false, comment: 'output busy' }));
+            return;
+        }
+        if (requestType === 'SetStreamServiceSettings') serviceWritten = true;
+        queueMicrotask(() => ws.respond(request));
+    });
+    const previousWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = WebSocketImpl;
+    const { configureObsStream } = await obsWebSocketModule;
+
+    try {
+        const result = await configureObsStream({
+            whipUrl: 'http://127.0.0.1:8889/whip/broadcast/ABC123',
+            bearerToken: 'token',
+            autoStart: false,
+        });
+
+        assert.equal(result.success, false);
+        assert.match(result.message, /still streaming to a previous target.*output busy/);
+        assert.equal(serviceWritten, false);
+    } finally {
+        globalThis.WebSocket = previousWebSocket;
+    }
+});
+
+test('the OBS control channel stays identified and stops the stream synchronously', async () => {
+    const requests = [];
+    let socketRef = null;
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        socketRef = ws;
+        requests.push(request.requestType);
+        // Deliberately never respond: an unload-path stop cannot await one.
+    });
+    const { openObsControlChannel } = await obsWebSocketModule;
+
+    const channel = openObsControlChannel(connectionOptions(WebSocketImpl, { requestTimeoutMs: 10 }));
+    assert.deepEqual(await channel.ready, { success: true, message: 'OBS control channel open.' });
+
+    // The frame must be written in the same task, with no awaiting in between.
+    assert.equal(channel.stopStream(), true);
+    assert.deepEqual(requests, ['StopStream']);
+    assert.equal(socketRef.closed, false);
+
+    channel.close();
+    assert.equal(socketRef.closed, true);
+    assert.equal(channel.stopStream(), false);
+});
+
+test('the OBS control channel reports a connection that never identifies', async () => {
+    const WebSocketImpl = class {
+        constructor() {
+            queueMicrotask(() => this.onclose?.({ code: 4009 }));
+        }
+        send() {}
+        close() {}
+    };
+    const { openObsControlChannel } = await obsWebSocketModule;
+
+    const channel = openObsControlChannel(connectionOptions(WebSocketImpl));
+    const state = await channel.ready;
+
+    assert.equal(state.success, false);
+    assert.match(state.message, /authentication required/);
+    assert.equal(channel.stopStream(), false);
+});
+
 test('OBS configuration rollback restores mutations in reverse order', async () => {
     const calls = [];
     const sendRequest = async (requestType, requestData) => {

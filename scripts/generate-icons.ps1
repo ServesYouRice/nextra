@@ -316,36 +316,27 @@ function New-ComposedLogo {
         Fill-RoundRect -Graphics $graphics -Brush $accentBrush -X $eX -Y $barY -Width $eWidth -Height $barHeight -Radius $barRadius
     }
 
+    # The x is an ordinary letter: two full crossing strokes in the same ink as
+    # the rest of the word. Only the N carries the brand gradient.
     $xX = $eX + $eWidth + $wordGap
     $xStroke = [Math]::Max(4, [int][Math]::Round($WordHeight * (10 / 52)))
-    $accentPen = [System.Drawing.Pen]::new($accent, $xStroke)
-    $lightPen = [System.Drawing.Pen]::new($light, $xStroke)
-
-    foreach ($pen in @($accentPen, $lightPen)) {
-        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Flat
-        $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Flat
-        $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Miter
-    }
+    $xPen = [System.Drawing.Pen]::new($light, $xStroke)
+    $xPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $xPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $xPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
 
     $xLeft = $xX + ($xWidth * (8 / 56))
     $xRight = $xX + ($xWidth * (48 / 56))
     $xTop = $wordY + ($WordHeight * (7 / 52))
     $xBottom = $wordY + ($WordHeight * (45 / 52))
-    $xAccentEnd = $xX + ($xWidth * (24 / 56))
-    $xLightStart = $xX + ($xWidth * (32 / 56))
-    $xUpperJoinY = $wordY + ($WordHeight * (22.5 / 52))
-    $xLowerJoinY = $wordY + ($WordHeight * (29.5 / 52))
 
-    $graphics.DrawLine($accentPen, $xLeft, $xTop, $xAccentEnd, $xUpperJoinY)
-    $graphics.DrawLine($accentPen, $xLeft, $xBottom, $xAccentEnd, $xLowerJoinY)
-    $graphics.DrawLine($lightPen, $xLightStart, $xUpperJoinY, $xRight, $xTop)
-    $graphics.DrawLine($lightPen, $xLightStart, $xLowerJoinY, $xRight, $xBottom)
+    $graphics.DrawLine($xPen, $xLeft, $xTop, $xRight, $xBottom)
+    $graphics.DrawLine($xPen, $xRight, $xTop, $xLeft, $xBottom)
 
     $traX = $xX + $xWidth + $wordGap
     $graphics.DrawImage($Tra, [System.Drawing.Rectangle]::new($traX, $wordY, $traWidth, $traHeight))
 
-    $accentPen.Dispose()
-    $lightPen.Dispose()
+    $xPen.Dispose()
     $accentBrush.Dispose()
     $graphics.Dispose()
     return $bitmap

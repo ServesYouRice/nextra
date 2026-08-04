@@ -11,9 +11,7 @@ import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
 import { createLifecycleController } from './lib/lifecycleController.mjs';
 import { useViewerSessionController } from './hooks/useViewerSessionController';
 import UserErrorAlert from './components/UserErrorAlert';
-import CopyField from './components/CopyField';
 import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
-import { buildViewerRoomUrl } from './lib/roomLink.mjs';
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
@@ -1319,7 +1317,6 @@ export default function WatchView({ initialCode = '' }) {
                     ? 'OBS WebRTC mode active (lowest latency).'
                     : 'WebRTC mode active (lowest latency).'
                 : '';
-    const viewerRoomLink = joinedRoomCode ? buildViewerRoomUrl(window.location, joinedRoomCode) : '';
     return (
         <div className="view-container">
             <div className="view-header">
@@ -1514,17 +1511,6 @@ export default function WatchView({ initialCode = '' }) {
                             Leave Room
                         </button>
 
-                    </div>
-
-                    <div className="viewer-room-share">
-                        {!hostDisconnected && viewerRoomLink && (
-                            <CopyField label="Room Link" value={viewerRoomLink} display="Copy room link" />
-                        )}
-                        <p className="copy-hint room-lifetime-copy">
-                            {hostDisconnected
-                                ? 'This room link is retired. The host must create and share a new room link.'
-                                : 'This link works only while the host keeps this in-memory room active and the current Nextra server process remains running. Protected rooms still require their passphrase, which is never included in the link.'}
-                        </p>
                     </div>
 
                     {playbackStatus && <div className="media-status" role="status">{playbackStatus}</div>}

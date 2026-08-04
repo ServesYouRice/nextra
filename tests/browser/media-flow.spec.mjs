@@ -6,7 +6,6 @@ const execFileAsync = promisify(execFile);
 
 async function installDeterministicDisplayCapture(page) {
     await page.addInitScript(() => {
-        window.localStorage.setItem('nextra.hostGuideSeen', '1');
         const createCapture = () => {
             const canvas = document.createElement('canvas');
             canvas.width = 640;
@@ -229,18 +228,11 @@ test('a protected room asks for its passphrase as a focused second step and keep
     await passphraseInput.press('Enter');
     await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toBeVisible();
 
-    await expect(hostPage.getByText(/Room links work only while this room is active/)).toBeVisible();
-    const copyRoomLink = viewerPage.getByRole('button', { name: 'Copy room link' });
-    await copyRoomLink.click();
-    await expect(viewerPage.locator('.copy-field-feedback')).toHaveText('Copied!');
-    const copiedLink = await viewerPage.evaluate(() => navigator.clipboard.readText());
-    expect(copiedLink).toBe(`https://127.0.0.1:3210/#watch/${code}`);
-    expect(copiedLink).not.toContain('open sesame');
+    await expect(hostPage.getByText('Local Link')).toBeVisible();
 
     await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
     await confirmStopIfPrompted(hostPage);
-    await expect(viewerPage.getByText(/This room link is retired/)).toBeVisible();
-    await expect(copyRoomLink).toHaveCount(0);
+    await expect(viewerPage.getByText(/This room has ended/)).toBeVisible();
     await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
     await expect.poll(async () => (await request.get('/api/metrics')).json())
         .toMatchObject({ rooms: { active: 0 } });

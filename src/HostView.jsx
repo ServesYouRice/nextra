@@ -1,12 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback, useContext } from 'react';
 import { SocketContext } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
-import { configureObsStream, stopObsStream } from './lib/obsWebSocket';
+import { configureObsStream, openObsControlChannel, stopObsStream } from './lib/obsWebSocket';
 import { getAv1EncoderCandidates } from './lib/obsOutputModel.mjs';
 import CopyField from './components/CopyField';
 import StatusPill from './components/StatusPill';
 import Modal from './components/Modal';
-import FirstRunGuide from './components/FirstRunGuide';
 import HostDiagnostics from './components/HostDiagnostics';
 import UserErrorAlert from './components/UserErrorAlert';
 import RoomSharePanel from './components/RoomSharePanel';
@@ -464,9 +463,6 @@ export default function HostView() {
     const [saveByokTurnForSession, setSaveByokTurnForSession] = useState(() => storedByokTurnSession != null);
     const [showByokTurnModal, setShowByokTurnModal] = useState(false);
     const [hostToken, setHostToken] = useState('');
-    const [showFirstRun, setShowFirstRun] = useState(() => {
-        try { return window.localStorage.getItem('nextra.hostGuideSeen') !== '1'; } catch { return true; }
-    });
 
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -489,6 +485,8 @@ export default function HostView() {
     const hostUnmountTimerRef = useRef(null);
     const prevRelayViewerCountRef = useRef(0);
     const relayGenerationRef = useRef(0);
+    const obsPasswordRef = useRef('');
+    const obsControlChannelRef = useRef(null);
 
     const bitratePerViewer = viewerCount > 0 ? hostUploadMbps / viewerCount : hostUploadMbps;
     const bandwidthWarning = viewerCount >= 3 && bitratePerViewer < 7
@@ -562,8 +560,26 @@ export default function HostView() {
     }, [frameRate, obsApplySettings, obsAutoStart, obsAv1Mode, obsPassword, qualityProfile, obsTuningProfile]);
 
     useEffect(() => {
+        obsPasswordRef.current = obsPassword;
         persistObsPassword(obsPassword);
     }, [obsPassword]);
+
+    // Every teardown path routes through here so OBS is never left streaming at
+    // a room that is gone. Unload handlers cannot await, so this stays
+    // synchronous: the open control channel writes the stop frame immediately,
+    // and only the fallback (no channel — e.g. after a reload-recovery reclaim)
+    // pays for a fresh connect.
+    const stopObsIngest = useCallback(() => {
+        if (ingestModeRef.current !== 'obs') return;
+        const channel = obsControlChannelRef.current;
+        obsControlChannelRef.current = null;
+        if (channel) {
+            channel.stopStream();
+            channel.close();
+            return;
+        }
+        stopObsStream({ password: obsPasswordRef.current }).catch(() => {});
+    }, []);
 
     useEffect(() => {
         persistCapturePrefs({ qualityProfile, frameRate });
@@ -834,11 +850,15 @@ export default function HostView() {
     });
 
     const terminateHostSession = useCallback((reason) => {
+        // Covers a graceful server shutdown: the room-ended broadcast is the
+        // only warning OBS will ever get, since WHIP has no server-initiated
+        // stop and OBS keeps pushing RTP at a closed transport otherwise.
+        stopObsIngest();
         cleanup();
         setResumePending(false);
         setTerminalRoomEnded(true);
         setError(reason || 'This room ended. Create a new room to share again.');
-    }, [cleanup]);
+    }, [cleanup, stopObsIngest]);
 
     // Leaving #host unmounts this view, which stops the stream and retires the
     // room code, so hold the route change until the host confirms.
@@ -877,6 +897,7 @@ export default function HostView() {
                 });
                 return;
             }
+            stopObsIngest();
             socket.emit('host-stopped');
             cleanup();
         };
@@ -910,12 +931,13 @@ export default function HostView() {
             hostUnmountTimerRef.current = setTimeout(() => {
                 hostUnmountTimerRef.current = null;
                 if (!pageHidingRef.current) {
+                    stopObsIngest();
                     socket.emit('host-stopped');
                     cleanup();
                 }
             }, 0);
         };
-    }, [socket, cleanup]);
+    }, [socket, cleanup, stopObsIngest]);
 
     useEffect(() => {
         const onReconnect = async () => {
@@ -1348,6 +1370,17 @@ export default function HostView() {
                     if (obsAv1Mode && !result.success) {
                         throw new Error(result.message);
                     }
+                    // Open regardless of the configure result: a failed run can
+                    // still leave OBS streaming (rollback restarts it), and that
+                    // is exactly the stream that must not outlive this page.
+                    obsControlChannelRef.current?.close();
+                    const control = openObsControlChannel({ password: obsPasswordRef.current });
+                    obsControlChannelRef.current = control;
+                    control.ready.then((state) => {
+                        if (!state.success) {
+                            console.warn('[Nextra-Host] OBS control channel unavailable:', state.message);
+                        }
+                    });
                 }
             }
         } catch (err) {
@@ -1357,6 +1390,9 @@ export default function HostView() {
             } else {
                 setError(`Failed to start sharing: ${err.message}`);
             }
+            // A failure after OBS auto-configuration can leave OBS streaming at
+            // the room this catch is about to destroy.
+            stopObsIngest();
             socket.emit('host-stopped');
             cleanup();
         }
@@ -1367,6 +1403,7 @@ export default function HostView() {
         reloadRecoveryEnabled,
         ingestMode,
         cleanup,
+        stopObsIngest,
         selectedProfile,
         qualityProfile,
         frameRate,
@@ -1564,17 +1601,14 @@ export default function HostView() {
             setShowStopConfirm(true);
             return;
         }
-        // Stop OBS streaming if in OBS mode
-        if (ingestMode === 'obs') {
-            stopObsStream({ password: obsPassword }).catch(() => {});
-        }
+        stopObsIngest();
         // Drop the nav guard now rather than waiting for the isSharing effect, so
         // a navigation issued in this same task is not warned about a room that
         // is already gone.
         isSharingRef.current = false;
         socket.emit('host-stopped');
         cleanup();
-    }, [socket, cleanup, ingestMode, obsPassword, viewerCount, whepViewerCount]);
+    }, [socket, cleanup, stopObsIngest, viewerCount, whepViewerCount]);
 
     const handleObsTryAv1Change = useCallback((enabled) => {
         setObsTryAv1(enabled);
@@ -1608,10 +1642,6 @@ export default function HostView() {
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
         : '';
     const totalViewers = viewerCount + whepViewerCount;
-    const dismissFirstRun = useCallback(() => {
-        setShowFirstRun(false);
-        try { window.localStorage.setItem('nextra.hostGuideSeen', '1'); } catch { }
-    }, []);
 
     return (
         <div className="view-container">
@@ -1619,13 +1649,6 @@ export default function HostView() {
                 <h1>Host</h1>
                 <p className="subtitle">Share your screen with viewers</p>
             </div>
-
-            {showFirstRun && !isSharing && (
-                <FirstRunGuide
-                    onChoose={(mode) => { handleIngestModeChange(mode); dismissFirstRun(); }}
-                    onDismiss={dismissFirstRun}
-                />
-            )}
 
             <div className="host-layout">
                 <div className="host-video-section">

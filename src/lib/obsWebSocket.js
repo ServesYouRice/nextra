@@ -23,6 +23,8 @@ async function sha256Base64(input) {
 
 /**
  * Connect to OBS WebSocket, authenticate, and run a callback with the ws + a request helper.
+ * Pass a non-finite `transactionTimeoutMs` to hold the connection open until the
+ * callback settles it; see openObsControlChannel().
  * @returns {Promise<{ success: boolean, message: string }>}
  */
 export function withObsConnection(password, callback, {
@@ -152,12 +154,14 @@ export function withObsConnection(password, callback, {
                 if (identified) return;
                 identified = true;
                 clearTimeout(connectTimeout);
-                transactionTimeout = setTimeout(() => {
-                    done({
-                        success: false,
-                        message: `OBS setup timed out after ${transactionTimeoutMs}ms.`,
-                    });
-                }, transactionTimeoutMs);
+                if (Number.isFinite(transactionTimeoutMs)) {
+                    transactionTimeout = setTimeout(() => {
+                        done({
+                            success: false,
+                            message: `OBS setup timed out after ${transactionTimeoutMs}ms.`,
+                        });
+                    }, transactionTimeoutMs);
+                }
                 Promise.resolve()
                     .then(() => callback(sendRequest, done))
                     .catch((error) => done({
@@ -525,18 +529,23 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         const applied = [];
         const warnings = [];
 
-        if (autoStart) {
-            const stopResult = await stopActiveStream(sendRequest);
-            if (!stopResult.ok) {
-                await finish({
-                    success: false,
-                    message: `OBS is still streaming to a previous target and could not be stopped: ${stopResult.message}`,
-                });
-                return;
-            }
-            if (stopResult.stopped) {
-                applied.push('previous stream stopped');
-            }
+        // Always stop first, auto-start or not. Everything below rewrites the
+        // stream service, video, and encoder settings the running output is
+        // built on, and OBS can crash in obs.dll if those change underneath a
+        // live output. A stream that outlived its target — the server was
+        // killed, or the host page went away without a WHIP DELETE — is still
+        // "active" as far as OBS is concerned, so this is the common case on
+        // the second Start sharing rather than a rare one.
+        const stopResult = await stopActiveStream(sendRequest);
+        if (!stopResult.ok) {
+            await finish({
+                success: false,
+                message: `OBS is still streaming to a previous target and could not be stopped: ${stopResult.message}`,
+            });
+            return;
+        }
+        if (stopResult.stopped) {
+            applied.push('previous stream stopped');
         }
 
         const setResult = await sendRequest('SetStreamServiceSettings', {
@@ -769,6 +778,64 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             });
         }
     });
+}
+
+/**
+ * Hold an authenticated obs-websocket connection open for the whole OBS session
+ * so the stream can be stopped from a `pagehide` handler.
+ *
+ * stopObsStream() opens, identifies, and closes per call, and that handshake
+ * cannot complete while the page is unloading — which is why closing the host
+ * tab leaves OBS streaming into a room that no longer exists. An already
+ * identified channel only has to write one frame, and the browser flushes
+ * queued data before the close frame.
+ *
+ * @returns {{ ready: Promise<{success: boolean, message: string}>, stopStream: () => boolean, close: () => void }}
+ */
+export function openObsControlChannel({ password = '', ...options } = {}) {
+    let sendRequest = null;
+    let settleConnection = null;
+    let resolveReady = null;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+
+    const closed = withObsConnection(password, (send, done) => {
+        sendRequest = send;
+        settleConnection = done;
+        resolveReady({ success: true, message: 'OBS control channel open.' });
+        // Never settles on its own; close() ends the transaction.
+        return new Promise(() => {});
+    }, { ...options, transactionTimeoutMs: Infinity });
+
+    // A connection that fails or drops before identifying settles without ever
+    // running the callback, so surface that as the ready result instead.
+    closed.then((result) => {
+        sendRequest = null;
+        settleConnection = null;
+        resolveReady(result);
+    });
+
+    return {
+        ready,
+        /**
+         * Fire-and-forget: a caller on the unload path is gone before any
+         * response could arrive. Returns whether the frame was written.
+         */
+        stopStream() {
+            if (!sendRequest) return false;
+            try {
+                sendRequest('StopStream').catch(() => {});
+                return true;
+            } catch {
+                return false;
+            }
+        },
+        close() {
+            sendRequest = null;
+            const settle = settleConnection;
+            settleConnection = null;
+            settle?.({ success: true, message: 'OBS control channel closed.' });
+        },
+    };
 }
 
 /**

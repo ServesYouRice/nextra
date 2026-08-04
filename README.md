@@ -387,6 +387,7 @@ Operational security:
 | Public viewers cannot join an AV1 room | Configure `PUBLIC_IP` and a non-loopback `RTC_LISTEN_IP`, plus suitable ICE/TURN connectivity, or use H.264 relay mode. |
 | Viewer browser says AV1 is unsupported | Its loaded WebRTC receive capabilities do not include `video/AV1`; use a compatible browser/device or switch the host back to H.264. |
 | OBS auto-config fails | Make sure OBS is running and WebSocket is enabled in **Tools > WebSocket Server Settings**. H.264 rooms can fall back to manual WHIP; AV1 rooms cannot. |
+| OBS keeps streaming after the room ends | WHIP has no server-initiated stop, so Nextra stops OBS over obs-websocket when you stop sharing, close the host page, or the server shuts down gracefully. A killed or crashed server cannot signal anything; OBS keeps sending until you stop it. The next **Start sharing** stops any stream still running before it touches OBS settings, so a stale stream will not corrupt the new one. |
 | Audio missing | Ensure OBS is capturing audio in the Audio Mixer. For browser capture, use Chrome or Edge. |
 | Buffering or stalls | Lower the quality profile or frame rate. H.264 rooms can use relay; AV1 rooms need a stable TURN-backed WebRTC path. |
 
