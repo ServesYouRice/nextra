@@ -36,6 +36,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Actions runs `shell: powershell` with $ErrorActionPreference='stop', and
+          # PowerShell 5.1 turns a redirected native stderr into a NativeCommandError.
+          # `gh release view` writing "release not found" is the normal signal that
+          # this tag needs a new release, so it must not abort the step.
+          $ErrorActionPreference = 'Continue'
           $tag = $env:GITHUB_REF_NAME
           $titleVersion = $tag -replace '^v', ''
           $notes = @"
@@ -46,11 +51,13 @@ jobs:
           other browsers are not tested. Corresponding GPL-3.0 source is the $tag tag.
           "@
 
-          gh release view $tag *> $null
+          gh release view $tag | Out-Null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag Nextra.exe Nextra.exe.sha256 --clobber
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             gh release edit $tag --title "Nextra $titleVersion" --notes $notes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
             gh release create $tag Nextra.exe Nextra.exe.sha256 --verify-tag --title "Nextra $titleVersion" --notes $notes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
