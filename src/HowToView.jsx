@@ -201,7 +201,7 @@ export default function HowToView() {
                 <strong>1. Join</strong>
                 <p>
                     Open the link the host shared, or go to <strong>Watch</strong> and enter the room code.
-                    No install is required. After joining, viewers can copy the current room link; a protected room&apos;s passphrase is never included.
+                    No install is required.
                 </p>
             </div>
 
@@ -291,7 +291,7 @@ export default function HowToView() {
             </p>
 
             <div className="article-cta">
-                <a href="#host" className="btn btn-primary">Start a stream now -&gt;</a>
+                <a href="#host" className="btn btn-primary"><span className="btn-brand-label">Start a stream now</span></a>
             </div>
         </div>
     );

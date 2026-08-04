@@ -2,7 +2,6 @@ import { test, expect } from '@playwright/test';
 
 async function installDeterministicDisplayCapture(page) {
     await page.addInitScript(() => {
-        window.localStorage.setItem('nextra.hostGuideSeen', '1');
         Object.defineProperty(navigator, 'mediaDevices', {
             configurable: true,
             value: {

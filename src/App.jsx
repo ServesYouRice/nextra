@@ -172,13 +172,13 @@ function Landing() {
                     <a href="#host" className="card card-host">
                         <h2>Host</h2>
                         <p>Share your screen with viewers in real-time</p>
-                        <span className="card-badge">Start Sharing -&gt;</span>
+                        <span className="card-badge">Start Sharing</span>
                     </a>
 
                     <a href="#watch" className="card card-watch">
                         <h2>Watch</h2>
                         <p>Join a room and watch a live stream</p>
-                        <span className="card-badge">Join Room -&gt;</span>
+                        <span className="card-badge">Join Room</span>
                     </a>
                 </div>
 

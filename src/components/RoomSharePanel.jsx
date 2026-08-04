@@ -17,9 +17,6 @@ export default function RoomSharePanel({
             </div>
             {!showPublicLink && <span className="copy-hint">{publicLinkHint}</span>}
             {whepPlaybackUrl && <span className="copy-hint">The WHEP link plays in GStreamer and other WHEP-compatible players.</span>}
-            <span className="copy-hint room-lifetime-copy">
-                Room links work only while this room is active in the current Nextra server process. Stopping sharing or restarting Nextra retires them.
-            </span>
         </div>
     );
 }

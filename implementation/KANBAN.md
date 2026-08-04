@@ -8,8 +8,8 @@ Earlier audits and superseded plans remain historical evidence under
 
 ## Current status
 
-T18 is done. T17 is the only remaining card; it is blocked on an external
-network/TURN setup, not on a pending user decision.
+T18 and T19 are done. T17 is the only remaining card; it is blocked on an
+external network/TURN setup, not on a pending user decision.
 
 ### In progress
 
@@ -24,6 +24,48 @@ _None._
 _None._
 
 ### Done
+
+#### T19 — Stop OBS when the room it streams to goes away
+
+User-reported: killing the server or closing the host page mid-stream leaves OBS
+streaming, and the next session misbehaves.
+
+WHIP is client-driven: a session ends only when OBS sends
+`DELETE /whip/broadcast/:resourceId`, and OBS ignores ICE/DTLS teardown. The
+server's only leave-detector is `dtlsstatechange` (`lib/whipRoutes.js`), which a
+SIGKILL never triggers. obs-websocket is the only channel that can stop OBS, and
+it was wired to exactly one call site: the Stop sharing button.
+
+Two changes, both in the browser:
+
+- `src/lib/obsWebSocket.js`: `stopActiveStream()` moved out of the `if (autoStart)`
+  block in `configureObsStream()`. `SetStreamServiceSettings`, `SetVideoSettings`,
+  `SetProfileParameter`, and `SetOutputSettings` all ran unconditionally below it,
+  so with auto-start off they rewrote settings underneath a live output — the
+  obs.dll video-pipeline race already noted in that file. A stream that outlived
+  its target is still `outputActive`, making this the common path on the second
+  Start sharing.
+- `openObsControlChannel()` holds one identified obs-websocket connection for the
+  session. `stopObsStream()` opens, identifies, and closes per call, and that
+  handshake cannot finish during unload, so unload paths could not use it. The
+  channel writes `StopStream` synchronously; the browser flushes queued data
+  before the close frame. `withObsConnection()` gained a non-finite
+  `transactionTimeoutMs` opt-out to support it.
+- `src/HostView.jsx`: `stopObsIngest()` prefers the open channel and falls back to
+  `stopObsStream()` when there is none (e.g. after a reload-recovery reclaim). It
+  runs on pagehide, non-pagehide unmount, the start-sharing failure path, Stop
+  sharing, and `terminateHostSession` — which covers a graceful server shutdown,
+  since the `room-ended` broadcast is the only warning OBS can get.
+
+Reload recovery is deliberately untouched: it keeps the room alive across
+pagehide, so OBS should keep streaming. A killed or crashed server still cannot
+signal anything; the reconfigure fix is what stops that from breaking the next
+session.
+
+Checks: `npm run lint`, `npm run typecheck`, `npm test` (197 pass, 4 new in
+`tests/obsWebSocket.test.js`), `npm run build`. The 4 new tests were confirmed
+failing against the pre-change `src/lib/obsWebSocket.js` via `git stash`.
+`README.md` troubleshooting table gained a row for the surviving gap.
 
 #### T18 — Responsive layout pass across all views
 
