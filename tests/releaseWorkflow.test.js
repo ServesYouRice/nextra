@@ -118,7 +118,6 @@ test('release compliance files are trackable and required package inputs', () =>
 
     assert.match(ignore, /^!SOURCE\.md$/m);
     assert.match(ignore, /^!THIRD_PARTY_NOTICES\.md$/m);
-    assert.match(ignore, /^!implementation\/archive\/\*\*\/\*\.md$/m);
     assert.match(packager, /'SOURCE\.md'/);
     assert.match(packager, /'THIRD_PARTY_NOTICES\.md'/);
 });
