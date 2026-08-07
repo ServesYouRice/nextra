@@ -71,6 +71,47 @@ needs a user decision before it becomes Ready.
 
 ### Done
 
+#### T26 — Social card uses the hero lockup
+
+User-reported: the Discord link preview showed a rounded app-icon tile followed
+by the full word "nextra", which is not the lockup the site uses.
+
+Goal: make the `og:image` card carry the same lockup as the hero.
+Source/tests: `index.html`, `public/brand/nextra-social-card.png`,
+`src/components/BrandLogo.jsx`.
+
+The site lockup reads the mark's gradient "N" as the word's first letter and
+sets only "extra" as type — `BrandLogo.jsx` composes `.brand-logo-mark` plus
+`nextra-wordmark.png` ("extra" alone), and `nextra-primary-logo.png` is the
+same lockup as a single flattened asset. The old card used neither: it paired
+the app-icon tile with "nextra" spelled out in a heavier third typeface, so the
+N appeared twice and the letterforms did not match the wordmark.
+
+Fixed by regenerating the card from `nextra-primary-logo.png`, the lockup the
+brand already had, rather than by re-typesetting anything. `og:image` and
+`twitter:image` cache-busters went `?v=unionhot2` → `?v=lockup1`; without that
+Discord and Twitter keep serving the cached old card.
+
+`scripts/generate-social-card.js` (new, `npm run brand:social-card`) renders the
+1200x630 artboard through Playwright's chromium — already a devDependency, so
+no new dependency — and embeds the lockup as a data URI so the render does not
+depend on a `file://` fetch. It is not wired into `build` or `release:prep`: the
+card is committed art, and regenerating it on every build would churn a 282 KB
+binary. Palette values are copied from `src/index.css` rather than parsed out of
+it, since a silent parse miss would ship a wrong colour without failing
+anything.
+
+Checks: `npm run brand:social-card` — wrote a 1200x630 PNG, 282,041 bytes, and
+the rendered lockup was visually confirmed against the hero as gradient N +
+"extra". `npm run build` — dist copies the new card at 1200x630 and both meta
+tags carry `?v=lockup1`. `npm run lint` — pass. `npm test` — 203 tests, 202
+pass, 0 fail, 1 pre-existing skip. `npm run oss:check` and
+`npm run evaluate:packaging` — pass.
+
+Not verified: no test asserts anything about brand assets, before or after, so
+nothing guards this against future drift; and the real Discord/Twitter preview
+cannot be confirmed until the card is served from a public URL.
+
 #### T25 — Drop the stale archive assertion blocking the release gate
 
 Goal: restore a passing `npm run release:prep` by reconciling
