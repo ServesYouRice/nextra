@@ -34,6 +34,7 @@
     "benchmark:runtime": "node scripts/benchmark-runtime.js",
     "churn:runtime": "node scripts/churn-runtime.js",
     "evaluate:packaging": "node scripts/evaluate-packaging.js",
+    "brand:social-card": "node scripts/generate-social-card.js",
     "release:prep": "npm run lint && npm run typecheck && npm test && npm run test:coverage && npm run build && npm run evaluate:packaging && npm run oss:check && npm run audit:prod"
   },
   "dependencies": {
