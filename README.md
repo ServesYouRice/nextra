@@ -20,7 +20,7 @@ TL;DR: there are 2 host modes:
    - H.264 is the stable default path and keeps relay fallback available.
    - AV1 is available when OBS can set and verify an AV1 encoder, but it is WebRTC-only and requires BYOK TURN.
 
-You can grab `Nextra.exe` from [GitHub Releases](../../releases), run it, and start sharing. Install OBS only if you want the OBS workflow.
+You can grab a packaged build (Windows x64 or macOS arm64) from [GitHub Releases](../../releases), run it, and start sharing. Install OBS only if you want the OBS workflow.
 
 ---
 
@@ -43,10 +43,20 @@ You can grab `Nextra.exe` from [GitHub Releases](../../releases), run it, and st
 
 ### Host (Packaged)
 
-1. Download `Nextra.exe` from [GitHub Releases](../../releases).
-2. Run it and open `http://127.0.0.1:3000/#host`.
-3. Click **Start Sharing** for browser capture, or enable **Use OBS (WHIP ingest)** first if you want OBS mode.
-4. Send viewers the **Public Link** for internet viewing or the **Local Link** / room code for LAN viewing.
+Nextra ships packaged builds for Windows x64 (`Nextra.exe`) and macOS arm64
+(`Nextra-macos-arm64`). Both are unsigned and non-notarized (see
+[Operations and supported scale](#operations-and-supported-scale)).
+
+1. Download the build for your platform from [GitHub Releases](../../releases).
+2. **macOS only:** the download arrives without the executable bit set and under
+   Gatekeeper quarantine, so clear both before the first run:
+   ```bash
+   chmod +x ./Nextra-macos-arm64
+   xattr -dr com.apple.quarantine ./Nextra-macos-arm64
+   ```
+3. Run it and open `http://127.0.0.1:3000/#host`.
+4. Click **Start Sharing** for browser capture, or enable **Use OBS (WHIP ingest)** first if you want OBS mode.
+5. Send viewers the **Public Link** for internet viewing or the **Local Link** / room code for LAN viewing.
 
 ### Host (From Source)
 
@@ -411,23 +421,28 @@ Run each profile on the deployment hardware, keep the complete JSON output with 
 
 For a loopback-only test server using Nextra's self-signed local HTTPS certificate, `--allow-insecure-tls` disables Socket.IO certificate verification for that benchmark run; Node's HTTPS fetches also require `NODE_TLS_REJECT_UNAUTHORIZED=0`. Never use either setting against a remote or untrusted host. The JSON result records when Socket.IO TLS verification was disabled.
 
-Production supervision means exactly one replica; a restart ends all in-memory rooms. Keep the verified `caxa` Windows package until it fails its gate or a supported platform change requires a replacement.
+Production supervision means exactly one replica; a restart ends all in-memory rooms. Keep the verified `caxa` packaging path for Windows x64 and macOS arm64 until either fails its gate or a supported platform change requires a replacement.
 
 - `/healthz` is an unauthenticated process-liveness check.
 - `/readyz` returns 200 only when every component required by the active profile is ready: HTTP, Socket.IO, the mediasoup worker, the production SPA bundle, and WHIP when enabled. Development marks the Vite-served SPA as external; disabled WHIP and optional FFmpeg/NVENC fallback do not block readiness. A 503 response includes each component's required flag, state, and WHIP startup error when present.
 - An uncaught exception or mediasoup worker death terminates/restarts the process. Run production deployments under a supervisor such as Windows Service management, systemd, or a container restart policy.
 - Repeated FFmpeg failure is isolated to its room. Tunnel failures use bounded exponential restart backoff and do not stop LAN service.
 
-Version tags with or without the historical `v` prefix run the complete Windows CI
-gate, package the executable, generate a SHA-256 checksum, smoke-test the exact
-unsigned artifact, and publish or refresh its GitHub Release automatically. The
-release notes identify the unsigned status, tested browser scope, checksum, and
-tagged corresponding source. Pull-request CI runs the same packaging and smoke path
-without publishing it. Windows may warn when launching an unsigned executable. The
-packaged smoke replaces the mediasoup worker, waits for the replacement process,
-proves a short decoded-frame Host/view flow in Chromium, shuts the app down, and
-fails on leftover caxa extraction or cloudflared processes.
-| App closes immediately | Check `%LOCALAPPDATA%\\Nextra\\logs\\startup-latest.log`. |
+Version tags with or without the historical `v` prefix run the complete Windows and
+macOS CI gates, package each platform's executable, generate a SHA-256 checksum for
+each, smoke-test the exact unsigned artifacts, and publish or refresh a single
+GitHub Release with all four files (both artifacts and both checksums)
+automatically. The release notes identify the unsigned status per platform, tested
+browser scope, checksum instructions, and tagged corresponding source.
+Pull-request CI runs the same packaging and smoke path on both platforms without
+publishing. Windows may warn when launching an unsigned executable; macOS
+Gatekeeper quarantines the downloaded artifact until you clear the quarantine
+attribute (see Quick Start above). The packaged smoke replaces the mediasoup
+worker, waits for the replacement process, proves a short decoded-frame Host/view
+flow in Chromium, shuts the app down, and fails on leftover caxa extraction or
+cloudflared processes.
+| App closes immediately (Windows) | Check `%LOCALAPPDATA%\\Nextra\\logs\\startup-latest.log`. |
+| App closes immediately (macOS) | Check `$TMPDIR/Nextra/logs/startup-latest.log` (run `echo $TMPDIR` in Terminal for the exact path). |
 | Poor quality | Lower resolution/framerate, use a wired connection, and reduce host desktop load. |
 
 ---
@@ -462,10 +477,12 @@ npm start            # run the production server (serves dist/; build first)
 npm run lint         # lint code
 npm test             # unit and real server/subprocess integration tests
 npm run test:e2e     # Chromium decoded-frame and browser lifecycle tests
-npm run package      # build Nextra.exe + sha256
+npm run package      # build the host platform's packaged executable + sha256
 ```
 
-`npm run package` builds `Nextra.exe`, writes `Nextra.exe.sha256`, and bundles runtime dependencies.
+`npm run package` builds the packaged executable for the platform it runs on
+(`Nextra.exe` on Windows, `Nextra-macos-arm64` on macOS), writes its matching
+`.sha256` checksum, and bundles runtime dependencies.
 
 Remote Play/Pause control uses the native Windows media-key fallback by default and
 `xdotool` on Linux. The dynamically detected `@nut-tree-fork/nut-js` integration is
@@ -473,6 +490,8 @@ optional and is not part of the supported default installation.
 
 If `cloudflared` is not available locally, packaging downloads the exact immutable
 release declared in `scripts/cloudflared-manifest.json`. Packaging rejects the
-asset unless both its pinned SHA-256 and Authenticode signature validate.
+asset unless its pinned SHA-256 matches; on Windows it also requires a valid
+Authenticode signature (macOS binaries have no equivalent check, consistent with
+D09's unsigned/non-notarized scope).
 
-> Note: do not commit `Nextra.exe` to git. Distribute it via [GitHub Releases](../../releases).
+> Note: do not commit packaged executables (`Nextra.exe`, `Nextra-macos-arm64`) to git. Distribute them via [GitHub Releases](../../releases).

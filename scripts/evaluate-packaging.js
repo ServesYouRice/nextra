@@ -22,10 +22,16 @@ const nativeRuntimeDependencies = Object.keys(pkg.dependencies || {}).filter((na
 const evaluation = {
     generatedAt: new Date().toISOString(),
     current: {
-        format: 'Windows executable',
+        format: ['Windows x64 executable', 'macOS arm64 executable'],
         packager: 'caxa',
         version: caxa?.version || null,
-        verifiedBy: ['scripts/package-app.js', 'scripts/smoke-packaged.ps1', 'Windows CI', 'tagged artifact smoke test'],
+        verifiedBy: [
+            'scripts/package-app.js',
+            'scripts/smoke-packaged.js',
+            'Windows CI',
+            'macOS CI',
+            'tagged artifact smoke test',
+        ],
         status: missingInputs.length === 0 && caxa?.version ? 'retain-verified-path' : 'invalid',
     },
     constraints: {

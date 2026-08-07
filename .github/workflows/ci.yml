@@ -44,4 +44,20 @@ jobs:
       - run: npx playwright install chromium
       - name: Smoke-test packaged executable
         shell: powershell
-        run: .\scripts\smoke-packaged.ps1
+        run: node scripts/smoke-packaged.js
+
+  macos-package:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run release:prep
+      - run: npm run package:artifact
+      - run: npx playwright install chromium
+      - name: Smoke-test packaged executable
+        shell: bash
+        run: node scripts/smoke-packaged.js
