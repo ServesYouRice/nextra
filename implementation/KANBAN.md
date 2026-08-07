@@ -28,27 +28,20 @@ unusable for caxa packaging. T23 added a `macos-package` CI job alongside
 `scripts/evaluate-packaging.js` at both platforms, and corrected every
 Windows-only claim in `README.md`.
 
-Two outward-facing steps remain and were deliberately left to the user rather
-than run by any card or the controller: pushing a branch so `macos-package`
-and the rest of `ci.yml` actually run on GitHub's `macos-14` runner (only
-then can `scripts/smoke-packaged.ps1` be deleted, per T22's own sequencing
-rule — it still exists alongside `scripts/smoke-packaged.js` right now), and
-pushing a version tag to exercise the real `release.yml` publish path. Every
-check below that point is local-only and independently re-verified by the
-controller; nothing has run on GitHub's infrastructure yet. Nothing in this
-work is committed — it sits uncommitted in the working tree alongside T21's
-changes, exactly as T21 already did.
+T20–T23 were committed as `db28627` and pushed to `origin/dev` on 2026-08-07 at
+the user's request; the branch is named `dev` because `ci.yml` triggers on push
+only for `main` and `dev`. T25 then fixed the stale `.gitignore` assertion that
+would have aborted every CI job at its `npm run release:prep` step before
+packaging ran. CI results have not been read back into this board yet.
 
-One pre-existing failure is open across the whole board, confirmed by T20's
-2026-08-07 baseline run: `npm test` fails `tests/releaseWorkflow.test.js`
-"release compliance files are trackable and required package inputs", which
-asserts `.gitignore` contains `!implementation/archive/**/*.md` while
-`.gitignore` has `!archive/**/*.md`. Commit `403bb09` pruned the archive tree
-without updating the assertion. This fails `npm run release:prep` on every
-platform and is unrelated to macOS; it needs its own card. T22 and T23 both saw
-this same failure in their own `npm test` / `node --test
-tests/releaseWorkflow.test.js` runs — confirmed baseline both times, not a
-regression either introduced.
+One outward-facing step remains and is deliberately left to the user: pushing a
+version tag to exercise the real `release.yml` publish path. Reading the `dev`
+CI run is also still outstanding — until `windows-package` passes against
+`scripts/smoke-packaged.js`, `scripts/smoke-packaged.ps1` cannot be deleted per
+T22's own sequencing rule, and both files still exist right now.
+
+No known failure is open across the board. `npm run release:prep` passes all
+eight gates on darwin-arm64 as of T25.
 
 T18 and T19 are done. T17 remains blocked on an external network/TURN setup, not
 on a pending user decision.
@@ -77,6 +70,41 @@ which is a product decision about prompting, not a mechanical port. Not started;
 needs a user decision before it becomes Ready.
 
 ### Done
+
+#### T25 — Drop the stale archive assertion blocking the release gate
+
+Goal: restore a passing `npm run release:prep` by reconciling
+`tests/releaseWorkflow.test.js` with the archive tree commit `403bb09` pruned.
+Source/tests: `.gitignore`, `tests/releaseWorkflow.test.js`.
+
+The failure T20 confirmed as baseline, and T22/T23 each re-observed, was a
+stale assertion on both sides rather than a path mismatch to reconcile:
+`tests/releaseWorkflow.test.js` line 121 asserted `.gitignore` contains
+`!implementation/archive/**/*.md`, while `.gitignore` carried `!archive/` and
+`!archive/**/*.md`. Neither `archive/` nor `implementation/archive/` exists
+anywhere in the tree — `403bb09` removed the directory outright — so the two
+un-ignore rules and the assertion all referenced a path that is gone. Fix is
+deletion on both sides, not repointing either at the other.
+
+The assertion was removed rather than rewritten because the test it lives in,
+"release compliance files are trackable and required package inputs", still
+covers the actual compliance files through its four remaining assertions on
+`SOURCE.md` and `THIRD_PARTY_NOTICES.md`. The deleted line covered historical
+audit evidence that is no longer part of the release. No behavior lost
+coverage.
+
+This became load-bearing rather than cosmetic once T23's work was pushed: all
+three packaging jobs run `npm run release:prep` before `npm run
+package:artifact`, so the failure aborted `verify`, `windows-package`, and
+`macos-package` at the gate and none reached packaging or the smoke test.
+
+Checks: `node --test tests/releaseWorkflow.test.js` — 9 tests, 9 pass, 0 fail
+(was 8 pass / 1 fail immediately before the edit, on the same machine).
+`npm run release:prep` — all eight gates pass, the first clean full-gate run
+recorded on this board; `npm test` within it reports 203 tests, 202 pass,
+0 fail, 1 skip (pre-existing, FFmpeg absent on this machine).
+`git ls-files -i -c --exclude-standard` — empty, confirming the two removed
+un-ignore rules left no tracked file newly ignored.
 
 #### T23 — macOS CI, release artifact, and support documentation
 

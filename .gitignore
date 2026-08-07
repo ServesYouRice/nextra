@@ -52,8 +52,6 @@ cloudflared
 !CLAUDE.md
 !SOURCE.md
 !THIRD_PARTY_NOTICES.md
-!archive/
-!archive/**/*.md
 !implementation/
 !implementation/*.md
 !implementation/tasks/**/*.md
