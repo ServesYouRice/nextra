@@ -31,6 +31,8 @@ const forbiddenTracked = new Set([
     'certs/server.key',
     'certs/server.crt',
     'Nextra.exe',
+    'Nextra-macos-arm64',
+    'Nextra-macos-x64',
     'cloudflared.exe',
     'cloudflared',
 ]);
@@ -39,6 +41,7 @@ const forbiddenPathRegexes = [
     /^\.env(?:\..+)?$/i,
     /(?:^|\/)certs\/.+\.(?:key|crt|pem|p12|pfx)$/i,
     /(?:^|\/)(?:Nextra|cloudflared)\.exe$/i,
+    /(?:^|\/)Nextra-macos-(?:arm64|x64)$/i,
     /(?:^|\/)cloudflared$/i,
 ];
 

@@ -25,6 +25,7 @@ certs/
 *.cer
 Nextra.exe
 Nextra.exe.sha256
+Nextra-macos-*
 cloudflared.exe
 cloudflared
 .caxa-stage/
@@ -55,3 +56,4 @@ cloudflared
 !archive/**/*.md
 !implementation/
 !implementation/*.md
+!implementation/tasks/**/*.md

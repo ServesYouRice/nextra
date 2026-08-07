@@ -1,4 +1,4 @@
-name: Windows Release
+name: Release
 
 on:
   push:
@@ -9,7 +9,13 @@ permissions:
 
 jobs:
   package-smoke:
-    runs-on: windows-2022
+    # fail-fast: false so a failure on one platform doesn't cancel the other leg
+    # mid-run -- the publish job below still requires every leg to succeed.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-14]
+    runs-on: ${{ matrix.os }}
     env:
       RELEASE_VERSION: ${{ github.ref_name }}
     steps:
@@ -20,44 +26,75 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run package
-      - name: Smoke-test packaged artifact
+      - name: Smoke-test packaged artifact (Windows)
+        if: runner.os == 'Windows'
         shell: powershell
         run: |
           npx playwright install chromium
-          .\scripts\smoke-packaged.ps1
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          node scripts/smoke-packaged.js
+      - name: Smoke-test packaged artifact (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          npx playwright install chromium
+          node scripts/smoke-packaged.js
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Nextra-${{ github.ref_name }}-windows
           path: |
             Nextra.exe
             Nextra.exe.sha256
+      - name: Upload macOS artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Nextra-${{ github.ref_name }}-macos
+          path: |
+            Nextra-macos-arm64
+            Nextra-macos-arm64.sha256
+
+  # A single job so gh release view/create/upload/edit runs exactly once. Two
+  # matrix legs both calling gh release create would race: both can observe
+  # "not found" and both try to create the release, and the loser either fails
+  # or clobbers the winner's notes. Downloading both build artifacts here and
+  # publishing once removes that race instead of papering over it with retries.
+  publish:
+    needs: package-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: Nextra-${{ github.ref_name }}-*
+          merge-multiple: true
       - name: Publish GitHub Release
-        shell: powershell
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Actions runs `shell: powershell` with $ErrorActionPreference='stop', and
-          # PowerShell 5.1 turns a redirected native stderr into a NativeCommandError.
-          # `gh release view` writing "release not found" is the normal signal that
-          # this tag needs a new release, so it must not abort the step.
-          $ErrorActionPreference = 'Continue'
-          $tag = $env:GITHUB_REF_NAME
-          $titleVersion = $tag -replace '^v', ''
-          $notes = @"
-          This is an unsigned Windows build. Windows may show an unsigned-app warning.
+          set -euo pipefail
+          # "gh release view" exiting non-zero just means this tag has no
+          # release yet -- the normal signal to create one, not a script error.
+          tag="${GITHUB_REF_NAME}"
+          title_version="${tag#v}"
+          notes="$(cat <<NOTES
+          This release is unsigned and not notarized on both platforms. Windows may show
+          an unsigned-app warning. macOS Gatekeeper quarantines the download; clear it
+          before the first run:
 
-          Verify Nextra.exe with the attached Nextra.exe.sha256 before running it.
+              xattr -dr com.apple.quarantine ./Nextra-macos-arm64
+
+          Verify each artifact against its matching .sha256 checksum before running it.
           Desktop Chrome/Edge hosts and viewers plus mobile Chrome viewers are tested;
           other browsers are not tested. Corresponding GPL-3.0 source is the $tag tag.
-          "@
+          NOTES
+          )"
 
-          gh release view $tag | Out-Null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag Nextra.exe Nextra.exe.sha256 --clobber
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            gh release edit $tag --title "Nextra $titleVersion" --notes $notes
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } else {
-            gh release create $tag Nextra.exe Nextra.exe.sha256 --verify-tag --title "Nextra $titleVersion" --notes $notes
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" Nextra.exe Nextra.exe.sha256 Nextra-macos-arm64 Nextra-macos-arm64.sha256 --clobber
+            gh release edit "$tag" --title "Nextra ${title_version}" --notes "$notes"
+          else
+            gh release create "$tag" Nextra.exe Nextra.exe.sha256 Nextra-macos-arm64 Nextra-macos-arm64.sha256 --verify-tag --title "Nextra ${title_version}" --notes "$notes"
+          fi

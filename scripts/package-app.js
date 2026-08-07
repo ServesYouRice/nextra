@@ -8,8 +8,15 @@ const cloudflaredManifest = require('./cloudflared-manifest.json');
 
 const projectRoot = path.resolve(__dirname, '..');
 const stageDir = path.join(projectRoot, '.caxa-stage');
-const outputExe = path.join(projectRoot, 'Nextra.exe');
-const outputSha256 = path.join(projectRoot, 'Nextra.exe.sha256');
+// macOS carries the architecture in the name so an arm64 and an x64 artifact can
+// sit in the same GitHub Release without colliding; Windows keeps the name it has
+// always published under.
+const outputExe = process.platform === 'win32'
+    ? path.join(projectRoot, 'Nextra.exe')
+    : path.join(projectRoot, `Nextra-macos-${process.arch}`);
+const outputSha256 = process.platform === 'win32'
+    ? path.join(projectRoot, 'Nextra.exe.sha256')
+    : path.join(projectRoot, `Nextra-macos-${process.arch}.sha256`);
 const appIcon = path.join(projectRoot, 'public', 'app.ico');
 // Bump when the startup file layout changes; caxa trusts any existing cache for an identifier.
 const caxaCacheSchema = 'startup-runtime-preload-v2';
@@ -101,12 +108,23 @@ function findCloudflaredOnPath() {
     return lines[0] || '';
 }
 
-function getCloudflaredAssetName() {
-    if (process.platform !== 'win32') {
-        throw new Error('Automatic cloudflared download is currently implemented for Windows packaging only.');
+function getCloudflaredAssetName(platform = process.platform, arch = process.arch) {
+    if (platform === 'darwin') {
+        switch (arch) {
+            case 'arm64':
+                return 'cloudflared-darwin-arm64.tgz';
+            case 'x64':
+                return 'cloudflared-darwin-amd64.tgz';
+            default:
+                throw new Error(`Unsupported macOS architecture for cloudflared download: ${arch}`);
+        }
     }
 
-    switch (process.arch) {
+    if (platform !== 'win32') {
+        throw new Error('Automatic cloudflared download is currently implemented for Windows and macOS packaging only.');
+    }
+
+    switch (arch) {
         case 'x64':
             return 'cloudflared-windows-amd64.exe';
         case 'arm64':
@@ -114,7 +132,7 @@ function getCloudflaredAssetName() {
         case 'ia32':
             return 'cloudflared-windows-386.exe';
         default:
-            throw new Error(`Unsupported Windows architecture for cloudflared download: ${process.arch}`);
+            throw new Error(`Unsupported Windows architecture for cloudflared download: ${arch}`);
     }
 }
 
@@ -365,6 +383,32 @@ function copyCloudflaredToStage(sourcePath, stageCloudflaredPath, stageLibCloudf
     fs.cpSync(stageCloudflaredPath, stageBinCloudflaredPath, { recursive: false });
 }
 
+// cloudflared publishes macOS as a gzipped tarball holding a single `cloudflared`
+// entry, while Windows publishes a bare .exe. The pinned digest therefore covers
+// the archive on macOS, and extraction is the first step that does more than hash
+// the downloaded bytes -- so it must never run before that digest has matched.
+// bsdtar at /usr/bin/tar ships with macOS; a tar library would be a new dependency.
+function extractCloudflaredFromArchive(archivePath, destinationDir) {
+    const result = spawnSync('/usr/bin/tar', ['-xzf', archivePath, '-C', destinationDir, 'cloudflared'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    if (result.error || result.status !== 0) {
+        const detail = result.error?.message || (result.stderr || '').trim() || 'no error output';
+        throw new Error(`Failed to extract ${path.basename(archivePath)} (exit ${result.status ?? 'unknown'}; ${detail})`);
+    }
+
+    const extractedPath = path.join(destinationDir, 'cloudflared');
+    if (!fs.statSync(extractedPath, { throwIfNoEntry: false })?.isFile()) {
+        throw new Error(`Archive ${path.basename(archivePath)} did not contain a cloudflared binary.`);
+    }
+
+    fs.chmodSync(extractedPath, 0o755);
+    fs.accessSync(extractedPath, fs.constants.X_OK);
+    return extractedPath;
+}
+
 async function bundleCloudflared() {
     const bundledName = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
     const stageCloudflaredPath = path.join(stageDir, bundledName);
@@ -419,6 +463,34 @@ async function bundleCloudflared() {
 
     const downloadUrl = `https://github.com/cloudflare/cloudflared/releases/download/${cloudflaredManifest.version}/${assetName}`;
     console.log(`Downloading cloudflared for packaging: ${downloadUrl}`);
+
+    if (assetName.endsWith('.tgz')) {
+        // Download and unpack inside a scratch directory that is removed either way,
+        // so an archive that fails verification cannot leave an extracted binary
+        // behind for a later run to pick up off the project root.
+        const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nextra-cloudflared-'));
+        try {
+            const archivePath = path.join(scratchDir, assetName);
+            await downloadFileWithRedirects(downloadUrl, archivePath);
+            const archiveVerification = verifyCloudflared(archivePath, expectedSha256);
+            if (!archiveVerification.valid) {
+                throw new Error(`Downloaded cloudflared failed pinned verification: ${archiveVerification.reason}.`);
+            }
+            const extractedPath = extractCloudflaredFromArchive(archivePath, scratchDir);
+            copyCloudflaredToStage(extractedPath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
+            [stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath]
+                .forEach((stagedPath) => fs.chmodSync(stagedPath, 0o755));
+        } catch (err) {
+            [stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath]
+                .forEach((stagedPath) => { try { fs.rmSync(stagedPath, { force: true }); } catch { } });
+            throw err;
+        } finally {
+            fs.rmSync(scratchDir, { recursive: true, force: true });
+        }
+        console.log('Bundled cloudflared via verified download.');
+        return;
+    }
+
     await downloadFileWithRedirects(downloadUrl, stageCloudflaredPath);
     const verification = verifyCloudflared(stageCloudflaredPath, expectedSha256);
     if (!verification.valid) {
@@ -478,7 +550,13 @@ async function main() {
     }
 }
 
-main().catch((err) => {
-    console.error(`Packaging failed: ${err.message}`);
-    process.exit(1);
-});
+if (require.main === module) {
+    main().catch((err) => {
+        console.error(`Packaging failed: ${err.message}`);
+        process.exit(1);
+    });
+}
+
+module.exports = {
+    getCloudflaredAssetName,
+};
