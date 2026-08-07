@@ -24,19 +24,26 @@ on its own.
 
 ## Routing
 
+No Ready cards, so no task files. Only this contract and `TEMPLATE.md` remain.
+
+T20–T23 completed on 2026-08-07 and their task files were removed with the
+board's usual rule: a spent prompt is not a record. Their outcomes live in the
+Done cards in `../KANBAN.md`, and the files themselves are retrievable from git
+history at commit `db28627`.
+
+The two open cards have no task file and should not get one yet. T24 (macOS
+media-key fallback) needs a user decision about prompting for macOS
+Accessibility permission before it can be specified, and an unspecifiable task
+must not be dispatched. T17 (real-network NAT/TURN validation) is blocked on an
+environment no repository change can supply.
+
+When a card next becomes Ready, add its row here:
+
 | Task | File | Model | Effort | Escalates to |
 | --- | --- | --- | --- | --- |
-| T20 | `T20-macos-gate-baseline.md` | `claude-haiku-4-5` | n/a | `claude-opus-5` |
-| T21 | `T21-macos-packaging.md` | `claude-opus-5` | `xhigh` | Codex, or the user |
-| T22 | `T22-portable-smoke.md` | `claude-sonnet-5` | `high` | `claude-opus-5` |
-| T23 | `T23-macos-ci-release.md` | `claude-sonnet-5` | `high` | `claude-opus-5` |
 
 `claude-haiku-4-5` does not accept the `effort` parameter — sending one errors.
-Leave it unset for T20.
-
-T24 (macOS media-key fallback) is in Backlog and has no task file. It needs a
-user decision about prompting for macOS Accessibility permission before it can
-be specified, and an unspecifiable task must not be dispatched.
+Leave it unset for any task routed there.
 
 ## Which tier gets a task
 
