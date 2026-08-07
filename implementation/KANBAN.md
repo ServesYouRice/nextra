@@ -17,8 +17,8 @@ the release pipeline, and the docs.
 
 T21 produced a runnable unsigned `Nextra-macos-arm64` and smoked it on
 darwin-arm64. T20 then ran all eight `release:prep` gates individually on the
-same machine; seven pass, and the one failure is the pre-existing `.gitignore`
-assertion described below, confirmed non-portability. T22 replaced the
+same machine; seven pass, and the one failure was the pre-existing `.gitignore`
+assertion since fixed by T25, confirmed non-portability. T22 replaced the
 Windows-only PowerShell smoke with a portable `scripts/smoke-packaged.js` and
 verified it end-to-end against a real macOS artifact, packaged with an
 official nodejs.org Node build after Homebrew's dynamically-linked one proved
@@ -32,7 +32,13 @@ T20–T23 were committed as `db28627` and pushed to `origin/dev` on 2026-08-07 a
 the user's request; the branch is named `dev` because `ci.yml` triggers on push
 only for `main` and `dev`. T25 then fixed the stale `.gitignore` assertion that
 would have aborted every CI job at its `npm run release:prep` step before
-packaging ran. CI results have not been read back into this board yet.
+packaging ran, and T26 rebuilt the social card off the hero lockup. CI results
+have not been read back into this board yet.
+
+T20–T23's task files were removed on 2026-08-07 once all four reached Done, per
+`tasks/README.md`'s one-file-per-Ready-card rule; they are retrievable from git
+history at commit `db28627`. `implementation/tasks/` now holds only the executor
+contract and its template.
 
 One outward-facing step remains and is deliberately left to the user: pushing a
 version tag to exercise the real `release.yml` publish path. Reading the `dev`

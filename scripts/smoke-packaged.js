@@ -1,8 +1,8 @@
 'use strict';
 
 // Portable replacement for scripts/smoke-packaged.ps1 (retired once
-// windows-package CI is green on this script -- see
-// implementation/tasks/T22-portable-smoke.md). Runs the identical assertion
+// windows-package CI is green on this script -- see T22 in
+// implementation/KANBAN.md). Runs the identical assertion
 // set against a packaged executable on both Windows and macOS: readiness, the
 // static shell, the Socket.IO handshake, compliance artifacts, the
 // mediasoup-worker-kill recovery path, the decoded-frame Playwright flow,
