@@ -764,7 +764,7 @@ function getActiveResourceMetrics() {
     try {
         active = process.getActiveResourcesInfo();
     } catch {
-        active = [];
+        // Keep the empty fallback when resource inspection is unavailable.
     }
     const byType = {};
     for (const kind of active) {
@@ -1696,4 +1696,3 @@ async function startWhipHttpServer(whipRouter) {
     cleanupGlobalResources();
     process.exit(1);
 });
-

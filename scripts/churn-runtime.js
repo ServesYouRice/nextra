@@ -170,7 +170,7 @@ async function main() {
     // zero and resources/heap back near baseline, while the persistent pool sockets
     // account for the expected socket residual.
     await delay(settleMs);
-    let settled = null;
+    let settled;
     try {
         settled = await fetchMetrics();
     } catch (err) {
