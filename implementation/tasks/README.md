@@ -24,12 +24,43 @@ on its own.
 
 ## Routing
 
-No Ready cards, so no task files. Only this contract and `TEMPLATE.md` remain.
+T27–T32 are Ready as of 2026-08-22. All six are test-coverage cards sized for a
+lower-tier executor: each owns exactly one test file, and only T29 edits a source
+file. They are independent and may run in any order or in parallel.
 
-T20–T23 completed on 2026-08-07 and their task files were removed with the
-board's usual rule: a spent prompt is not a record. Their outcomes live in the
-Done cards in `../KANBAN.md`, and the files themselves are retrievable from git
-history at commit `db28627`.
+| Task | File | Model | Effort | Escalates to |
+| --- | --- | --- | --- | --- |
+| T27 | `T27.md` | `claude-sonnet-5` | `medium` | Controller — if a branch needs a new export |
+| T28 | `T28.md` | `claude-sonnet-5` | `low` | Controller — if an assertion fails |
+| T29 | `T29.md` | `claude-sonnet-5` | `high` | Controller — behavior change; second defect found |
+| T30 | `T30.md` | `claude-sonnet-5` | `medium` | Controller — wraparound is a product question |
+| T31 | `T31.md` | `claude-sonnet-5` | `medium` | Controller — `createSharedWebRtcServer` export decision |
+| T32 | `T32.md` | `claude-sonnet-5` | `medium` | Controller — if the UI genuinely strands |
+
+Five of the six are coverage-only and should pass on the first run. **T29 is the
+exception and is the only one that changes behavior**: its first verification
+step requires the new test to *fail* against the unmodified parser. An executor
+that reports T29 green on the first run has not reproduced the bug and has not
+done the card.
+
+A recurring failure mode these cards are written against: when a coverage-only
+test fails, the fix is never to relax the assertion to match what the code
+returns. Every one of them says so in `<escalate_if>`, because an executor
+optimising for a green check will otherwise pin the defect as correct.
+
+Cards routed to a non-Claude executor keep the same task file. The `<model>`
+block names the Claude tier the work was sized against; substitute a model of
+comparable capability and hold the same `<verification>` and `<report_format>`.
+
+T33–T35 are in the backlog and deliberately have no task file: each needs a
+controller decision first — respectively, whether `lib/tunnel.js` gets a testable
+export surface, how to ratchet `scripts/coverage-gate.js` without failing
+`release:prep`, and how to split `lib/whipRoutes.js` along route boundaries.
+
+Earlier history: T20–T23 completed on 2026-08-07 and their task files were
+removed with the board's usual rule: a spent prompt is not a record. Their
+outcomes live in the Done cards in `../KANBAN.md`, and the files themselves are
+retrievable from git history at commit `db28627`.
 
 The two open cards have no task file and should not get one yet. T24 (macOS
 media-key fallback) needs a user decision about prompting for macOS
