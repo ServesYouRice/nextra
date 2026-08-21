@@ -1,6 +1,6 @@
 # Implementation board
 
-Updated: 2026-08-07. This is the only board, and the only Markdown file directly
+Updated: 2026-08-22. This is the only board, and the only Markdown file directly
 in `implementation/`. `implementation/tasks/` holds one executable task file per
 Ready card — see `tasks/README.md` for the model routing and the executor
 contract. A task file restates its card as a self-contained prompt for an
@@ -52,6 +52,21 @@ eight gates on darwin-arm64 as of T25.
 T18 and T19 are done. T17 remains blocked on an external network/TURN setup, not
 on a pending user decision.
 
+T27–T32 were opened on 2026-08-22 after a re-audit of the `testing/` folder. That
+folder's six gap documents ranked subsystems by numbers taken from
+`npm run test:coverage`, which runs only the four test files in
+`scripts/coverage-gate.js` — a slice, not the suite. Measured across the full
+suite, the ranking inverts: `lib/rooms.js` is 95.43% (not 16.24%),
+`lib/mediasoup.js` 91.67% (not 16.67%), `lib/oggOpusMuxer.js` 95.83% (not
+18.06%), `lib/h264Depacketizer.js` 96.88% (not 34.38%). The two genuinely
+least-covered modules, `lib/https.js` (0% functions) and `lib/tunnel.js` (0%
+functions), are not mentioned anywhere in those documents, and 18 of the 19
+function names the documents anchor their gaps to do not exist in the source.
+The gap documents are `.gitignore`d evidence, not a work queue; T27–T32 and
+T33–T35 are the reconciled result. Baseline for all of them:
+`node --test --experimental-test-coverage` (206 tests, exit 0) and
+`npx playwright test --list` (52 cases in 2 files), both run 2026-08-21.
+
 Cards T01–T16 are complete. Their completion records, along with the 2026-07-26
 audit consolidation that produced them, were removed on 2026-08-04 and remain
 retrievable from git history at commit `84b1634`.
@@ -62,9 +77,99 @@ _None._
 
 ### Ready
 
-_None._
+Six test-coverage cards, T27–T32, added 2026-08-22 from a re-audit of the
+`testing/` gap documents. They are independent: each owns one test file, none
+edits a source file except T29, and they can run in any order or in parallel.
+
+Only T29 changes behavior. The other five are coverage-only and should pass on
+their first run; a failure in any of them is a finding to escalate, not a test
+to adjust.
+
+#### T27 — Cover the TLS certificate regeneration decision in `lib/https.js`
+
+`lib/https.js` sits at **16.09% lines and 0.00% functions** — the lowest function
+coverage in `lib/`, and no test imports it. `shouldRegenerateExistingCert()`
+decides whether a cached self-signed certificate still matches the configured
+SAN; if it wrongly says yes, the operator keeps serving a cert that does not
+cover the address they browse to. Drive it through the exported
+`getOrCreateCert()` against a temp `HTTPS_CERT_DIR`. Task file: `tasks/T27.md`.
+
+#### T28 — Table-test the OBS encoder selection branches
+
+`src/lib/obsOutputModel.mjs` is at 73.58% lines / **56.76% branches**; the
+existing tests cover AV1 only, leaving every H.264 vendor branch — nvenc, x264,
+amf, qsv — and all of `getSimpleOutputEncoderId` unasserted. Pure functions, no
+mocks, no async. The lowest-risk card on the board. Task file: `tasks/T28.md`.
+
+#### T29 — Reject fMP4 boxes that declare a size smaller than their header
+
+`_parseBoxes()` in `lib/fmp4Parser.js` validates box size `0` and oversize, but
+never that the size covers its own 8-byte header. A box declaring size 4
+desynchronises the parser onto its own type field; reproduced by hand, it
+reports `MP4 box size 1937013104 exceeds limit` — that number is ASCII `styp`
+misread as a length — and silently discards the rest of the stream.
+`_readBoxHeader()` at line 189 already has exactly this guard, so the fix is to
+make `_parseBoxes` consistent with its sibling. The file currently holds
+**one** test. Behavior change: the new test must fail first. Task file:
+`tasks/T29.md`.
+
+#### T30 — Cover multi-frame Opus packets and multi-segment Ogg lacing
+
+`lib/oggOpusMuxer.js` is at 95.83% lines but **48.39% branches**. Opus TOC frame
+code 3 and the `>= 255` byte Ogg lacing loop have no assertion. Excludes the
+timestamp-wraparound scenario from the old audit: `pushRtp` currently stalls
+permanently after a wrap, and whether it should stall, resync, or rebase is an
+unanswered product question, not a test gap. Task file: `tasks/T30.md`.
+
+#### T31 — Pin ICE candidate ordering for loopback, LAN, and public media binds
+
+`lib/mediasoup.js` is at **47.83% branches**. Nothing asserts that a
+loopback-bound transport announces neither `LAN_IP` nor `PUBLIC_IP`, nor that a
+public announce is ordered ahead of the LAN one. Reachable through the exported
+`createWebRtcTransport` with a stub router — the existing bitrate test already
+has the harness. Covering `createSharedWebRtcServer`'s fallback is explicitly
+excluded: it is unexported, and widening the module surface for a test is a
+controller decision. Task file: `tasks/T31.md`.
+
+#### T32 — Cover the two browser media denial paths
+
+The browser suite covers `getDisplayMedia` being **undefined**, but not the far
+more common case of the user dismissing the picker (`NotAllowedError`), and not
+autoplay-blocked `play()`. Both are reachable with the `page.addInitScript`
+harness already in the spec file. Excludes the old audit's UDP-blocking fallback
+test (no deterministic Playwright hook), its mobile drawer test (no drawer
+exists in `src/`), and `@axe-core/playwright` (new dependency, needs approval).
+Task file: `tasks/T32.md`.
 
 ### Backlog
+
+#### T33 — Decide whether `lib/tunnel.js` gets a testable surface
+
+At **8.53% lines and 0.00% functions**, `lib/tunnel.js` is the least-covered
+module in `lib/` — `tunnelSupervisor.js` is well covered at 85%, but the module
+it supervises has nothing. It exports only `startCloudflareTunnel`, so the
+testable logic — `getCloudflaredCandidates()` path resolution, the
+`trycloudflare.com` URL match in `launchCloudflaredCandidate()` — is
+unreachable without either exporting those helpers or injecting `spawn`. Both
+widen the module's surface for a test. Needs a controller decision on which,
+before it can be specified. Not Ready.
+
+#### T34 — Re-baseline the coverage gate one target at a time
+
+`scripts/coverage-gate.js` runs only four test files, so `npm run test:coverage`
+measures a slice, not the suite. That slice is what the `testing/` gap documents
+mistook for whole-suite coverage. Expanding the gate is worth doing, but adding
+`lib/socket.js` (62.49%) or `lib/ffmpegRelay.js` (54.08%) to the uniform
+70/60/75 thresholds would fail `release:prep` immediately. Sequence it after
+T27–T32 land, and ratchet one target at a time with its own threshold. Not Ready.
+
+#### T35 — Cover `lib/whipRoutes.js`
+
+**40.55% lines, 47.62% functions** across 619 lines — the largest genuine
+coverage gap in `lib/` by volume, with `409-525`, `529-559` and `582-613`
+untouched. Too large for one card; needs splitting along route boundaries
+(`POST /broadcast/:roomCode`, `DELETE /broadcast/:resourceId`, the public
+admission limits) before it is specifiable. Not Ready.
 
 #### T24 — macOS media play/pause fallback
 
