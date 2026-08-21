@@ -55,3 +55,9 @@ cloudflared
 !implementation/
 !implementation/*.md
 !implementation/tasks/**/*.md
+
+# Local audit scratch. `!README.md` above is unanchored, so without this rule it
+# silently re-includes testing/README.md on `git add -A` while leaving its nine
+# siblings ignored. Excluding the directory outright cannot be undone by a
+# negation, which is the point.
+/testing/
