@@ -56,7 +56,7 @@
     "@vitejs/plugin-react": "^6.0.5",
     "caxa": "^3.0.1",
     "concurrently": "^10.0.3",
-    "eslint": "^10.8.1",
+    "eslint": "^10.9.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.4",
     "globals": "^17.11.0",
