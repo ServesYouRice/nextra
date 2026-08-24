@@ -48,16 +48,11 @@ cloudflared
 # Documentation files
 *.md
 !README.md
-!AGENTS.md
-!CLAUDE.md
 !SOURCE.md
 !THIRD_PARTY_NOTICES.md
 !implementation/
 !implementation/*.md
 !implementation/tasks/**/*.md
 
-# Local audit scratch. `!README.md` above is unanchored, so without this rule it
-# silently re-includes testing/README.md on `git add -A` while leaving its nine
-# siblings ignored. Excluding the directory outright cannot be undone by a
-# negation, which is the point.
+# Local test-audit scratch is never part of the executor work queue.
 /testing/
