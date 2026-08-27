@@ -78,3 +78,75 @@ test('Opus RTP extraction handles extensions and padding', () => {
     assert.deepEqual(parsed.payload, payload);
     assert.equal(opusPacketDurationSamples(parsed.payload), 960);
 });
+
+test('opusPacketDurationSamples supports frame-code 3 multi-frame packets', () => {
+    // config 0 (480 samples), frame code 3, 3 frames -> 1440 samples
+    const validPacket = Buffer.from([0x03, 0x03]);
+    assert.equal(opusPacketDurationSamples(validPacket), 1440);
+
+    // config 0 (480 samples), frame code 3, 20 frames -> 9600 samples (> 5760 ceiling) -> 0
+    const overCeilingPacket = Buffer.from([0x03, 0x14]);
+    assert.equal(opusPacketDurationSamples(overCeilingPacket), 0);
+
+    // Truncation guard: frame code 3 with 1-byte packet -> 0
+    const truncatedPacket = Buffer.from([0x03]);
+    assert.equal(opusPacketDurationSamples(truncatedPacket), 0);
+});
+
+test('OggOpusMuxer multi-segment lacing handles 600-byte payload', () => {
+    const muxer = new OggOpusMuxer({ serial: 99 });
+    muxer.headers();
+
+    const payload = Buffer.alloc(600);
+    payload[0] = 0x98; // valid 960-sample Opus frame
+
+    const page = muxer.pushRtp(rtp(payload, { timestamp: 1000 }));
+    assert.ok(page);
+    assert.equal(page.subarray(0, 4).toString('ascii'), 'OggS');
+
+    const segmentCount = page[26];
+    const lacing = Array.from(page.subarray(27, 27 + segmentCount));
+
+    const totalLacing = lacing.reduce((sum, v) => sum + v, 0);
+    assert.equal(totalLacing, 600);
+    assert.equal(lacing.length, 3);
+    assert.deepEqual(lacing, [255, 255, 90]);
+    assert.ok(lacing.slice(0, -1).every((v) => v === 255));
+});
+
+test('OggOpusMuxer table-tests exact lacing boundaries', () => {
+    const cases = [
+        { length: 254, expectedLacing: [254] },
+        { length: 255, expectedLacing: [255, 0] },
+        { length: 256, expectedLacing: [255, 1] },
+        { length: 510, expectedLacing: [255, 255, 0] },
+    ];
+
+    for (const { length, expectedLacing } of cases) {
+        const muxer = new OggOpusMuxer({ serial: 100 + length });
+        muxer.headers();
+
+        const payload = Buffer.alloc(length);
+        payload[0] = 0x98;
+
+        const page = muxer.pushRtp(rtp(payload, { timestamp: 1000 }));
+        assert.ok(page, `Expected page for payload length ${length}`);
+
+        const segmentCount = page[26];
+        const lacing = Array.from(page.subarray(27, 27 + segmentCount));
+        assert.deepEqual(lacing, expectedLacing, `Lacing mismatch for length ${length}`);
+    }
+});
+
+test('OggOpusMuxer rejects 65025-byte payload exceeding one Ogg page segment limit', () => {
+    const muxer = new OggOpusMuxer({ serial: 200 });
+    muxer.headers();
+
+    const payload = Buffer.alloc(65025);
+    payload[0] = 0x98;
+
+    assert.throws(
+        () => muxer.pushRtp(rtp(payload, { timestamp: 1000 })),
+        /Opus packet is too large for one Ogg page\./
+    );
+});
