@@ -435,3 +435,183 @@ test('delayed relay-first viewers select one fresh recorder generation and clean
     await firstViewerContext.close();
     await hostContext.close();
 });
+
+test('capture denial shows alert copy, re-enables Start Sharing, and leaves zero active rooms', async ({ browser, request }) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: {
+                getDisplayMedia: async () => {
+                    throw new DOMException('Permission denied', 'NotAllowedError');
+                },
+            },
+        });
+    });
+    await page.goto('/#host');
+    const startButton = page.getByRole('button', { name: 'Start Sharing' });
+    await startButton.click();
+
+    await expect(page.getByRole('alert')).toContainText('Screen sharing was cancelled.');
+    await expect(startButton).toBeEnabled();
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+
+    await context.close();
+});
+
+test('autoplay denial falls back to muted playback and unmuting control succeeds', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+
+    await viewerPage.addInitScript(() => {
+        const originalPlay = HTMLMediaElement.prototype.play;
+        let rejectedOnce = false;
+        HTMLMediaElement.prototype.play = async function play(...args) {
+            if (!rejectedOnce && this.srcObject) {
+                rejectedOnce = true;
+                throw new DOMException('Autoplay blocked', 'NotAllowedError');
+            }
+            return originalPlay.apply(this, args);
+        };
+    });
+
+    const code = await startHost(hostPage);
+
+    await joinAndWatch(viewerPage, code);
+
+    const videoLocator = viewerPage.locator('video');
+    await expect(videoLocator).toHaveJSProperty('muted', true);
+
+    const unmuteButton = viewerPage.getByRole('button', { name: 'Unmute Audio' });
+    await expect(unmuteButton).toBeVisible();
+    await unmuteButton.click();
+
+    await expect(videoLocator).toHaveJSProperty('muted', false);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json()).toMatchObject({
+        rooms: { active: 0 },
+    });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+let loopbackProxySequence = 0;
+let loopbackProxyState = null;
+
+test.beforeEach(async ({ browser }, testInfo) => {
+    const [fs, http, net, path] = await Promise.all([
+        import('node:fs/promises'),
+        import('node:http'),
+        import('node:net'),
+        import('node:path'),
+    ]);
+    loopbackProxySequence += 1;
+    const lockDirectory = path.join(process.cwd(), 'test-results', '.media-flow-lock');
+    const ticketName = `${[
+        String(Date.now()).padStart(13, '0'),
+        String(testInfo.workerIndex).padStart(4, '0'),
+        String(process.pid).padStart(8, '0'),
+        String(loopbackProxySequence).padStart(4, '0'),
+    ].join('-')}.ticket`;
+    const ticketPath = path.join(lockDirectory, ticketName);
+    await fs.mkdir(lockDirectory, { recursive: true });
+    await fs.writeFile(ticketPath, '', { flag: 'wx' });
+
+    try {
+        for (;;) {
+            const tickets = (await fs.readdir(lockDirectory))
+                .filter((entry) => entry.endsWith('.ticket'))
+                .sort();
+            if (tickets[0] === ticketName) break;
+            await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+
+        const workerOctet = (testInfo.workerIndex % 250) + 1;
+        const testOctet = (loopbackProxySequence % 250) + 2;
+        const sourceAddress = `127.0.${workerOctet}.${testOctet}`;
+        const sockets = new Set();
+
+        const proxy = http.createServer((_, response) => {
+            response.writeHead(405);
+            response.end();
+        });
+        proxy.on('connect', (request, downstream, head) => {
+            if (!['localhost:3210', 'nextra.cloudflare.test:3210'].includes(request.url)) {
+                downstream.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+                return;
+            }
+
+            const upstream = net.connect({
+                host: '127.0.0.1',
+                port: 3210,
+                localAddress: sourceAddress,
+            }, () => {
+                downstream.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+                if (head.length > 0) upstream.write(head);
+                downstream.pipe(upstream).pipe(downstream);
+            });
+            sockets.add(downstream);
+            sockets.add(upstream);
+
+            const forget = (socket) => {
+                sockets.delete(socket);
+            };
+            downstream.once('close', () => forget(downstream));
+            upstream.once('close', () => forget(upstream));
+            downstream.once('error', () => upstream.destroy());
+            upstream.once('error', () => downstream.destroy());
+        });
+
+        await new Promise((resolve, reject) => {
+            proxy.once('error', reject);
+            proxy.listen(0, '127.0.0.1', resolve);
+        });
+        const proxyPort = proxy.address().port;
+
+        const originalNewContext = browser.newContext;
+        browser.newContext = function newContext(options = {}) {
+            return Reflect.apply(originalNewContext, browser, [{
+                ...options,
+                baseURL: 'https://localhost:3210',
+                proxy: { server: `http://127.0.0.1:${proxyPort}` },
+            }]);
+        };
+        loopbackProxyState = {
+            browser,
+            fs,
+            originalNewContext,
+            proxy,
+            sockets,
+            ticketPath,
+        };
+    } catch (error) {
+        await fs.rm(ticketPath, { force: true });
+        throw error;
+    }
+});
+
+test.afterEach(async () => {
+    if (!loopbackProxyState) return;
+
+    const {
+        browser,
+        fs,
+        originalNewContext,
+        proxy,
+        sockets,
+        ticketPath,
+    } = loopbackProxyState;
+    loopbackProxyState = null;
+    browser.newContext = originalNewContext;
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => proxy.close(resolve));
+    await fs.rm(ticketPath, { force: true });
+});
