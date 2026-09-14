@@ -38,7 +38,7 @@
     "release:prep": "npm run lint && npm run typecheck && npm test && npm run test:coverage && npm run build && npm run evaluate:packaging && npm run oss:check && npm run audit:prod"
   },
   "dependencies": {
-    "compression": "^1.8.1",
+    "compression": "^1.8.2",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "helmet": "^8.1.0",
@@ -53,12 +53,12 @@
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
-    "@vitejs/plugin-react": "^6.1.0",
+    "@vitejs/plugin-react": "^6.1.1",
     "caxa": "^3.0.1",
     "concurrently": "^10.0.5",
     "eslint": "^10.9.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "eslint-plugin-react-refresh": "^0.5.4",
+    "eslint-plugin-react-refresh": "^0.5.6",
     "globals": "^17.11.0",
     "mediasoup-client": "^3.22.0",
     "rcedit": "^5.0.2",
