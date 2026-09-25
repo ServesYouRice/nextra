@@ -2,6 +2,8 @@
 // Handles init segment bootstrapping, fragment append queue, generation resets,
 // and SourceBuffer lifecycle for reliable fMP4 playback.
 
+import { RELAY_PLAYBACK_UNSUPPORTED_MESSAGE, canPlayRelayFormat, createRelayMediaSource } from './watchPlaybackMode.mjs';
+
 const MAX_QUEUE_SIZE = 120;
 const MAX_QUEUE_BYTES = 16 * 1024 * 1024; // 16MB
 const BACK_BUFFER_SECONDS = 8;
@@ -421,8 +423,8 @@ export function createFmp4RelayPlayer(opts) {
 
         mimeType = data.mimeType;
 
-        if (!MediaSource.isTypeSupported(mimeType)) {
-            handleError(`Browser does not support MIME type: ${mimeType}`);
+        if (!canPlayRelayFormat(mimeType)) {
+            handleError(RELAY_PLAYBACK_UNSUPPORTED_MESSAGE, new Error(`MediaSource rejected ${mimeType}`));
             return;
         }
 
@@ -475,7 +477,7 @@ export function createFmp4RelayPlayer(opts) {
             cleanupMediaSource();
         }
 
-        mediaSource = new MediaSource();
+        mediaSource = createRelayMediaSource(videoElement);
         const objectUrl = URL.createObjectURL(mediaSource);
         videoElement.src = objectUrl;
 

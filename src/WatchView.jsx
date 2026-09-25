@@ -6,6 +6,10 @@ import {
     hasWebRtcReceiveCodec,
     isAv1PlaybackUnsupported,
     shouldPreferRelayPlayback,
+    RELAY_PLAYBACK_UNSUPPORTED_MESSAGE,
+    canPlayRelayFormat,
+    createRelayMediaSource,
+    isRelayPlaybackUnsupported,
 } from './lib/watchPlaybackMode.mjs';
 import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
 import { createLifecycleController } from './lib/lifecycleController.mjs';
@@ -612,12 +616,11 @@ export default function WatchView({ initialCode = '' }) {
             }
 
             mediaDebugLog('[Nextra] Setting up MediaSource with mime:', mimeType);
-            const mseMimeSupported = window.MediaSource && MediaSource.isTypeSupported(mimeType);
-            if (!mseMimeSupported) {
-                throw new Error('This browser cannot play the relay stream (Media Source Extensions rejected the stream format). Nextra relay playback is tested on desktop Chrome/Edge and mobile Chrome.');
+            if (!canPlayRelayFormat(mimeType)) {
+                throw new Error(RELAY_PLAYBACK_UNSUPPORTED_MESSAGE);
             }
 
-            const mediaSource = new MediaSource();
+            const mediaSource = createRelayMediaSource(videoRef.current);
             mediaSourceRef.current = mediaSource;
             const objectUrl = URL.createObjectURL(mediaSource);
             objectUrlRef.current = objectUrl;
@@ -1023,7 +1026,10 @@ export default function WatchView({ initialCode = '' }) {
                     // A stale connection error contradicts visibly-playing video.
                     if (state === 'playing') setError('');
                 },
-                onError: (msg, err) => console.error('[WatchView] Fallback error:', msg, err),
+                onError: (msg, err) => {
+                    console.error('[WatchView] Fallback error:', msg, err);
+                    if (isRelayPlaybackUnsupported(msg)) setError(msg);
+                },
             });
 
             fmp4PlayerRef.current = player;
@@ -1078,13 +1084,16 @@ export default function WatchView({ initialCode = '' }) {
         cleanupPlayback();
 
         // Safety net: never stay in "Connecting..." state for more than 40s total.
+        // A browser that cannot play the relay at all is the real cause for a
+        // tunnel viewer whose WebRTC fallback then stalls, so keep that message.
         let watchTimedOut = false;
+        let relayUnsupportedError = null;
         const watchTimeout = setTimeout(() => {
             watchTimedOut = true;
             cleanupPlayback();
             setWatching(false);
             setWatchLoading(false);
-            setError('Connection timed out. Check your network or try again.');
+            setError(relayUnsupportedError?.message || 'Connection timed out. Check your network or try again.');
         }, 40000);
 
         if (preferRelayFirst) {
@@ -1096,6 +1105,7 @@ export default function WatchView({ initialCode = '' }) {
             } catch (primaryErr) {
                 if (watchTimedOut) return;
                 console.warn('[Nextra] Relay-first playback failed; trying WebRTC fallback:', primaryErr.message);
+                if (isRelayPlaybackUnsupported(primaryErr)) relayUnsupportedError = primaryErr;
                 cleanupPlayback();
 
                 try {
@@ -1108,7 +1118,7 @@ export default function WatchView({ initialCode = '' }) {
                     cleanupPlayback();
                     setWatching(false);
                     console.error('[Nextra] Secondary playback attempt failed:', fallbackErr.message);
-                    setError(fallbackErr.message || primaryErr.message || 'Failed to start watching.');
+                    setError(relayUnsupportedError?.message || fallbackErr.message || primaryErr.message || 'Failed to start watching.');
                 }
             } finally {
                 clearTimeout(watchTimeout);
