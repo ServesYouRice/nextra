@@ -189,3 +189,31 @@ test('plaintext LAN relay requires an explicit trusted LAN declaration', () => {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /declare TRUSTED_LAN_CIDRS first/);
 });
+
+// Packaged builds stage a pinned FFmpeg beside config.js. It must win over
+// whatever `ffmpeg` happens to be on PATH, while an explicit FFMPEG_PATH still
+// wins over both and source checkouts keep the PATH lookup.
+test('FFMPEG_PATH prefers the bundled binary, then PATH, and honors an explicit override', () => {
+    const tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'nextra-ffmpeg-config-')));
+    try {
+        fs.mkdirSync(path.join(tempDir, 'lib'));
+        fs.copyFileSync(path.join(__dirname, '..', 'config.js'), path.join(tempDir, 'config.js'));
+        fs.copyFileSync(path.join(__dirname, '..', 'lib', 'cloudflareTurn.js'), path.join(tempDir, 'lib', 'cloudflareTurn.js'));
+        const readFfmpegPath = (env) => {
+            const result = spawnSync(process.execPath, [
+                '-e', `console.log(require(${JSON.stringify(path.join(tempDir, 'config.js'))}).FFMPEG_PATH)`,
+            ], { encoding: 'utf8', env: { ...process.env, FFMPEG_PATH: '', ...env } });
+            assert.equal(result.status, 0, result.stderr);
+            return result.stdout.trim();
+        };
+
+        assert.equal(readFfmpegPath({}), 'ffmpeg');
+
+        const bundled = path.join(tempDir, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+        fs.writeFileSync(bundled, '');
+        assert.equal(readFfmpegPath({}), bundled);
+        assert.equal(readFfmpegPath({ FFMPEG_PATH: '/opt/ffmpeg/bin/ffmpeg' }), '/opt/ffmpeg/bin/ffmpeg');
+    } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+});

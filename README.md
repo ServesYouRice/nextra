@@ -110,7 +110,7 @@ Use OBS Studio instead of browser screen capture for higher quality, custom scen
 ### Requirements
 
 - OBS Studio 28+ with WHIP output and WebSocket v5
-- FFmpeg on the server PATH for H.264 relay playback
+- FFmpeg for H.264 relay playback (bundled in the packaged releases; source checkouts need it on PATH)
 - A TURN service if you want AV1 OBS rooms to work for remote or tunnel viewers
 - Optional server-side Cloudflare TURN credentials if you want the host modal to autofill short-lived TURN values
 
@@ -279,7 +279,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 | `WHIP_HTTP_PORT` | `3001` | HTTP port for WHIP endpoint |
 | `WHIP_BIND_HOST` | `127.0.0.1` | Bind address for the plaintext OBS-compatible WHIP endpoint |
 | `WHIP_ALLOW_INSECURE_REMOTE` | `false` | Explicitly acknowledge a non-loopback plaintext WHIP bind; use only behind an encrypted VPN or TLS reverse proxy |
-| `FFMPEG_PATH` | `ffmpeg` | Path to FFmpeg; use an absolute trusted path for unattended deployments |
+| `FFMPEG_PATH` | bundled FFmpeg, else `ffmpeg` | Path to FFmpeg; packaged releases use their pinned bundled copy, source checkouts use PATH. Use an absolute trusted path for unattended deployments |
 | `FALLBACK_FRAGMENT_DURATION_MS` | `500` | fMP4 fragment duration in ms |
 | `FALLBACK_AUDIO_BITRATE` | `192k` | Audio bitrate for relay remux |
 | `FALLBACK_AUDIO_OFFSET_MS` | `1500` | Delay OBS relay audio to keep fMP4 playback in sync |

@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const os = require('os');
 const { spawnSync } = require('child_process');
 const cloudflaredManifest = require('./cloudflared-manifest.json');
+const ffmpegManifest = require('./ffmpeg-manifest.json');
 
 const projectRoot = path.resolve(__dirname, '..');
 const stageDir = path.join(projectRoot, '.caxa-stage');
@@ -14,6 +15,7 @@ const stageDir = path.join(projectRoot, '.caxa-stage');
 const outputExe = process.platform === 'win32'
     ? path.join(projectRoot, 'Nextra.exe')
     : path.join(projectRoot, `Nextra-macos-${process.arch}`);
+const ffmpegName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
 const outputSha256 = process.platform === 'win32'
     ? path.join(projectRoot, 'Nextra.exe.sha256')
     : path.join(projectRoot, `Nextra-macos-${process.arch}.sha256`);
@@ -30,6 +32,7 @@ const sourceEntries = [
     'README.md',
     'SOURCE.md',
     'THIRD_PARTY_NOTICES.md',
+    'licenses',
     'lib',
     'dist',
 ];
@@ -145,7 +148,7 @@ function downloadFileWithRedirects(url, destinationPath, redirectsLeft = 6) {
             if ([301, 302, 303, 307, 308].includes(code) && location) {
                 response.resume();
                 if (redirectsLeft <= 0) {
-                    reject(new Error(`Too many redirects while downloading cloudflared from ${url}`));
+                    reject(new Error(`Too many redirects while downloading ${url}`));
                     return;
                 }
                 const nextUrl = new URL(location, url).toString();
@@ -157,7 +160,7 @@ function downloadFileWithRedirects(url, destinationPath, redirectsLeft = 6) {
 
             if (code !== 200) {
                 response.resume();
-                reject(new Error(`Failed to download cloudflared (${code}) from ${url}`));
+                reject(new Error(`Failed to download (${code}) from ${url}`));
                 return;
             }
 
@@ -275,6 +278,11 @@ function getBuildIdentifier() {
     const bundledCloudflared = path.join(stageDir, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
     if (fs.existsSync(bundledCloudflared)) {
         hashPathRecursive(hash, bundledCloudflared, path.basename(bundledCloudflared));
+    }
+
+    const bundledFfmpeg = path.join(stageDir, ffmpegName);
+    if (fs.existsSync(bundledFfmpeg)) {
+        hashPathRecursive(hash, bundledFfmpeg, ffmpegName);
     }
 
     return `nextra-${hash.digest('hex').slice(0, 12)}`;
@@ -501,6 +509,75 @@ async function bundleCloudflared() {
     console.log('Bundled cloudflared via verified download.');
 }
 
+function getFfmpegAsset(platform = process.platform, arch = process.arch) {
+    const asset = ffmpegManifest.assets[`${platform}-${arch}`];
+    if (!asset) {
+        throw new Error(`No pinned FFmpeg build for ${platform}-${arch}; packaging supports ${Object.keys(ffmpegManifest.assets).join(', ')}.`);
+    }
+    return asset;
+}
+
+// Both upstreams publish FFmpeg as a .zip. bsdtar reads zip archives and ships
+// with macOS (/usr/bin/tar) and Windows 10+ (System32\tar.exe), so extraction
+// needs no new dependency. Like the cloudflared archive, extraction must never
+// run before the pinned archive digest has matched.
+function extractFfmpegFromArchive(archivePath, entry, destinationDir) {
+    const tar = process.platform === 'win32'
+        ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe')
+        : '/usr/bin/tar';
+    const result = spawnSync(tar, ['-xf', archivePath, '-C', destinationDir, entry], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+    });
+
+    if (result.error || result.status !== 0) {
+        const detail = result.error?.message || (result.stderr || '').trim() || 'no error output';
+        throw new Error(`Failed to extract ${entry} from ${path.basename(archivePath)} (exit ${result.status ?? 'unknown'}; ${detail})`);
+    }
+
+    const extractedPath = path.join(destinationDir, ...entry.split('/'));
+    if (!fs.statSync(extractedPath, { throwIfNoEntry: false })?.isFile()) {
+        throw new Error(`Archive ${path.basename(archivePath)} did not contain ${entry}.`);
+    }
+    return extractedPath;
+}
+
+// The FFmpeg archives are large (up to ~115 MB), so a verified download is kept
+// in the OS temp directory and reused by later local packaging runs. The cache is
+// keyed by the pinned digest and re-verified before every use.
+async function bundleFfmpeg() {
+    const asset = getFfmpegAsset();
+    const cacheDir = path.join(os.tmpdir(), 'nextra-ffmpeg-cache');
+    const archivePath = path.join(cacheDir, `${asset.sha256}.zip`);
+    const stageFfmpegPath = path.join(stageDir, ffmpegName);
+
+    if (!fs.existsSync(archivePath) || getFileSha256(archivePath) !== asset.sha256) {
+        console.log(`Downloading FFmpeg ${ffmpegManifest.version} for packaging: ${asset.url}`);
+        const partialPath = `${archivePath}.${process.pid}.partial`;
+        try {
+            await downloadFileWithRedirects(asset.url, partialPath);
+            const actualSha256 = getFileSha256(partialPath);
+            if (actualSha256 !== asset.sha256) {
+                throw new Error(`Downloaded FFmpeg failed pinned verification: SHA-256 mismatch (expected ${asset.sha256}, got ${actualSha256}).`);
+            }
+            fs.renameSync(partialPath, archivePath);
+        } finally {
+            fs.rmSync(partialPath, { force: true });
+        }
+    }
+
+    const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nextra-ffmpeg-'));
+    try {
+        const extractedPath = extractFfmpegFromArchive(archivePath, asset.entry, scratchDir);
+        fs.copyFileSync(extractedPath, stageFfmpegPath);
+        fs.chmodSync(stageFfmpegPath, 0o755);
+    } finally {
+        fs.rmSync(scratchDir, { recursive: true, force: true });
+    }
+    console.log(`Bundled FFmpeg ${ffmpegManifest.version} (pinned SHA-256 verified).`);
+}
+
 async function main() {
     fs.rmSync(stageDir, { recursive: true, force: true });
     fs.mkdirSync(stageDir, { recursive: true });
@@ -512,6 +589,7 @@ async function main() {
         installProductionDependencies();
         writeSbom();
         await bundleCloudflared();
+        await bundleFfmpeg();
         const buildIdentifier = getBuildIdentifier();
         iconStub = await prepareWindowsCaxaStub();
         clearOutputExe();
@@ -559,4 +637,5 @@ if (require.main === module) {
 
 module.exports = {
     getCloudflaredAssetName,
+    getFfmpegAsset,
 };

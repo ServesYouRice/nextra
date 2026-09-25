@@ -994,6 +994,7 @@ app.get('/api/package-info', (req, res) => {
             notices: exists('THIRD_PARTY_NOTICES.md'),
             sourceInstructions: exists('SOURCE.md'),
             sbom: exists('SBOM.cdx.json'),
+            ffmpeg: exists(process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'),
         },
     });
 });
