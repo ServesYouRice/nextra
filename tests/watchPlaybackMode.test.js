@@ -56,3 +56,37 @@ test('WebRTC AV1 support comes from loaded receive RTP capabilities, not MP4 sup
         av1ReceiveSupported: true,
     }), false);
 });
+
+// iPhone browsers expose ManagedMediaSource but no window.MediaSource, so the
+// relay check must answer "unsupported" instead of throwing a ReferenceError.
+test('relay format support is false when MediaSource is missing or rejects the format', async () => {
+    const { canPlayRelayFormat } = await watchPlaybackModeModule;
+    const mime = 'video/webm;codecs=vp8,opus';
+
+    assert.equal(canPlayRelayFormat(mime, {}), false);
+    assert.equal(canPlayRelayFormat(mime, { MediaSource: { isTypeSupported: () => false } }), false);
+    assert.equal(canPlayRelayFormat(mime, { MediaSource: { isTypeSupported: (type) => type === mime } }), true);
+});
+
+test('the unsupported-relay error is recognised from an Error or a message', async () => {
+    const { RELAY_PLAYBACK_UNSUPPORTED_MESSAGE, isRelayPlaybackUnsupported } = await watchPlaybackModeModule;
+
+    assert.match(RELAY_PLAYBACK_UNSUPPORTED_MESSAGE, /iPhone/);
+    assert.equal(isRelayPlaybackUnsupported(new Error(RELAY_PLAYBACK_UNSUPPORTED_MESSAGE)), true);
+    assert.equal(isRelayPlaybackUnsupported(RELAY_PLAYBACK_UNSUPPORTED_MESSAGE), true);
+    assert.equal(isRelayPlaybackUnsupported(new Error('Connection timed out.')), false);
+    assert.equal(isRelayPlaybackUnsupported(null), false);
+});
+
+test('relay playback resolves MediaSource first and ManagedMediaSource on iPhone', async () => {
+    const { canPlayRelayFormat, getMediaSourceClass } = await watchPlaybackModeModule;
+    const mime = 'video/mp4;codecs=avc1.640028,mp4a.40.2';
+    class Standard { static isTypeSupported() { return true; } }
+    class Managed { static isTypeSupported(type) { return type === mime; } }
+
+    assert.equal(getMediaSourceClass({ MediaSource: Standard, ManagedMediaSource: Managed }), Standard);
+    assert.equal(getMediaSourceClass({ ManagedMediaSource: Managed }), Managed);
+    assert.equal(getMediaSourceClass({}), null);
+    assert.equal(canPlayRelayFormat(mime, { ManagedMediaSource: Managed }), true);
+    assert.equal(canPlayRelayFormat('video/webm;codecs=vp8,opus', { ManagedMediaSource: Managed }), false);
+});

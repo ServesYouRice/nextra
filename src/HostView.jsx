@@ -15,6 +15,13 @@ import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 import { evaluateHostPreflight } from './lib/hostPreflight.mjs';
 import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
 import { setNavigationGuard } from './lib/navigationGuard.mjs';
+import {
+    RELAY_BITRATE_STEP_UP_AFTER_MS,
+    RELAY_MP4_MIME_TYPE,
+    lowerRelayBitrate,
+    raiseRelayBitrate,
+    selectRelayRecorderFormat,
+} from './lib/relayRecorderFormat.mjs';
 
 const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 5_000 };
 const OBS_MAX_BITRATE_KBPS = 45_000;
@@ -417,6 +424,12 @@ export default function HostView() {
     const [whipHttpStatus, setWhipHttpStatus] = useState('starting');
     const [whipHttpError, setWhipHttpError] = useState('');
     const [relayFlushIntervalMs, setRelayFlushIntervalMs] = useState(300);
+    // Latched when this browser's MP4 relay recorder fails, so the relay falls
+    // back to VP8 for the rest of the page session.
+    const [relayMp4Failed, setRelayMp4Failed] = useState(false);
+    // Lowered when the server reports that every relay viewer is falling behind
+    // (the host uplink cannot carry the recording); null means no limit.
+    const [relayBitrateLimit, setRelayBitrateLimit] = useState(null);
     const [relayVideoBitsPerSecond, setRelayVideoBitsPerSecond] = useState(45_000_000);
     const [relayMaxChunkSize, setRelayMaxChunkSize] = useState(4 * 1024 * 1024);
     const [relayViewerCount, setRelayViewerCount] = useState(0);
@@ -496,7 +509,10 @@ export default function HostView() {
         : '';
     const selectedProfile = getQualityProfile(qualityProfile);
     const profileRelayBits = getProfileRelayBitsPerSecond(qualityProfile, frameRate);
-    const effectiveRelayBitsPerSecond = Math.min(relayVideoBitsPerSecond, profileRelayBits);
+    const targetRelayBitsPerSecond = Math.min(relayVideoBitsPerSecond, profileRelayBits);
+    const effectiveRelayBitsPerSecond = relayBitrateLimit === null
+        ? targetRelayBitsPerSecond
+        : Math.min(targetRelayBitsPerSecond, relayBitrateLimit);
     const relayChunkEmitSize = Math.max(256 * 1024, relayMaxChunkSize - (64 * 1024));
     const estimatedMaxChunkDurationMs = Math.max(
         250,
@@ -743,16 +759,24 @@ export default function HostView() {
             }
         }
 
-        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
-            ? 'video/webm;codecs=vp8,opus'
-            : MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
-                ? 'video/webm;codecs=vp8'
-                : 'video/webm';
+        const { mimeType, options: formatOptions } = selectRelayRecorderFormat(
+            (type) => MediaRecorder.isTypeSupported(type),
+            { allowMp4: !relayMp4Failed },
+        );
+        const isMp4 = mimeType === RELAY_MP4_MIME_TYPE;
 
-        const recorder = new MediaRecorder(stream, {
-            mimeType,
-            videoBitsPerSecond: effectiveRelayBitsPerSecond,
-        });
+        let recorder;
+        try {
+            recorder = new MediaRecorder(stream, {
+                mimeType,
+                videoBitsPerSecond: effectiveRelayBitsPerSecond,
+                ...formatOptions,
+            });
+        } catch (err) {
+            console.error('[Nextra-Host] Failed to create relay recorder:', err.message);
+            if (isMp4) setRelayMp4Failed(true);
+            return;
+        }
         const generation = ++relayGenerationRef.current;
         mediaRecorderRef.current = recorder;
 
@@ -760,7 +784,9 @@ export default function HostView() {
         let lastChunkAt = 0;
         recorder.onstart = () => {
             lastChunkAt = Date.now();
-            socket.emit('media-init', { mimeType, generation });
+            // Chrome reports the exact H.264 profile/level it chose here; viewers
+            // need that string for MediaSource.isTypeSupported.
+            socket.emit('media-init', { mimeType: recorder.mimeType || mimeType, generation });
         };
         recorder.ondataavailable = (evt) => {
             if (evt.data && evt.data.size > 0) {
@@ -775,6 +801,7 @@ export default function HostView() {
         recorder.onerror = (evt) => {
             const message = evt?.error?.message || evt?.error?.name || 'unknown recorder error';
             console.error('[Nextra-Host] Relay recorder error:', message);
+            if (isMp4) setRelayMp4Failed(true);
         };
         recorder.onstop = () => {
             if (mediaRecorderRef.current === recorder) {
@@ -787,6 +814,7 @@ export default function HostView() {
         } catch (err) {
             mediaRecorderRef.current = null;
             console.error('[Nextra-Host] Failed to start relay recorder:', err.message);
+            if (isMp4) setRelayMp4Failed(true);
             return;
         }
 
@@ -806,6 +834,7 @@ export default function HostView() {
         socket,
         emitRelayChunk,
         effectiveRelayBitsPerSecond,
+        relayMp4Failed,
         relayFlushPollIntervalMs,
         relayFlushThresholdMs,
         relayFlushIntervalMs,
@@ -822,6 +851,7 @@ export default function HostView() {
         setViewerCount(0);
         setWhepViewerCount(0);
         setRelayViewerCount(0);
+        setRelayBitrateLimit(null);
         setRoomMetrics(null);
         setPreflightWarnings([]);
         setWhipConnected(false);
@@ -1088,6 +1118,42 @@ export default function HostView() {
         socket.on('relay-demand-changed', onRelayDemandChanged);
         return () => socket.off('relay-demand-changed', onRelayDemandChanged);
     }, [socket, isSharing]);
+
+    // Drop fast on congestion; the recorder restarts at the new bitrate through
+    // the parameter-change effect below.
+    useEffect(() => {
+        if (!isSharing) return undefined;
+        const onRelayCongestion = () => {
+            const next = lowerRelayBitrate(effectiveRelayBitsPerSecond);
+            if (next >= effectiveRelayBitsPerSecond) return;
+            console.warn(`[Nextra-Host] Relay viewers are falling behind; lowering relay bitrate to ${(next / 1_000_000).toFixed(1)} Mbps.`);
+            setRelayBitrateLimit(next);
+        };
+        socket.on('relay-congestion', onRelayCongestion);
+        return () => socket.off('relay-congestion', onRelayCongestion);
+    }, [socket, isSharing, effectiveRelayBitsPerSecond]);
+
+    // The server could not frame this browser's MP4 recording; the VP8 recorder
+    // takes over for the rest of the page session.
+    useEffect(() => {
+        if (!isSharing) return undefined;
+        const onRelayMp4Failed = () => {
+            console.warn('[Nextra-Host] Server could not relay the MP4 recording; switching the relay to VP8.');
+            setRelayMp4Failed(true);
+        };
+        socket.on('relay-mp4-failed', onRelayMp4Failed);
+        return () => socket.off('relay-mp4-failed', onRelayMp4Failed);
+    }, [socket, isSharing]);
+
+    // Recover gradually: every 30 quiet seconds raise the limit 25% until the
+    // profile target is reached. A new congestion signal re-arms the timer.
+    useEffect(() => {
+        if (relayBitrateLimit === null) return undefined;
+        const timer = setTimeout(() => {
+            setRelayBitrateLimit((limit) => (limit === null ? null : raiseRelayBitrate(limit, targetRelayBitsPerSecond)));
+        }, RELAY_BITRATE_STEP_UP_AFTER_MS);
+        return () => clearTimeout(timer);
+    }, [relayBitrateLimit, targetRelayBitsPerSecond]);
 
     const applyQualityProfileToLiveStream = useCallback(async (profileKey, fps) => {
         const profile = getQualityProfile(profileKey);
@@ -1791,6 +1857,9 @@ export default function HostView() {
                         <div className="status-bar">
                             <span className="status-dot streaming" /> Streaming ({QUALITY_PROFILES[qualityProfile]?.label || qualityProfile} @ {frameRate}fps)
                             {relayViewerCount > 0 ? ` | Relay fallback viewers: ${relayViewerCount}` : ''}
+                            {relayViewerCount > 0 && relayBitrateLimit !== null
+                                ? ` | Relay lowered to ${(effectiveRelayBitsPerSecond / 1_000_000).toFixed(1)} Mbps (connection too slow for full quality)`
+                                : ''}
                         </div>
                     )}
                 </div>

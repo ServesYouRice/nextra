@@ -281,3 +281,70 @@ test('fMP4 relay player bounds an overflowing queue and requests a fresh generat
     assert.equal(states.at(-1), 'error');
     player.stop();
 });
+
+test('fMP4 relay player reports an unsupported browser when MediaSource is missing', { concurrency: false }, async (t) => {
+    const originalMediaSource = global.MediaSource;
+    delete global.MediaSource;
+    t.after(() => {
+        global.MediaSource = originalMediaSource;
+    });
+
+    const { createFmp4RelayPlayer } = await import('../src/lib/fmp4RelayPlayer.js');
+    const { RELAY_PLAYBACK_UNSUPPORTED_MESSAGE } = await import('../src/lib/watchPlaybackMode.mjs');
+    const socket = new FakeSocket();
+    const states = [];
+    const errors = [];
+    const player = createFmp4RelayPlayer({
+        videoElement: new FakeVideoElement(),
+        socket,
+        roomCode: 'ABC123',
+        onStateChange: (state) => states.push(state),
+        onError: (message) => errors.push(message),
+    });
+
+    player.start();
+    socket.serverEmit('media-init', {
+        generation: 1,
+        mimeType: 'video/mp4; codecs="avc1.42e01f"',
+        initSegment: Uint8Array.of(1, 2),
+    });
+
+    assert.deepEqual(errors, [RELAY_PLAYBACK_UNSUPPORTED_MESSAGE]);
+    assert.equal(states.at(-1), 'error');
+    player.stop();
+});
+
+test('fMP4 relay player uses ManagedMediaSource and disables remote playback when MediaSource is missing', { concurrency: false }, async (t) => {
+    const originalMediaSource = global.MediaSource;
+    const originalManagedMediaSource = global.ManagedMediaSource;
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    delete global.MediaSource;
+    FakeMediaSource.instances = [];
+    global.ManagedMediaSource = FakeMediaSource;
+    URL.createObjectURL = () => 'blob:managed-1';
+    URL.revokeObjectURL = () => {};
+    t.after(() => {
+        global.MediaSource = originalMediaSource;
+        global.ManagedMediaSource = originalManagedMediaSource;
+        URL.createObjectURL = originalCreateObjectUrl;
+        URL.revokeObjectURL = originalRevokeObjectUrl;
+    });
+
+    const { createFmp4RelayPlayer } = await import('../src/lib/fmp4RelayPlayer.js');
+    const socket = new FakeSocket();
+    const video = new FakeVideoElement();
+    const player = createFmp4RelayPlayer({ videoElement: video, socket, roomCode: 'ABC123' });
+
+    player.start();
+    socket.serverEmit('media-init', {
+        generation: 1,
+        mimeType: 'video/mp4; codecs="avc1.42e01f"',
+        initSegment: Uint8Array.of(1, 2),
+    });
+
+    assert.equal(FakeMediaSource.instances.length, 1);
+    assert.equal(video.disableRemotePlayback, true);
+    assert.equal(video.src, 'blob:managed-1');
+    player.stop();
+});
