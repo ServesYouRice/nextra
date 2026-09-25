@@ -166,7 +166,7 @@ async function checkSocketHandshake() {
 async function checkPackageInfo() {
     const response = await fetchWithTimeout(`${baseUrl}/api/package-info`, {}, 5000);
     const body = await response.json();
-    for (const required of ['license', 'notices', 'sourceInstructions', 'sbom']) {
+    for (const required of ['license', 'notices', 'sourceInstructions', 'sbom', 'ffmpeg']) {
         if (!body?.artifacts?.[required]) throw new Error(`Packaged artifact is missing ${required}.`);
     }
 }

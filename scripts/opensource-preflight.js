@@ -35,14 +35,16 @@ const forbiddenTracked = new Set([
     'Nextra-macos-x64',
     'cloudflared.exe',
     'cloudflared',
+    'ffmpeg.exe',
+    'ffmpeg',
 ]);
 
 const forbiddenPathRegexes = [
     /^\.env(?:\..+)?$/i,
     /(?:^|\/)certs\/.+\.(?:key|crt|pem|p12|pfx)$/i,
-    /(?:^|\/)(?:Nextra|cloudflared)\.exe$/i,
+    /(?:^|\/)(?:Nextra|cloudflared|ffmpeg)\.exe$/i,
     /(?:^|\/)Nextra-macos-(?:arm64|x64)$/i,
-    /(?:^|\/)cloudflared$/i,
+    /(?:^|\/)(?:cloudflared|ffmpeg)$/i,
 ];
 
 const sensitiveRegexes = [

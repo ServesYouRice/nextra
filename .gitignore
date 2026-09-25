@@ -28,6 +28,7 @@ Nextra.exe.sha256
 Nextra-macos-*
 cloudflared.exe
 cloudflared
+/ffmpeg
 .caxa-stage/
 *.tgz
 *.exe
