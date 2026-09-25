@@ -331,7 +331,7 @@ Notes:
 | `CREATE_ROOM_RATE_LIMIT_MAX` | `10` | Room creation attempts per IP per window |
 | `JOIN_RATE_LIMIT_MAX` | `20` | Viewer join or auto-rejoin attempts per IP per window |
 | `HOST_UPLOAD_MBPS` | `36` | Assumed host upload bandwidth |
-| `RELAY_VIDEO_BITS_PER_SECOND` | `45000000` | Max relay video bitrate ceiling |
+| `RELAY_VIDEO_BITS_PER_SECOND` | `45000000` | Max relay video bitrate ceiling. No tuning is needed: a relay viewer that falls behind skips ahead to the next keyframe, and when every relay viewer falls behind the host lowers the relay bitrate (down to 2.5 Mbps) and raises it 25% after every 30 quiet seconds |
 | `RELAY_FLUSH_INTERVAL_MS` | `300` | Relay socket flush interval in ms |
 | `RELAY_SOCKET_MAX_BUFFERED_BYTES` | `16777216` | Per-viewer relay send-buffer cap before slow viewers are skipped/kicked |
 | `MAX_CONNECTIONS_PER_IP` | `60` | Rate limit: connections per IP |
@@ -444,6 +444,7 @@ cloudflared processes.
 | App closes immediately (Windows) | Check `%LOCALAPPDATA%\\Nextra\\logs\\startup-latest.log`. |
 | App closes immediately (macOS) | Check `$TMPDIR/Nextra/logs/startup-latest.log` (run `echo $TMPDIR` in Terminal for the exact path). |
 | Poor quality | Lower resolution/framerate, use a wired connection, and reduce host desktop load. |
+| iPhone/iPad viewer on a public link says the browser cannot play the relay stream | iPhone relay playback needs iOS 17.1+ and a host on a current Chrome or Edge, which records the relay as H.264 MP4. Hosts that can only record VP8 (e.g. Firefox) serve a relay iPhones cannot play; watch from Chrome on Android or a desktop browser instead. |
 
 ---
 
