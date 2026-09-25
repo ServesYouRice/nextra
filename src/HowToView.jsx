@@ -13,6 +13,7 @@ export default function HowToView() {
                 Nextra is a low-latency screen sharing app for local and remote viewers.
                 You can host directly from the browser, or switch to OBS for higher quality scenes and hardware encoding.
                 OBS rooms can run in stable H.264 mode with relay fallback, or AV1 WebRTC-only mode with BYOK TURN.
+                Viewers who cannot reach the host directly, such as people using the public link, watch through a relay that adjusts itself to their connection.
             </p>
 
             <h2>What you need</h2>
@@ -20,8 +21,8 @@ export default function HowToView() {
             <div className="article-step">
                 <strong>Everyone</strong>
                 <ul>
-                    <li><strong>Host:</strong> Windows machine running <code>Nextra.exe</code> or the project from source with <code>npm run dev</code> / <code>npm run build && npm start</code></li>
-                    <li><strong>Viewers:</strong> desktop Chrome/Edge or mobile Chrome, no install required</li>
+                    <li><strong>Host:</strong> a Windows PC running <code>Nextra.exe</code>, an Apple Silicon Mac running <code>Nextra-macos-arm64</code>, or the project from source with <code>npm run dev</code> / <code>npm run build && npm start</code>. Host from Chrome, Edge, or Brave.</li>
+                    <li><strong>Viewers:</strong> desktop browsers, Android Chrome, or an iPhone/iPad on iOS 17.1 or later. No install required.</li>
                 </ul>
             </div>
 
@@ -64,10 +65,10 @@ export default function HowToView() {
                             <td>Not tested</td>
                         </tr>
                         <tr>
-                            <th scope="row">Viewer, relay (H.264/WebM)</th>
+                            <th scope="row">Viewer, relay (H.264 MP4 / WebM)</th>
                             <td>Tested</td>
                             <td>Not tested</td>
-                            <td>Not tested</td>
+                            <td>iPhone/iPad (iOS 17.1+): checked by hand, needs a Chrome/Edge/Brave host</td>
                         </tr>
                     </tbody>
                 </table>
@@ -88,8 +89,16 @@ export default function HowToView() {
             <div className="article-step">
                 <strong>1. Run the app</strong>
                 <p>
-                    Start <code>Nextra.exe</code>, run <code>npm run dev</code> for source development, or run <code>npm run build && npm start</code> for a source production start.
-                    Keep the app running while you are streaming.
+                    <strong>Windows:</strong> double-click <code>Nextra.exe</code>. If SmartScreen warns about an unrecognized app, choose <strong>More info &gt; Run anyway</strong>.
+                </p>
+                <p>
+                    <strong>Mac (Apple Silicon):</strong> the download is blocked until you clear it once. Open Terminal in the download folder and run:
+                </p>
+                <pre><code>{'chmod +x ./Nextra-macos-arm64\nxattr -dr com.apple.quarantine ./Nextra-macos-arm64\n./Nextra-macos-arm64'}</code></pre>
+                <p>
+                    Keep that Terminal window open while you stream; press <strong>Ctrl+C</strong> in it to stop Nextra.
+                    From source, run <code>npm run dev</code>, or <code>npm run build && npm start</code> for a production start.
+                    Only one copy of Nextra can run at a time.
                 </p>
             </div>
 
@@ -105,6 +114,7 @@ export default function HowToView() {
                             Allow firewall access for Node.js when prompted, or viewers may not connect.
                         </li>
                         <li>Use the local host page from this machine when capturing a browser screen.</li>
+                        <li>On a Mac, host from Chrome, Edge, or Brave (not Safari), and allow Screen Recording for that browser in <strong>System Settings &gt; Privacy &amp; Security</strong> when asked.</li>
                     </ul>
                 </div>
             </div>
@@ -132,7 +142,8 @@ export default function HowToView() {
                 <strong>5. Share the link</strong>
                 <p>
                     Copy the <strong>Public Link</strong> for internet viewers, or the <strong>Local Link</strong> / room code for same-network viewers.
-                    Packaged <code>Nextra.exe</code> creates a public tunnel link automatically. In dev, enable <code>AUTO_PUBLIC_TUNNEL=true</code> or configure <code>SHARE_BASE_URL</code>.
+                    The packaged app creates a public tunnel link automatically. In dev, enable <code>AUTO_PUBLIC_TUNNEL=true</code> or configure <code>SHARE_BASE_URL</code>.
+                    The public link is meant for one or two viewers, because each of them receives a full copy of the stream through your upload. For a bigger audience, run Nextra on a server with a public IP address.
                     Each link lasts only for that in-memory room: stopping the Host or restarting Nextra retires it and the next room gets a new link.
                 </p>
             </div>
@@ -208,8 +219,10 @@ export default function HowToView() {
             <div className="article-step">
                 <strong>2. Playback</strong>
                 <p>
-                    The stream starts when you click <strong>Watch Stream</strong>. Browser capture uses WebRTC directly.
-                    H.264 OBS rooms can use WebRTC or Relay, and the viewer can switch into Relay Mode when it is offered.
+                    The stream starts when you click <strong>Watch Stream</strong>. Nextra uses direct WebRTC when your device can reach the host,
+                    and otherwise, for example through the public link, a relay over the page connection.
+                    On a slow connection the relay skips ahead to stay live instead of disconnecting you.
+                    H.264 OBS rooms also let you switch into Relay Mode when it is offered.
                     AV1 OBS rooms stay on WebRTC only, which means viewers need TURN-reachable connectivity and a browser that can play AV1.
                 </p>
             </div>
@@ -238,8 +251,29 @@ export default function HowToView() {
             <div className="article-step">
                 <strong>No public link?</strong>
                 <p>
-                    Wait a few seconds after startup. In dev, enable <code>AUTO_PUBLIC_TUNNEL=true</code>.
-                    Make sure the <code>cloudflared</code> binary is in the project root or on PATH.
+                    Wait a few seconds after startup; the packaged app includes <code>cloudflared</code>. In dev, enable <code>AUTO_PUBLIC_TUNNEL=true</code>
+                    and make sure the <code>cloudflared</code> binary is in the project root or on PATH.
+                </p>
+            </div>
+
+            <div className="article-step">
+                <strong>Mac says the app cannot be opened or is damaged?</strong>
+                <p>
+                    Run the <code>chmod</code> and <code>xattr</code> commands from step 1 of For Hosts in the folder that holds the download.
+                </p>
+            </div>
+
+            <div className="article-step">
+                <strong>iPhone or iPad says it cannot play the relay stream?</strong>
+                <p>
+                    iPhones and iPads need iOS 17.1 or later, and the host must use Chrome, Edge, or Brave, which record the relay in a format iOS can play.
+                </p>
+            </div>
+
+            <div className="article-step">
+                <strong>Host status bar says the relay was lowered?</strong>
+                <p>
+                    Every relay viewer was falling behind, so your upload could not carry the full quality. Nothing to fix: quality returns step by step once the connection keeps up.
                 </p>
             </div>
 
