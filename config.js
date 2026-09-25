@@ -2,7 +2,9 @@
 // NOTE: dotenv is intentionally NOT loaded here. Entry points (server.js) load it
 // before requiring this module, which keeps `node --test` hermetic — tests use
 // explicit fixture env rather than the developer's local .env file.
+const fs = require('fs');
 const os = require('os');
+const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const {
@@ -49,6 +51,13 @@ function getLanIp() {
     candidates.sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
     if (candidates.length > 0) return candidates[0].address;
     return '127.0.0.1';
+}
+
+// Packaged releases stage a pinned FFmpeg beside this file (see
+// scripts/package-app.js); prefer it over whatever `ffmpeg` is on PATH.
+function getBundledFfmpegPath() {
+    const bundled = path.join(__dirname, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+    return fs.existsSync(bundled) ? bundled : '';
 }
 
 function parseIntEnv(value, fallback) {
@@ -365,7 +374,7 @@ const config = {
     // The OBS-compatible listener is plain HTTP. Widening it beyond loopback
     // exposes bearer credentials unless a VPN or TLS reverse proxy protects it.
     WHIP_ALLOW_INSECURE_REMOTE: parseBoolEnv(process.env.WHIP_ALLOW_INSECURE_REMOTE, false),
-    FFMPEG_PATH: (process.env.FFMPEG_PATH || 'ffmpeg').trim(),
+    FFMPEG_PATH: (process.env.FFMPEG_PATH || getBundledFfmpegPath() || 'ffmpeg').trim(),
     FALLBACK_AUDIO_BITRATE: (process.env.FALLBACK_AUDIO_BITRATE || '192k').trim(),
     // How much the relay delays OBS audio to match video (milliseconds). The video
     // picks up real latency that audio does not (decode -> NVENC re-encode -> 1s-GOP

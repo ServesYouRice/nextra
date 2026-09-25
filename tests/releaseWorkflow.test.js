@@ -27,7 +27,7 @@ test('version-tagged builds publish truthful unsigned artifacts for both platfor
     assert.match(workflow, /gh release upload/);
     assert.match(workflow, /unsigned and not notarized on both platforms/);
     assert.match(workflow, /other browsers are not tested/);
-    assert.match(workflow, /Corresponding GPL-3\.0 source/);
+    assert.match(workflow, /Corresponding AGPL-3\.0 source/);
     assert.doesNotMatch(workflow, /SIGNING_PFX|signtool|Authenticode/);
 });
 
