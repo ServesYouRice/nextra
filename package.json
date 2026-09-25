@@ -1,7 +1,7 @@
 {
   "name": "nextra",
   "private": true,
-  "version": "2.1.3",
+  "version": "2.1.4",
   "description": "Self-hosted low-latency screen sharing with browser capture, OBS WHIP ingest, mediasoup, and relay fallback.",
   "license": "AGPL-3.0-only",
   "author": "ServesYouRice",
