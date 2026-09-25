@@ -20,7 +20,9 @@ TL;DR: there are 2 host modes:
    - H.264 is the stable default path and keeps relay fallback available.
    - AV1 is available when OBS can set and verify an AV1 encoder, but it is WebRTC-only and requires BYOK TURN.
 
-You can grab a packaged build (Windows x64 or macOS arm64) from [GitHub Releases](../../releases), run it, and start sharing. Install OBS only if you want the OBS workflow.
+You can grab a packaged build (Windows x64 or Apple Silicon Mac) from [GitHub Releases](../../releases), run it, and start sharing. The packaged builds already include everything they need (FFmpeg and Cloudflare's `cloudflared`); install OBS only if you want the OBS workflow.
+
+The built-in **Public Link** is meant for sharing with one or two people over the internet. For a bigger audience, run Nextra on a server with a public IP address (see [Internet Sharing](#internet-sharing)).
 
 ---
 
@@ -31,8 +33,10 @@ You can grab a packaged build (Windows x64 or macOS arm64) from [GitHub Releases
 - **AV1 OBS rooms** - try bounded NVIDIA, AMD, and Intel encoder candidates and keep the first one OBS verifies for WebRTC-only playback
 - **BYOK TURN for AV1** - room-scoped TURN credentials, optional session-only storage, and optional Cloudflare TURN autofill
 - **Up to 4K @ 60 fps** - quality profiles adapt to host upload and viewer count
-- **WebRTC + Relay playback** - browser capture and AV1 stay on WebRTC; H.264 OBS rooms can fall back to fMP4 relay
-- **Personal public sharing** - built-in Cloudflare Quick Tunnel for convenient, best-effort links; not a production availability contract
+- **WebRTC + Relay playback** - viewers use direct WebRTC when they can reach the host, and a relay over the page connection when they cannot (for example, through the public link); AV1 OBS rooms are WebRTC-only
+- **iPhone and iPad viewers** - public-link viewers on iOS 17.1+ can watch when the host uses Chrome, Edge, or Brave
+- **Self-adjusting relay** - a relay viewer on a slow connection skips ahead instead of being disconnected, and the relay lowers its own bitrate when the host's upload cannot keep up, then raises it again; nothing to configure
+- **Personal public sharing** - built-in Cloudflare Quick Tunnel for convenient, best-effort links to one or two viewers; not a production availability contract
 - **Remote media control** - viewers can pause/play media on the host machine when enabled by the host
 - **Status dashboard** - local server metrics for rooms, WebRTC viewers, relay viewers, WHEP viewers, and runtime counters
 - **No accounts or sign-ups** - room-code based access
@@ -43,20 +47,47 @@ You can grab a packaged build (Windows x64 or macOS arm64) from [GitHub Releases
 
 ### Host (Packaged)
 
-Nextra ships packaged builds for Windows x64 (`Nextra.exe`) and macOS arm64
-(`Nextra-macos-arm64`). Both are unsigned and non-notarized (see
+Nextra ships packaged builds for Windows x64 (`Nextra.exe`) and Apple Silicon
+Macs (`Nextra-macos-arm64`). Both bundle FFmpeg and `cloudflared`, so there is
+nothing else to install. Both are unsigned and not notarized (see
 [Operations and supported scale](#operations-and-supported-scale)).
 
-1. Download the build for your platform from [GitHub Releases](../../releases).
-2. **macOS only:** the download arrives without the executable bit set and under
-   Gatekeeper quarantine, so clear both before the first run:
+#### Windows
+
+1. Download `Nextra.exe` from [GitHub Releases](../../releases).
+2. Double-click it. If Windows SmartScreen warns about an unrecognized app, choose
+   **More info > Run anyway**. Allow network access if the firewall asks.
+3. The host page opens in your browser at `http://127.0.0.1:3000/#host`.
+
+#### macOS (Apple Silicon)
+
+1. Download `Nextra-macos-arm64` from [GitHub Releases](../../releases).
+2. Open **Terminal** and run these once. The download arrives without permission
+   to run and is blocked by Gatekeeper until you clear its quarantine flag:
    ```bash
+   cd ~/Downloads
    chmod +x ./Nextra-macos-arm64
    xattr -dr com.apple.quarantine ./Nextra-macos-arm64
    ```
-3. Run it and open `http://127.0.0.1:3000/#host`.
-4. Click **Start Sharing** for browser capture, or enable **Use OBS (WHIP ingest)** first if you want OBS mode.
-5. Send viewers the **Public Link** for internet viewing or the **Local Link** / room code for LAN viewing.
+3. Start it from the same Terminal window, and keep that window open while you
+   stream (press **Ctrl+C** to stop Nextra):
+   ```bash
+   ./Nextra-macos-arm64
+   ```
+   The first start takes a little longer while the app unpacks itself.
+4. The host page opens in your default browser at `http://127.0.0.1:3000/#host`.
+   To share your screen, open that address in **Chrome, Edge, or Brave** (Safari
+   is not a supported host browser). macOS asks once for **Screen Recording**
+   permission for that browser under **System Settings > Privacy & Security**.
+
+To change a setting, put a `.env` file (see [Configuration](#configuration)) in
+the folder you start Nextra from; the packaged app reads it on startup.
+
+#### Then, on either platform
+
+1. Click **Start Sharing** for browser capture, or enable **Use OBS (WHIP ingest)** first if you want OBS mode.
+2. Send viewers the **Public Link** for internet viewing, or the **Local Link** / room code for viewers on the same network.
+3. Only one copy of Nextra can run at a time, because it uses port 3000. Stop the old one before starting a new version.
 
 ### Host (From Source)
 
@@ -76,7 +107,9 @@ Open `http://127.0.0.1:3000/#host` and choose either browser capture or OBS mode
 2. Enter the room code if needed.
 3. Click **Watch Stream** when prompted.
 
-No install is required for viewers.
+No install is required for viewers. Desktop browsers, Android Chrome, and
+iPhones/iPads on iOS 17.1 or later can watch; see the table below for what is
+tested.
 
 ### Tested browsers
 
@@ -91,7 +124,7 @@ sniffing the browser name, so an unsupported browser gets an explicit message.
 | Host, browser capture | Tested | Not supported (no screen capture) | Not tested; `systemAudio` capture is Chromium-only |
 | Host, OBS (WHIP) | Tested | Not supported | Not tested |
 | Viewer, WebRTC | Tested | Tested | Not tested |
-| Viewer, relay (H.264/WebM) | Tested | Not tested | Not tested |
+| Viewer, relay (H.264 MP4 / WebM) | Tested | Not tested | iPhone/iPad (iOS 17.1+): checked by hand, not in automated tests; needs a Chrome/Edge/Brave host |
 
 Layout and keyboard flows are checked at 320, 375, 640, 900, 1024, 1280, 1440,
 1600, and 2560 px viewport widths, and the host page is checked for vertical fit
@@ -196,22 +229,25 @@ Manual WHIP setup is mainly for the H.264 path. AV1 rooms still require OBS auto
 | Mode | Transport | When Used |
 |---|---|---|
 | **WebRTC** | Direct mediasoup playback | Browser capture, AV1 OBS rooms, and H.264 OBS rooms when the direct path works |
-| **Relay** | fMP4 over Socket.IO + MSE | H.264 OBS rooms, tunnel viewers without TURN, or manual fallback |
+| **Relay** | MP4 (or WebM) over the page's Socket.IO connection, played with Media Source Extensions | Public-link viewers without TURN, H.264 OBS rooms, or manual fallback |
 | **WHEP** | Standards-based WebRTC egress | Optional external-player playback when `WHEP_ENABLED=true` |
 
 - Cloudflare quick tunnels do not carry UDP. Without TURN, public viewers prefer relay when relay is allowed.
 - AV1 OBS rooms disable relay entirely. If TURN is missing or the browser cannot play AV1, those viewers will fail instead of falling back.
 - Only H.264 OBS rooms expose the **Switch to Relay Mode** button.
+- For browser capture, the host's browser records the relay itself: H.264 MP4 with AAC audio on Chrome, Edge, and Brave, or WebM/VP8 on browsers that cannot record MP4. Only the MP4 relay plays on iPhones and iPads. OBS H.264 rooms use the server's FFmpeg relay instead.
 - The relay player stays near the live edge and auto-recovers from stalls.
+- Each relay viewer gets its own copy of the stream through the host's upload. A viewer on a slow connection skips ahead to the next keyframe instead of being disconnected, without affecting other viewers. If every relay viewer falls behind, the host's upload is the limit: the host lowers the relay bitrate (to 70% per step, never below 2.5 Mbps) and raises it 25% after every 30 quiet seconds. The host status bar shows when the relay has been lowered.
+- A viewer who joins a relay late starts from the most recent keyframe, so joining never restarts the stream for others.
 - When WHEP is enabled, the host page shows an **External Player (WHEP)** copy link at `/whep/watch/<room-code>` for GStreamer, web-based WHEP players, or custom WebRTC clients.
 
 ---
 
 ## Internet Sharing
 
-Packaged `Nextra.exe` automatically starts a Cloudflare quick tunnel and shows a **Public Link** once ready.
+The packaged builds (Windows and macOS) automatically start a Cloudflare quick tunnel and show a **Public Link** once ready.
 
-Quick Tunnels are a convenience path for personal/testing use: URLs change, availability is not guaranteed, and Cloudflare documents a concurrent-request limit. Production deployments should configure a named tunnel or reverse proxy for HTTP plus a separately reachable WebRTC media plane, or use H.264 relay-only public playback.
+The public link is meant for one or two viewers. Everyone watching through it gets the relay, and every relay viewer costs the host a full copy of the stream in upload bandwidth. Quick Tunnels are also a convenience path for personal/testing use: URLs change, availability is not guaranteed, Cloudflare documents a concurrent-request limit, and Cloudflare's terms for serving video through a tunnel allow it to limit such traffic. For a larger audience, run Nextra on a server with a public IP address (for example a VPS) behind a named tunnel or reverse proxy for HTTP, with a separately reachable WebRTC media plane (`BIND_HOST`, `RTC_LISTEN_IP`, `PUBLIC_IP`), so viewers use direct WebRTC.
 
 For source/dev:
 
@@ -264,7 +300,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 |---|---|---|
 | `PORT` | `3000` | Browser server port |
 | `BIND_HOST` | `127.0.0.1` | Bind address |
-| `OPEN_BROWSER` | `false` from source, `true` in packaged `Nextra.exe` | Open the host page automatically on startup or duplicate launch |
+| `OPEN_BROWSER` | `false` from source, `true` in packaged builds | Open the host page automatically on startup or duplicate launch |
 | `LOCAL_HTTPS` | `false` | Serve the local app over self-signed HTTPS instead of HTTP |
 | `HTTPS_CERT_DIR` | `./certs` | TLS certificate directory when `LOCAL_HTTPS=true` |
 
@@ -317,7 +353,7 @@ Notes:
 
 | Variable | Default | Description |
 |---|---|---|
-| `AUTO_PUBLIC_TUNNEL` | `false` from source, `true` in packaged `Nextra.exe` | Auto-start Cloudflare tunnel |
+| `AUTO_PUBLIC_TUNNEL` | `false` from source, `true` in packaged builds | Auto-start Cloudflare tunnel |
 | `CLOUDFLARED_TUNNEL_TOKEN` | - | Run a stable named Cloudflare tunnel; requires `SHARE_BASE_URL` |
 | `SHARE_BASE_URL` | - | Public URL for a named tunnel or your own reverse proxy |
 | `PUBLIC_TUNNEL_PROVIDER` | `cloudflared` | Tunnel provider |
@@ -333,7 +369,7 @@ Notes:
 | `HOST_UPLOAD_MBPS` | `36` | Assumed host upload bandwidth |
 | `RELAY_VIDEO_BITS_PER_SECOND` | `45000000` | Max relay video bitrate ceiling. No tuning is needed: a relay viewer that falls behind skips ahead to the next keyframe, and when every relay viewer falls behind the host lowers the relay bitrate (down to 2.5 Mbps) and raises it 25% after every 30 quiet seconds |
 | `RELAY_FLUSH_INTERVAL_MS` | `300` | Relay socket flush interval in ms |
-| `RELAY_SOCKET_MAX_BUFFERED_BYTES` | `16777216` | Per-viewer relay send-buffer cap before slow viewers are skipped/kicked |
+| `RELAY_SOCKET_MAX_BUFFERED_BYTES` | `16777216` | Per-viewer relay send-buffer hard cap; a viewer past it is disconnected and rejoins (MP4 relay viewers normally skip ahead long before this) |
 | `MAX_CONNECTIONS_PER_IP` | `60` | Rate limit: connections per IP |
 | `SOCKET_PING_TIMEOUT_MS` | `60000` | Grace period before a quiet watcher socket is considered disconnected |
 | `METRICS_BROADCAST_INTERVAL_MS` | `5000` | Room metrics broadcast interval |
@@ -389,7 +425,7 @@ Operational security:
 
 | Problem | Solution |
 |---|---|
-| No public link | Wait a few seconds after startup. In dev, set `AUTO_PUBLIC_TUNNEL=true`. Ensure `cloudflared` exists in the project root or on PATH. |
+| No public link | Wait a few seconds after startup; packaged builds include `cloudflared`. In dev, set `AUTO_PUBLIC_TUNNEL=true` and make sure `cloudflared` exists in the project root or on PATH. |
 | Host preflight blocks startup | Follow the path-specific message: Browser hosting needs desktop capture support on localhost/HTTPS; OBS needs the WHIP listener ready; AV1 additionally needs valid TURN credentials, OBS auto-configuration, and a reachable public media address when sharing publicly. Tunnel startup/failure is only a warning when the local/LAN room can still run. |
 | Viewers cannot connect | Check host firewall, keep the host app running, and verify whether the room expects TURN or relay. |
 | OBS H.264 viewer is black | Try **Switch to Relay Mode** or refresh. H.264 rooms can fall back to relay. |
@@ -400,6 +436,14 @@ Operational security:
 | OBS keeps streaming after the room ends | WHIP has no server-initiated stop, so Nextra stops OBS over obs-websocket when you stop sharing, close the host page, or the server shuts down gracefully. A killed or crashed server cannot signal anything; OBS keeps sending until you stop it. The next **Start sharing** stops any stream still running before it touches OBS settings, so a stale stream will not corrupt the new one. |
 | Audio missing | Ensure OBS is capturing audio in the Audio Mixer. For browser capture, use Chrome or Edge. |
 | Buffering or stalls | Lower the quality profile or frame rate. H.264 rooms can use relay; AV1 rooms need a stable TURN-backed WebRTC path. |
+| Host status bar says the relay was lowered | Every relay viewer was falling behind, so the host's upload (or the tunnel) could not carry the full bitrate. Nothing to fix: quality returns step by step once the connection keeps up. For more than one or two viewers, use a server with a public IP instead of the public link. |
+| One public-link viewer freezes or jumps ahead | That viewer's connection is slower than the stream; they skip ahead to stay live instead of falling behind. Other viewers are not affected. |
+| iPhone/iPad viewer says the browser cannot play the relay stream | iPhone relay playback needs iOS 17.1 or later and a host on Chrome, Edge, or Brave, which record the relay as H.264 MP4. Hosts that can only record WebM/VP8 (for example Firefox) serve a relay iPhones cannot play. |
+| macOS says the app "cannot be opened" or "is damaged" | Run the `chmod` and `xattr` commands from [macOS Quick Start](#macos-apple-silicon) in the folder that holds the download. |
+| Port 3000 already in use | Another copy of Nextra is still running. Stop it (close its window or press Ctrl+C in its Terminal) and start again. |
+| App closes immediately (Windows) | Check `%LOCALAPPDATA%\\Nextra\\logs\\startup-latest.log`. |
+| App closes immediately (macOS) | Check `$TMPDIR/Nextra/logs/startup-latest.log` (run `echo $TMPDIR` in Terminal for the exact path). |
+| Poor quality | Lower resolution/framerate, use a wired connection, and reduce host desktop load. |
 
 ## Operations and supported scale
 
@@ -441,10 +485,6 @@ attribute (see Quick Start above). The packaged smoke replaces the mediasoup
 worker, waits for the replacement process, proves a short decoded-frame Host/view
 flow in Chromium, shuts the app down, and fails on leftover caxa extraction or
 cloudflared processes.
-| App closes immediately (Windows) | Check `%LOCALAPPDATA%\\Nextra\\logs\\startup-latest.log`. |
-| App closes immediately (macOS) | Check `$TMPDIR/Nextra/logs/startup-latest.log` (run `echo $TMPDIR` in Terminal for the exact path). |
-| Poor quality | Lower resolution/framerate, use a wired connection, and reduce host desktop load. |
-| iPhone/iPad viewer on a public link says the browser cannot play the relay stream | iPhone relay playback needs iOS 17.1+ and a host on a current Chrome or Edge, which records the relay as H.264 MP4. Hosts that can only record VP8 (e.g. Firefox) serve a relay iPhones cannot play; watch from Chrome on Android or a desktop browser instead. |
 
 ---
 
@@ -452,19 +492,20 @@ cloudflared processes.
 
 ```text
 Browser (Host)                    Server                         Browser (Viewer)
-+--------------+    HTTP(S)     +----------------+    WebRTC    +--------------+
-| Screen/OBS   | ------------> | mediasoup SFU  | ----------> | Video player |
-| capture      |    WebSocket   |                |             |              |
-+--------------+               | FFmpeg relay    | -- fMP4 --> | MSE player   |
-                               | (H.264 OBS)     |   Socket.IO |              |
-OBS Studio                     |                |             +--------------+
-+--------------+     WHIP      | WHIP endpoint   |
-| Scenes/NDI   | ------------> | (port 3001)     |
-| Encoder      |    HTTP/RTP   |                |
++--------------+    WebRTC     +----------------+    WebRTC    +--------------+
+| Screen       | ------------> | mediasoup SFU  | ----------> | Video player |
+| capture      |               |                |             |              |
+| MediaRecorder| -- MP4/WebM ->| Relay fan-out  | -- chunks ->| MSE player   |
++--------------+   Socket.IO   | (per-viewer    |  Socket.IO  | (Managed-    |
+                               |  skip-ahead)   |             |  MediaSource |
+OBS Studio                     | FFmpeg relay   | -- fMP4 --> |  on iPhone)  |
++--------------+     WHIP      | (H.264 OBS)    |             +--------------+
+| Scenes/NDI   | ------------> | WHIP endpoint  |
+| Encoder      |    HTTP/RTP   | (port 3001)    |
 +--------------+               +----------------+
 ```
 
-FFmpeg relay is H.264-only. AV1 OBS rooms stay on mediasoup/WebRTC with room-scoped TURN.
+The FFmpeg relay is H.264-only. AV1 OBS rooms stay on mediasoup/WebRTC with room-scoped TURN.
 
 ---
 
@@ -489,6 +530,15 @@ Remote Play/Pause control uses the native Windows media-key fallback by default 
 `xdotool` on Linux. The dynamically detected `@nut-tree-fork/nut-js` integration is
 optional and is not part of the supported default installation.
 
+Packaging also downloads a pinned static FFmpeg 9.0.2 build for the target
+(`scripts/ffmpeg-manifest.json`: gyan.dev for Windows x64, Martin Riedl for macOS
+arm64), verifies its SHA-256 before extracting it, and bundles it. Verified
+archives are cached in the OS temp directory for later local packaging runs.
+
+On macOS, package with the official Node.js binary from nodejs.org. Homebrew's
+Node links `libnode` dynamically, so a package built with it starts and then
+fails with `Library not loaded: @rpath/libnode.*.dylib`.
+
 If `cloudflared` is not available locally, packaging downloads the exact immutable
 release declared in `scripts/cloudflared-manifest.json`. Packaging rejects the
 asset unless its pinned SHA-256 matches; on Windows it also requires a valid
@@ -496,3 +546,17 @@ Authenticode signature (macOS binaries have no equivalent check, consistent with
 D09's unsigned/non-notarized scope).
 
 > Note: do not commit packaged executables (`Nextra.exe`, `Nextra-macos-arm64`) to git. Distribute them via [GitHub Releases](../../releases).
+
+---
+
+## License
+
+Nextra is licensed under the [GNU Affero General Public License v3.0](LICENSE)
+(AGPL-3.0). You may use, study, and modify it; if you run a modified version as a
+network service, you must offer its source to that service's users. Licensing on
+other terms is available from the author.
+
+Packaged releases also include third-party programs under their own licenses:
+FFmpeg (GPL-3.0-or-later, text in `licenses/FFmpeg-GPL-3.0.txt`) and Cloudflare
+`cloudflared` (Apache-2.0). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+and [SOURCE.md](SOURCE.md).
