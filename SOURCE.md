@@ -1,6 +1,6 @@
 # Corresponding source
 
-Nextra is distributed under GPL-3.0-only. The complete corresponding source for
+Nextra is distributed under AGPL-3.0-only. The complete corresponding source for
 this build is the repository revision identified by the release tag and commit
 published alongside the executable. Build instructions are in `README.md`.
 

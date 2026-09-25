@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { getCloudflaredAssetName } = require('../scripts/package-app');
+const { getCloudflaredAssetName, getFfmpegAsset } = require('../scripts/package-app');
 const cloudflaredManifest = require('../scripts/cloudflared-manifest.json');
 
 // The platform/arch pairs packaging supports. Each one must resolve to an asset
@@ -39,4 +39,21 @@ test('an unsupported architecture has no pinned asset and throws', () => {
     assert.throws(() => getCloudflaredAssetName('darwin', 'ppc64'), /Unsupported macOS architecture/);
     assert.throws(() => getCloudflaredAssetName('win32', 'ppc64'), /Unsupported Windows architecture/);
     assert.throws(() => getCloudflaredAssetName('linux', 'x64'), /Windows and macOS packaging only/);
+});
+
+// FFmpeg ships only for the two published release targets. Each must pin an
+// HTTPS archive, its SHA-256, and the archive member that is the binary, since
+// the digest is the only check the downloaded archive gets before extraction.
+test('each release target resolves to a pinned FFmpeg archive', () => {
+    for (const [platform, arch, binaryName] of [['win32', 'x64', 'ffmpeg.exe'], ['darwin', 'arm64', 'ffmpeg']]) {
+        const asset = getFfmpegAsset(platform, arch);
+        assert.match(asset.url, /^https:\/\/\S+\.zip$/, `${platform}/${arch} url`);
+        assert.match(asset.sha256, /^[0-9a-f]{64}$/, `${platform}/${arch} sha256`);
+        assert.equal(asset.entry.split('/').pop(), binaryName, `${platform}/${arch} entry`);
+    }
+});
+
+test('a target without a pinned FFmpeg archive throws', () => {
+    assert.throws(() => getFfmpegAsset('darwin', 'x64'), /No pinned FFmpeg build for darwin-x64/);
+    assert.throws(() => getFfmpegAsset('linux', 'x64'), /No pinned FFmpeg build for linux-x64/);
 });

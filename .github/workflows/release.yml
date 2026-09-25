@@ -81,14 +81,17 @@ jobs:
           title_version="${tag#v}"
           notes="$(cat <<NOTES
           This release is unsigned and not notarized on both platforms. Windows may show
-          an unsigned-app warning. macOS Gatekeeper quarantines the download; clear it
-          before the first run:
+          an unsigned-app warning. On macOS the download arrives without the executable
+          bit and under Gatekeeper quarantine; clear both before the first run:
 
+              chmod +x ./Nextra-macos-arm64
               xattr -dr com.apple.quarantine ./Nextra-macos-arm64
 
           Verify each artifact against its matching .sha256 checksum before running it.
           Desktop Chrome/Edge hosts and viewers plus mobile Chrome viewers are tested;
-          other browsers are not tested. Corresponding GPL-3.0 source is the $tag tag.
+          other browsers are not tested. Both builds bundle cloudflared and a pinned FFmpeg
+          (GPL-3.0-or-later; see THIRD_PARTY_NOTICES.md). Corresponding AGPL-3.0 source
+          is the $tag tag.
           NOTES
           )"
 

@@ -77,9 +77,9 @@ export default function HowToView() {
                 <strong>Optional, depending on the workflow</strong>
                 <ul>
                     <li><strong>OBS Studio 28+</strong> - required for OBS streaming mode. Download it from <a href="https://obsproject.com" target="_blank" rel="noopener noreferrer">obsproject.com</a>.</li>
-                    <li><strong>FFmpeg</strong> - required on the server for the H.264 OBS relay path. Download it from <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener noreferrer">ffmpeg.org</a> and make sure it is on your PATH.</li>
+                    <li><strong>FFmpeg</strong> - required on the server for the H.264 relay path that public-link viewers and OBS rooms use. It is bundled in the packaged releases. For source/dev, download it from <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener noreferrer">ffmpeg.org</a> and make sure it is on your PATH.</li>
                     <li><strong>TURN service</strong> - required for OBS AV1 rooms. AV1 mode disables relay fallback and expects viewers to stay on WebRTC.</li>
-                    <li><strong>cloudflared</strong> - required for public internet sharing via Cloudflare tunnel in source/dev. It is bundled in <code>Nextra.exe</code>. Download it from <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/" target="_blank" rel="noopener noreferrer">Cloudflare</a>.</li>
+                    <li><strong>cloudflared</strong> - required for public internet sharing via Cloudflare tunnel in source/dev. It is bundled in the packaged releases. Download it from <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/" target="_blank" rel="noopener noreferrer">Cloudflare</a>.</li>
                 </ul>
             </div>
 

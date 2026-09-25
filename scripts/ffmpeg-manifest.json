@@ -1,0 +1,15 @@
+{
+  "version": "9.0.2",
+  "assets": {
+    "win32-x64": {
+      "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip",
+      "sha256": "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba",
+      "entry": "ffmpeg-9.0.2-essentials_build/bin/ffmpeg.exe"
+    },
+    "darwin-arm64": {
+      "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip",
+      "sha256": "c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924",
+      "entry": "ffmpeg"
+    }
+  }
+}
