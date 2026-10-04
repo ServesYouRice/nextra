@@ -273,3 +273,131 @@ test('encoder labels and kinds cover explicit and normalized vendor forms', asyn
         assert.equal(getEncoderKind(encoderId), expected);
     }
 });
+
+test('buildStreamEncoderSettings turns off everything that delays or breaks a WebRTC stream', async () => {
+    const { buildStreamEncoderSettings } = await obsOutputModelModule;
+
+    const baseParams = {
+        bitrateKbps: 18000,
+        keyframeIntervalSec: 1,
+        preset: 'veryfast',
+        nvencPreset: 'p5',
+        nvencMultipass: 'qres',
+    };
+    const common = { rate_control: 'CBR', bitrate: 18000, keyint_sec: 1, bf: 0, repeat_headers: true };
+    const nvenc = {
+        ...common,
+        max_bitrate: 18000,
+        preset: 'p5',
+        preset2: 'p5',
+        tune: 'll',
+        multipass: 'qres',
+        lookahead: false,
+        disable_scenecut: true,
+    };
+
+    const cases = [
+        { name: 'nvenc + h264', encoderKind: 'nvenc', videoCodec: 'h264', expected: { ...nvenc, profile: 'high' } },
+        { name: 'nvenc + av1', encoderKind: 'nvenc', videoCodec: 'av1', expected: nvenc },
+        {
+            name: 'x264 + h264',
+            encoderKind: 'x264',
+            videoCodec: 'h264',
+            expected: { ...common, preset: 'veryfast', profile: 'high', tune: 'zerolatency', x264opts: 'bframes=0' },
+        },
+        { name: 'amf + h264', encoderKind: 'amf', videoCodec: 'h264', expected: { ...common, bframes: 0, profile: 'high' } },
+        { name: 'amf + av1', encoderKind: 'amf', videoCodec: 'av1', expected: { ...common, bframes: 0 } },
+        {
+            name: 'qsv + h264',
+            encoderKind: 'qsv',
+            videoCodec: 'h264',
+            expected: { ...common, bframes: 0, latency: 'ultra-low', profile: 'high' },
+        },
+        { name: 'qsv + av1', encoderKind: 'qsv', videoCodec: 'av1', expected: { ...common, bframes: 0, latency: 'ultra-low' } },
+        { name: 'other + h264', encoderKind: 'other', videoCodec: 'h264', expected: { ...common, bframes: 0, profile: 'high' } },
+    ];
+
+    for (const testCase of cases) {
+        const actual = buildStreamEncoderSettings({ ...baseParams, encoderKind: testCase.encoderKind, videoCodec: testCase.videoCodec });
+        assert.deepEqual(actual, testCase.expected, `buildStreamEncoderSettings mismatch in case: ${testCase.name}`);
+    }
+});
+
+test('every setting the host builds for OBS is one the server agrees to write', async () => {
+    const { buildStreamEncoderSettings } = await obsOutputModelModule;
+    const { sanitizeEncoderSettings } = require('../lib/obsProfile');
+
+    for (const encoderKind of ['nvenc', 'x264', 'amf', 'qsv', 'other']) {
+        for (const videoCodec of ['h264', 'av1']) {
+            for (const nvencMultipass of ['disabled', 'qres', 'fullres']) {
+                const settings = buildStreamEncoderSettings({
+                    encoderKind,
+                    videoCodec,
+                    bitrateKbps: 21000,
+                    keyframeIntervalSec: 1,
+                    preset: 'veryfast',
+                    nvencPreset: 'p6',
+                    nvencMultipass,
+                });
+                assert.deepEqual(sanitizeEncoderSettings(settings), settings, `${encoderKind} + ${videoCodec} + ${nvencMultipass}`);
+            }
+        }
+    }
+});
+
+test('chooseEncoderCandidates uses the hardware encoder OBS has, whatever the page guessed', async () => {
+    const { chooseEncoderCandidates } = await obsOutputModelModule;
+    const nvidiaObs = ['ffmpeg_svt_av1', 'obs_nvenc_h264_tex', 'obs_nvenc_hevc_tex', 'obs_nvenc_av1_tex', 'obs_x264'];
+
+    const cases = [
+        {
+            name: 'a browser that hides the GPU still gets NVENC',
+            input: { videoCodec: 'h264', candidates: ['obs_x264'], available: nvidiaObs },
+            expected: ['obs_nvenc_h264_tex', 'obs_x264'],
+        },
+        {
+            name: 'a right guess keeps its order, minus what OBS lacks',
+            input: { videoCodec: 'h264', candidates: ['obs_nvenc_h264_tex', 'jim_nvenc', 'obs_x264'], available: nvidiaObs },
+            expected: ['obs_nvenc_h264_tex', 'obs_x264'],
+        },
+        {
+            name: 'a wrong guess is replaced by what OBS has',
+            input: { videoCodec: 'h264', candidates: ['obs_qsv11', 'obs_x264'], available: ['h264_texture_amf', 'obs_x264'] },
+            expected: ['h264_texture_amf', 'obs_x264'],
+        },
+        {
+            name: 'the guessed vendor comes first when OBS has several',
+            input: { videoCodec: 'h264', candidates: ['obs_qsv11', 'obs_x264'], available: ['obs_nvenc_h264_tex', 'obs_qsv11', 'obs_x264'] },
+            expected: ['obs_qsv11', 'obs_nvenc_h264_tex', 'obs_x264'],
+        },
+        {
+            name: 'x264 is what is left without a hardware encoder',
+            input: { videoCodec: 'h264', candidates: ['obs_nvenc_h264_tex', 'jim_nvenc', 'obs_x264'], available: ['obs_x264'] },
+            expected: ['obs_x264'],
+        },
+        {
+            name: 'AV1 keeps only the encoders OBS has',
+            input: { videoCodec: 'av1', candidates: ['av1_texture_amf', 'obs_nvenc_av1_tex', 'jim_av1_nvenc'], available: nvidiaObs },
+            expected: ['obs_nvenc_av1_tex'],
+        },
+        {
+            name: 'AV1 has no candidate on a machine without an AV1 encoder',
+            input: { videoCodec: 'av1', candidates: ['obs_nvenc_av1_tex'], available: ['obs_nvenc_h264_tex', 'obs_x264'] },
+            expected: [],
+        },
+        {
+            name: 'an unknown list leaves the guess alone',
+            input: { videoCodec: 'h264', candidates: ['obs_x264'], available: null },
+            expected: ['obs_x264'],
+        },
+        {
+            name: 'an empty list is treated as unknown',
+            input: { videoCodec: 'h264', candidates: ['obs_nvenc_h264_tex', 'obs_x264'], available: [] },
+            expected: ['obs_nvenc_h264_tex', 'obs_x264'],
+        },
+    ];
+
+    for (const testCase of cases) {
+        assert.deepEqual(chooseEncoderCandidates(testCase.input), testCase.expected, `chooseEncoderCandidates mismatch in case: ${testCase.name}`);
+    }
+});

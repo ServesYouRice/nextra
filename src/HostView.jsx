@@ -25,6 +25,9 @@ import {
 
 const VIDEO_CODEC_OPTIONS = { videoGoogleStartBitrate: 5_000 };
 const OBS_MAX_BITRATE_KBPS = 45_000;
+// Nextra asks OBS for a keyframe every second. Keyframes this far apart mean OBS
+// is streaming on its own defaults instead.
+const OBS_SLOW_KEYFRAME_MS = 2500;
 const AUDIO_CODEC_OPTIONS = {
     opusStereo: 1,
     opusFec: 1,
@@ -561,9 +564,23 @@ export default function HostView() {
             fpsNumerator: frameRate,
             fpsDenominator: 1,
         };
+        // The server writes the encoder's settings into OBS's profile (OBS's own
+        // WebSocket cannot set them).
+        obsOpts.writeEncoderSettings = (payload) => socketRequest(
+            socket,
+            'obs-encoder-settings',
+            payload,
+            { timeoutMs: 5000, maxAttempts: 1 },
+        );
+        // The server also knows which encoders OBS has; this page can only
+        // guess the GPU, and some browsers hide it.
+        obsOpts.listEncoders = () => socketRequest(socket, 'obs-encoders', {}, { timeoutMs: 5000, maxAttempts: 1 })
+            .then((response) => response.encoders || null);
         obsOpts.encoderSettings = {
             bitrateKbps,
-            keyframeIntervalSec: 2,
+            // OBS ignores keyframe requests, so this is how long a viewer who
+            // joins, or a relay that restarts, waits for a picture.
+            keyframeIntervalSec: 1,
             preset: encoderConfig.videoCodec === 'h264' ? tuningProfile.x264Preset : encoderConfig.preset,
             encoder: encoderConfig.videoCodec,
             obsEncoderIds: encoderConfig.obsEncoderIds,
@@ -573,7 +590,7 @@ export default function HostView() {
         };
 
         return obsOpts;
-    }, [frameRate, obsApplySettings, obsAutoStart, obsAv1Mode, obsPassword, qualityProfile, obsTuningProfile]);
+    }, [socket, frameRate, obsApplySettings, obsAutoStart, obsAv1Mode, obsPassword, qualityProfile, obsTuningProfile]);
 
     useEffect(() => {
         obsPasswordRef.current = obsPassword;
@@ -590,8 +607,11 @@ export default function HostView() {
         const channel = obsControlChannelRef.current;
         obsControlChannelRef.current = null;
         if (channel) {
-            channel.stopStream();
-            channel.close();
+            // OBS drops a request whose connection closes right behind it, and
+            // then keeps retrying a room that is gone. Close only once OBS has
+            // answered; a page that is unloading never gets that far, and its
+            // connection ends with the page.
+            channel.stopStream().finally(() => channel.close());
             return;
         }
         stopObsStream({ password: obsPasswordRef.current }).catch(() => {});
@@ -1335,8 +1355,12 @@ export default function HostView() {
                     frameRate,
                     passphrase: roomPassphrase,
                     reloadRecoveryEnabled,
-                    // H.264 fallback relay re-encode bitrate for the selected quality tier.
-                    relayVideoKbps: Math.round(getProfileRelayBitsPerSecond(qualityProfile, frameRate) / 1000),
+                    // The relay's ceiling. For an OBS room that is what OBS itself
+                    // sends: on a connection that carries it, the relay then costs
+                    // no bitrate. For browser capture it is the tier's own cap.
+                    relayVideoKbps: ingestMode === 'obs'
+                        ? scaleObsBitrateKbps(getObsBitrateKbps(getQualityProfile(qualityProfile), frameRate), obsTuningProfile)
+                        : Math.round(getProfileRelayBitsPerSecond(qualityProfile, frameRate) / 1000),
                 });
             }
             const code = createdRoom.code;
@@ -1482,6 +1506,7 @@ export default function HostView() {
         byokTurnCredential,
         obsApplySettings,
         obsAv1Mode,
+        obsTuningProfile,
         publicShareStatus,
         publicShareError,
         publicAv1Supported,
@@ -2042,6 +2067,9 @@ export default function HostView() {
                                     {obsAv1Mode || obsVideoCodec === 'av1'
                                         ? `WebRTC-only AV1 room | TURN ${roomHasTurnServer ? 'ready' : 'missing'}`
                                         : `Fallback viewers: ${fallbackViewerCount} | ${fallbackAvailable ? 'Fallback active' : 'Fallback inactive'}`}
+                                    {fallbackViewerCount > 0 && roomMetrics?.fallbackVideoKbps > 0 && roomMetrics.fallbackVideoKbps < roomMetrics.fallbackVideoTargetKbps
+                                        ? ` | Relay lowered to ${(roomMetrics.fallbackVideoKbps / 1000).toFixed(1)} Mbps (connection too slow for full quality)`
+                                        : ''}
                                 </div>
                             )}
                         </div>
@@ -2065,6 +2093,11 @@ export default function HostView() {
                             )}
                             {obsAutoStatus === 'error' && (
                                 <div className="obs-status-line is-warn" role="alert">{obsAutoMessage}</div>
+                            )}
+                            {roomMetrics?.obsKeyframeIntervalMs > OBS_SLOW_KEYFRAME_MS && (
+                                <div className="obs-status-line is-warn" role="status">
+                                    OBS is sending a keyframe only every {(roomMetrics.obsKeyframeIntervalMs / 1000).toFixed(1)} s, so it is not using the settings Nextra chose: viewers wait that long for a picture. Restart OBS, then start sharing again.
+                                </div>
                             )}
 
                             {obsAutoStatus === 'error' && (

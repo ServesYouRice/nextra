@@ -118,6 +118,12 @@ function sanitizeRoomMetrics(metrics) {
         fallbackViewerCount: finiteNumber(metrics?.fallbackViewerCount),
         fallbackRestartCount: finiteNumber(metrics?.fallbackRestartCount),
         fallbackDroppedBytes: finiteNumber(metrics?.fallbackDroppedBytes),
+        fallbackVideoKbps: finiteNumber(metrics?.fallbackVideoKbps),
+        fallbackVideoTargetKbps: finiteNumber(metrics?.fallbackVideoTargetKbps),
+        fallbackVideoCopy: metrics?.fallbackVideoCopy === true,
+        obsKeyframeIntervalMs: finiteNumber(metrics?.obsKeyframeIntervalMs),
+        obsBitrateKbps: finiteNumber(metrics?.obsBitrateKbps),
+        obsLostPackets: finiteNumber(metrics?.obsLostPackets),
         relay: {
             chunksReceived: finiteNumber(metrics?.relay?.chunksReceived),
             bytesReceived: finiteNumber(metrics?.relay?.bytesReceived),
