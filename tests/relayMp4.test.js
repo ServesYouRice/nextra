@@ -6,6 +6,7 @@ const {
     decideFragmentDelivery,
     decideHostCongestion,
     fragmentStartsWithKeyframe,
+    fragmentVideoTimeSec,
     readVideoTrackInfo,
     SKIP_GIVE_UP_MS,
 } = require('../lib/relayMp4');
@@ -13,8 +14,20 @@ const {
 const { NON_SYNC, box, fragment, initSegment, traf, trak } = require('./mp4Boxes');
 
 test('video track info comes from the vide handler and its trex defaults', () => {
-    assert.deepEqual(readVideoTrackInfo(initSegment()), { videoTrackId: 2, defaultSampleFlags: NON_SYNC });
+    assert.deepEqual(readVideoTrackInfo(initSegment()), { videoTrackId: 2, videoTimescale: 15360, defaultSampleFlags: NON_SYNC });
     assert.equal(readVideoTrackInfo(box('moov', trak(1, 'soun'))), null);
+});
+
+test('a fragment reports when its video starts', () => {
+    const info = readVideoTrackInfo(initSegment());
+    // 1.5 s at the track's timescale; the audio track's own clock is ignored.
+    const withBoth = fragment([traf(1, { decodeTime: 48000 }), traf(2, { decodeTime: 23040, firstSampleFlags: 0 })]);
+    assert.equal(fragmentVideoTimeSec(withBoth, info), 1.5);
+    // Past 32 bits, as a long stream is.
+    assert.equal(fragmentVideoTimeSec(fragment([traf(2, { decodeTime: 15360 * 400_000 })]), info), 400_000);
+    assert.equal(fragmentVideoTimeSec(fragment([traf(1, { decodeTime: 48000 })]), info), null);
+    assert.equal(fragmentVideoTimeSec(fragment([traf(2)]), info), null);
+    assert.equal(fragmentVideoTimeSec(withBoth, null), null);
 });
 
 test('keyframe detection follows trun first, then per-sample, tfhd, and trex flag precedence', () => {

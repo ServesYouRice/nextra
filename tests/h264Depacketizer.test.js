@@ -106,3 +106,53 @@ test('non-IDR slices are not preceded by parameter sets', () => {
     const out = d.push(rtp(p));
     assert.deepEqual(nalTypes(out), [1]);
 });
+
+test('pushFrames returns whole frames, ended by the marker bit', () => {
+    const d = new H264Depacketizer({ sps: Buffer.from([0x67, 1]), pps: Buffer.from([0x68, 2]) });
+    const idr = Buffer.from([0x65, 0xaa]);
+    const slice = Buffer.from([0x41, 0xbb]);
+
+    // A two-slice keyframe: nothing is returned until its last packet.
+    assert.deepEqual(d.pushFrames(rtp(idr, { sequence: 1, timestamp: 9000 })), []);
+    const [keyframe] = d.pushFrames(rtp(idr, { sequence: 2, timestamp: 9000, marker: true }));
+    assert.equal(keyframe.timestamp, 9000);
+    assert.equal(keyframe.keyframe, true);
+    assert.equal(keyframe.intact, true);
+    // Parameter sets go in before each IDR slice.
+    assert.deepEqual(nalTypes(keyframe.data), [7, 8, 5, 7, 8, 5]);
+
+    const [delta] = d.pushFrames(rtp(slice, { sequence: 3, timestamp: 12000, marker: true }));
+    assert.equal(delta.timestamp, 12000);
+    assert.equal(delta.keyframe, false);
+    assert.deepEqual(nalTypes(delta.data), [1]);
+});
+
+test('pushFrames ends a frame at the next timestamp when the marker never came', () => {
+    const d = new H264Depacketizer();
+    const slice = Buffer.from([0x41, 0xbb]);
+    assert.deepEqual(d.pushFrames(rtp(slice, { sequence: 1, timestamp: 3000 })), []);
+    const frames = d.pushFrames(rtp(slice, { sequence: 2, timestamp: 6000, marker: true }));
+    assert.deepEqual(frames.map((frame) => frame.timestamp), [3000, 6000]);
+});
+
+test('pushFrames flags a frame that has packets missing', () => {
+    const d = new H264Depacketizer();
+    const slice = Buffer.from([0x41, 0xbb]);
+    assert.equal(d.pushFrames(rtp(slice, { sequence: 1, timestamp: 3000, marker: true }))[0].intact, true);
+    // Sequence 2 never arrives.
+    assert.equal(d.pushFrames(rtp(slice, { sequence: 3, timestamp: 6000, marker: true }))[0].intact, false);
+    assert.equal(d.pushFrames(rtp(slice, { sequence: 4, timestamp: 9000, marker: true }))[0].intact, true);
+});
+
+test('pushFrames carries the damage forward when a frame is lost entirely', () => {
+    const d = new H264Depacketizer();
+    const slice = Buffer.from([0x41, 0xbb]);
+    d.pushFrames(rtp(slice, { sequence: 1, timestamp: 3000, marker: true }));
+    // The start of a fragmented frame goes missing, so none of it can be used...
+    const middle = Buffer.from([0x7c, 0x01, 0xcc]);
+    const end = Buffer.from([0x7c, 0x41, 0xdd]);
+    assert.deepEqual(d.pushFrames(rtp(middle, { sequence: 3, timestamp: 6000 })), []);
+    assert.deepEqual(d.pushFrames(rtp(end, { sequence: 4, timestamp: 6000, marker: true })), []);
+    // ...and the frame after it, which depends on it, is the one reported.
+    assert.equal(d.pushFrames(rtp(slice, { sequence: 5, timestamp: 9000, marker: true }))[0].intact, false);
+});

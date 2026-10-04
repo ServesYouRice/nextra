@@ -13,6 +13,14 @@ export default function HostDiagnostics({ metrics, onDownload, downloading = fal
                         <div><dt>Fallback restarts</dt><dd>{metrics.fallbackRestartCount || 0}</dd></div>
                         <div><dt>Dropped relay chunks</dt><dd>{relay.droppedOversized || 0}</dd></div>
                         <div><dt>Dropped fallback input</dt><dd>{formatBytes(metrics.fallbackDroppedBytes, { maxUnit: 'MB' })}</dd></div>
+                        {metrics.fallbackVideoKbps > 0 && (
+                            <div><dt>Fallback video bitrate</dt><dd>{metrics.fallbackVideoCopy
+                                ? 'OBS stream passed through unchanged'
+                                : `${(metrics.fallbackVideoKbps / 1000).toFixed(1)} of ${(metrics.fallbackVideoTargetKbps / 1000).toFixed(1)} Mbps`}</dd></div>
+                        )}
+                        {metrics.obsBitrateKbps > 0 && (
+                            <div><dt>OBS is sending</dt><dd>{(metrics.obsBitrateKbps / 1000).toFixed(1)} Mbps, keyframe every {(metrics.obsKeyframeIntervalMs / 1000).toFixed(1)} s, {metrics.obsLostPackets || 0} packets lost</dd></div>
+                        )}
                         <div><dt>Event-loop p95</dt><dd>{Number(eventLoop.p95 || 0).toFixed(1)} ms</dd></div>
                         <div><dt>Event-loop max</dt><dd>{Number(eventLoop.max || 0).toFixed(1)} ms</dd></div>
                     </dl>

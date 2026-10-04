@@ -31,8 +31,11 @@ const {
     destroyRoomWithReason,
     startFallbackRelay,
     stopFallbackRelay,
+    setRelayCapacityKbps,
     emitHostMetrics,
 } = require('./lib/socket');
+const { createRelayCapacityProbe } = require('./lib/relayCapacityProbe');
+const { listObsVideoEncoders, writeStreamEncoderSettings } = require('./lib/obsProfile');
 const { startRoomCleanup, stopRoomCleanup, getAllRoomStats } = require('./lib/rooms');
 const { getOrCreateCert } = require('./lib/https');
 const { startCloudflareTunnel } = require('./lib/tunnel');
@@ -96,14 +99,53 @@ let whipHttpError = '';
 let whipHttpServer = null;
 let serviceReady = false;
 let requestGracefulShutdown = null;
+const RELAY_PROBE_PATH = '/api/relay-probe';
+// A new quick-tunnel hostname can take half a minute to resolve.
+const RELAY_PROBE_ATTEMPTS = 6;
+const relayCapacityProbe = createRelayCapacityProbe();
+let relayProbeTimer = null;
 const publicTunnel = new TunnelSupervisor({
     config,
     startTunnel: startCloudflareTunnel,
     normalizeBaseUrl,
     getLocalProtocol,
     isServiceReady: () => serviceReady,
-    onChange: () => emitServerConfigToAll(ioServer),
+    onChange: (snapshot) => {
+        emitServerConfigToAll(ioServer);
+        scheduleRelayCapacityProbe(snapshot);
+    },
 });
+
+// Everyone on the public link shares one path out of this machine. Measure it
+// once the link is up so the OBS relay starts at a bitrate that fits (see
+// lib/relayCapacityProbe.js). A configured value skips the measurement.
+function scheduleRelayCapacityProbe(snapshot, attempt = 1) {
+    if (relayProbeTimer) clearTimeout(relayProbeTimer);
+    relayProbeTimer = null;
+    if (config.RELAY_PUBLIC_LINK_KBPS > 0) return;
+    if (snapshot?.status !== 'active' || !snapshot.baseUrl) {
+        setRelayCapacityKbps(null);
+        return;
+    }
+    const baseUrl = snapshot.baseUrl;
+    // A fresh quick-tunnel hostname takes a moment to resolve.
+    relayProbeTimer = setTimeout(async () => {
+        relayProbeTimer = null;
+        const result = await relayCapacityProbe.measure(baseUrl, RELAY_PROBE_PATH);
+        if (publicTunnel.snapshot().baseUrl !== baseUrl) return;
+        if (result.status === 'failed' && attempt < RELAY_PROBE_ATTEMPTS) {
+            scheduleRelayCapacityProbe(snapshot, attempt + 1);
+            return;
+        }
+        if (result.status === 'failed') {
+            console.warn(`[Relay] Could not measure the public link (${result.reason}); the relay starts at full bitrate and lowers it if viewers fall behind.`);
+        } else if (result.status === 'fast') {
+            console.log('[Relay] The public link is faster than any relay bitrate.');
+        }
+        setRelayCapacityKbps(result.kbps);
+    }, attempt === 1 ? 2500 : 6000);
+    relayProbeTimer.unref?.();
+}
 
 function getPublicTunnelState() {
     return publicTunnel.snapshot();
@@ -1036,6 +1078,8 @@ app.post('/api/test/kill-media-worker', (req, res) => {
     });
 });
 
+app.get(`${RELAY_PROBE_PATH}/:token`, relayCapacityProbe.handler);
+
 app.get('/healthz', (_req, res) => {
     res.set('Cache-Control', 'no-store').json({ status: 'ok' });
 });
@@ -1233,6 +1277,8 @@ let connectionCleanupInterval = null;
 
 function cleanupGlobalResources() {
     serviceReady = false;
+    if (relayProbeTimer) clearTimeout(relayProbeTimer);
+    relayProbeTimer = null;
     publicTunnel.close();
     stopRoomCleanup();
     stopJoinCleanup();
@@ -1616,6 +1662,15 @@ async function startWhipHttpServer(whipRouter) {
         getClientIp: getSocketHandshakeIp,
         authorizeCreateRoom: (socket, data) => isOperatorSocketAuthorized(socket, data?.operatorToken),
         authorizeRelay: (socket) => isRelayAuthorizedForSocket(socket),
+        // OBS's profile folder is only this machine's to write, and only for a
+        // host page that is on this machine too.
+        applyObsEncoderSettings: (socket, payload) => {
+            if (getSocketClientClassification(socket).kind !== 'loopback') return { ok: false, reason: 'not-local' };
+            const result = writeStreamEncoderSettings(payload);
+            if (result.ok) console.log(`[OBS] Wrote stream encoder settings to ${result.path}`);
+            return result;
+        },
+        listObsEncoders: (socket) => (getSocketClientClassification(socket).kind === 'loopback' ? listObsVideoEncoders() : null),
     });
     startJoinCleanup();
 
