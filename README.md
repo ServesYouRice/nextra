@@ -188,29 +188,34 @@ OBS --WHIP--> Nextra server --mediasoup--> viewers (WebRTC only, with TURN)
 
 ### OBS Auto-Configuration
 
-When **Apply recommended output settings** is checked, Nextra sends these settings to OBS via WebSocket:
+When **Apply recommended output settings** is checked, Nextra applies these settings to OBS:
 
 | Setting | Value |
 |---|---|
 | Output mode | Advanced |
-| Video encoder | Best available H.264 or AV1 hardware encoder for the selected room mode |
+| Video encoder | A hardware H.264 or AV1 encoder that OBS has, for the selected room mode; x264 only when OBS has no hardware H.264 encoder |
 | Video bitrate | Based on selected quality profile, frame rate, and tuning |
-| Keyframe interval | 2 seconds |
+| Keyframe interval | 1 second |
 | Rate control | CBR |
-| NVENC preset | Tuning-driven `p5` / `p6` with full-resolution multipass |
-| x264 preset | Applied only in H.264 rooms |
+| B-frames | 0 |
+| Look-ahead | Off |
+| NVENC | Low-latency tuning, tuning-driven `p5` / `p6` preset with full-resolution multipass |
+| x264 | Tuning-driven preset with the `zerolatency` tune (H.264 rooms only) |
 | Output resolution | Matches the selected profile (1080p / 1440p / 4K) |
 | FPS | 30 or 60 |
 | Audio bitrate | 256 kbps |
 | Audio sample rate | 48 kHz |
 | Color space | BT.709, Full range |
 
-Additional H.264-only tuning:
+H.264 rooms also use the High profile, and the Simple Output page is mirrored when OBS exposes a compatible H.264 encoder.
 
-- High profile
-- `zerolatency` tune
-- 0 B-frames
-- Simple Output page mirrored when OBS exposes a compatible H.264 encoder
+How these reach OBS:
+
+- The output mode, encoder, resolution, frame rate and stream target go over OBS WebSocket.
+- OBS WebSocket has no request for the encoder's own settings (bitrate, keyframe interval, B-frames, look-ahead). OBS reads those from `streamEncoder.json` in its profile folder each time a stream starts, so the Nextra server writes them there. This needs OBS on the same machine as Nextra and a host page opened on that machine. Otherwise the host page lists the values to set in **Settings > Output > Streaming**; without them OBS streams on its defaults (a keyframe only every 250 frames, B-frames and look-ahead on), which delays every viewer.
+- The encoder is chosen from the list OBS writes to its log when it starts, so it does not depend on what the browser reveals about the GPU.
+- OBS applies a changed encoder or output mode only when it restarts. The host page says when that is needed: restart OBS once, then start sharing again.
+- OBS does not answer keyframe requests, so the keyframe interval is how long a new WebRTC viewer waits for a picture. The host page warns when OBS sends keyframes more than 2.5 seconds apart.
 
 ### Manual OBS Setup
 
@@ -219,7 +224,7 @@ Manual WHIP setup is mainly for the H.264 path. AV1 rooms still require OBS auto
 1. In OBS, open **Settings > Stream** and choose **Service: WHIP**.
 2. Server: `http://<host-ip>:3001/whip/broadcast/<room-code>`
 3. Bearer Token: copy it from the host page
-4. If the room is H.264, use the recommended settings above.
+4. If the room is H.264, use the recommended settings above. The keyframe interval, 0 B-frames and no look-ahead matter most.
 5. If the room is AV1, keep AV1 selected in OBS output and make sure the BYOK TURN modal was completed first.
 
 ---
@@ -236,7 +241,9 @@ Manual WHIP setup is mainly for the H.264 path. AV1 rooms still require OBS auto
 - AV1 OBS rooms disable relay entirely. If TURN is missing or the browser cannot play AV1, those viewers will fail instead of falling back.
 - Only H.264 OBS rooms expose the **Switch to Relay Mode** button.
 - For browser capture, the host's browser records the relay itself: H.264 MP4 with AAC audio on Chrome, Edge, and Brave, or WebM/VP8 on browsers that cannot record MP4. Only the MP4 relay plays on iPhones and iPads. OBS H.264 rooms use the server's FFmpeg relay instead.
-- The relay player stays near the live edge and auto-recovers from stalls.
+- The relay player plays a short cushion behind the newest data (half a second to start with) and holds it by playing very slightly faster or slower. A stall makes the cushion a little larger; quiet playback shrinks it again. While the server tests the link for a higher bitrate the player holds a little more in reserve, so the switch that follows plays through.
+- OBS H.264 rooms run the relay on the server, through FFmpeg, in 50 ms pieces, so the relay itself adds well under a second of delay. On a connection that carries the bitrate OBS sends, the relay passes the OBS stream through unchanged: nothing is lost to a second encode. That needs OBS to be running on the settings Nextra wrote (a keyframe every second, no B-frames). Otherwise, and whenever the connection calls for a lower bitrate, FFmpeg re-encodes the stream with a keyframe every second. The player acknowledges each piece, which tells the server how long the stream really takes to arrive, whatever buffers lie in between. A viewer who joins starts at the latest keyframe; one who falls behind skips to the next keyframe. The bitrate follows the connection in three ways. When every relay viewer is a second or more behind and what they received shows the connection carrying less than the stream, the relay drops to 70% of what the connection carried (never below 2.5 Mbps). When viewers are only slightly behind but their queue does not empty for five seconds, it eases down by 10%. And once every viewer has kept up for 30 seconds it tests the link: for four seconds each piece of video is followed by filler (35% extra) that the player discards. If the viewers keep up with that, the bitrate goes up by 20%; if they begin to lag, the filler simply stops and the next test waits twice as long (up to 16 minutes). Bitrate changes happen on a keyframe from OBS, so the picture carries on across them. A new room on the same host starts at the lowered rate for 30 minutes. The OBS room panel shows when the relay has been lowered.
+- The public link carries all its viewers over one connection out of the host. Nextra measures that connection when the link comes up and starts the OBS relay at 70% of it, so the stream fits from the first second, and raises it from there while viewers keep up. On an upload line that loses packets, one connection carries far less than a speed test (which uses many) reports.
 - Each relay viewer gets its own copy of the stream through the host's upload. A viewer on a slow connection skips ahead to the next keyframe instead of being disconnected, without affecting other viewers. If every relay viewer falls behind, the host's upload is the limit: the host lowers the relay bitrate (to 70% per step, never below 2.5 Mbps) and raises it 25% after every 30 quiet seconds. The host status bar shows when the relay has been lowered.
 - A viewer who joins a relay late starts from the most recent keyframe, so joining never restarts the stream for others.
 - When WHEP is enabled, the host page shows an **External Player (WHEP)** copy link at `/whep/watch/<room-code>` for GStreamer, web-based WHEP players, or custom WebRTC clients.
@@ -247,7 +254,7 @@ Manual WHIP setup is mainly for the H.264 path. AV1 rooms still require OBS auto
 
 The packaged builds (Windows and macOS) automatically start a Cloudflare quick tunnel and show a **Public Link** once ready.
 
-The public link is meant for one or two viewers. Everyone watching through it gets the relay, and every relay viewer costs the host a full copy of the stream in upload bandwidth. Quick Tunnels are also a convenience path for personal/testing use: URLs change, availability is not guaranteed, Cloudflare documents a concurrent-request limit, and Cloudflare's terms for serving video through a tunnel allow it to limit such traffic. For a larger audience, run Nextra on a server with a public IP address (for example a VPS) behind a named tunnel or reverse proxy for HTTP, with a separately reachable WebRTC media plane (`BIND_HOST`, `RTC_LISTEN_IP`, `PUBLIC_IP`), so viewers use direct WebRTC.
+The public link is meant for one or two viewers. Everyone watching through it gets the relay, and every relay viewer costs the host a full copy of the stream in upload bandwidth. A quick tunnel also sends everything over a single connection, so the picture quality it can carry is limited by what one connection of your upload manages, not by the upload's total speed. Full OBS quality with the lowest delay needs direct WebRTC: viewers on the same network, or a host that viewers can reach over UDP. Quick Tunnels are also a convenience path for personal/testing use: URLs change, availability is not guaranteed, Cloudflare documents a concurrent-request limit, and Cloudflare's terms for serving video through a tunnel allow it to limit such traffic. For a larger audience, run Nextra on a server with a public IP address (for example a VPS) behind a named tunnel or reverse proxy for HTTP, with a separately reachable WebRTC media plane (`BIND_HOST`, `RTC_LISTEN_IP`, `PUBLIC_IP`), so viewers use direct WebRTC.
 
 For source/dev:
 
@@ -286,6 +293,7 @@ Recommended OBS bitrate targets below are for the stable H.264 relay path. The t
 
 - The default profile is auto-detected from the host screen resolution.
 - Browser/WebRTC profile caps are 1080p `8 / 12 Mbps`, 1440p `14 / 21 Mbps`, and 4K `26 / 36 Mbps`.
+- The OBS relay's ceiling is the OBS bitrate itself; it starts lower only when the public link was measured to carry less.
 - AV1 rooms currently use the same resolution, FPS, and tuning envelopes; the table above remains the compatibility baseline for H.264 relay rooms.
 
 ---
@@ -316,9 +324,9 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 | `WHIP_BIND_HOST` | `127.0.0.1` | Bind address for the plaintext OBS-compatible WHIP endpoint |
 | `WHIP_ALLOW_INSECURE_REMOTE` | `false` | Explicitly acknowledge a non-loopback plaintext WHIP bind; use only behind an encrypted VPN or TLS reverse proxy |
 | `FFMPEG_PATH` | bundled FFmpeg, else `ffmpeg` | Path to FFmpeg; packaged releases use their pinned bundled copy, source checkouts use PATH. Use an absolute trusted path for unattended deployments |
-| `FALLBACK_FRAGMENT_DURATION_MS` | `500` | fMP4 fragment duration in ms |
+| `FALLBACK_FRAGMENT_DURATION_MS` | `50` | Relay fragment duration in ms; a fragment is sent when complete, so this is delay the viewer sees |
 | `FALLBACK_AUDIO_BITRATE` | `192k` | Audio bitrate for relay remux |
-| `FALLBACK_AUDIO_OFFSET_MS` | `1500` | Delay OBS relay audio to keep fMP4 playback in sync |
+| `FALLBACK_AUDIO_OFFSET_MS` | `0` | Relay A/V fine-tune: positive plays audio later, negative earlier. Normally 0 (audio and video keep their own timestamps) |
 | `MAX_FALLBACK_VIEWERS` | `50` | Max concurrent relay viewers |
 | `MAX_FALLBACK_PIPELINES` | `2` | Max simultaneous FFmpeg fallback pipelines on one server |
 
@@ -369,6 +377,7 @@ Notes:
 | `HOST_UPLOAD_MBPS` | `36` | Assumed host upload bandwidth |
 | `RELAY_VIDEO_BITS_PER_SECOND` | `45000000` | Max relay video bitrate ceiling. No tuning is needed: a relay viewer that falls behind skips ahead to the next keyframe, and when every relay viewer falls behind the host lowers the relay bitrate (down to 2.5 Mbps) and raises it 25% after every 30 quiet seconds |
 | `RELAY_FLUSH_INTERVAL_MS` | `300` | Relay socket flush interval in ms |
+| `RELAY_PUBLIC_LINK_KBPS` | `0` | What one connection through the public link carries, in kbps. `0` measures it when the link comes up; set a value to skip the measurement. The OBS relay starts at 70% of it |
 | `RELAY_SOCKET_MAX_BUFFERED_BYTES` | `16777216` | Per-viewer relay send-buffer hard cap; a viewer past it is disconnected and rejoins (MP4 relay viewers normally skip ahead long before this) |
 | `MAX_CONNECTIONS_PER_IP` | `60` | Rate limit: connections per IP |
 | `SOCKET_PING_TIMEOUT_MS` | `60000` | Grace period before a quiet watcher socket is considered disconnected |
@@ -433,10 +442,12 @@ Operational security:
 | Public viewers cannot join an AV1 room | Configure `PUBLIC_IP` and a non-loopback `RTC_LISTEN_IP`, plus suitable ICE/TURN connectivity, or use H.264 relay mode. |
 | Viewer browser says AV1 is unsupported | Its loaded WebRTC receive capabilities do not include `video/AV1`; use a compatible browser/device or switch the host back to H.264. |
 | OBS auto-config fails | Make sure OBS is running and WebSocket is enabled in **Tools > WebSocket Server Settings**. H.264 rooms can fall back to manual WHIP; AV1 rooms cannot. |
-| OBS keeps streaming after the room ends | WHIP has no server-initiated stop, so Nextra stops OBS over obs-websocket when you stop sharing, close the host page, or the server shuts down gracefully. A killed or crashed server cannot signal anything; OBS keeps sending until you stop it. The next **Start sharing** stops any stream still running before it touches OBS settings, so a stale stream will not corrupt the new one. |
+| OBS keeps streaming after the room ends | WHIP has no server-initiated stop, so Nextra stops OBS over obs-websocket when you stop sharing, close the host page, or the server shuts down gracefully. A killed or crashed server cannot signal anything; OBS keeps retrying until you stop it. The next **Start sharing** stops any stream still running, then runs a short test stream so OBS lets go of the encoder it set up for the old one, before it touches OBS settings. |
 | Audio missing | Ensure OBS is capturing audio in the Audio Mixer. For browser capture, use Chrome or Edge. |
 | Buffering or stalls | Lower the quality profile or frame rate. H.264 rooms can use relay; AV1 rooms need a stable TURN-backed WebRTC path. |
 | Host status bar says the relay was lowered | Every relay viewer was falling behind, so the host's upload (or the tunnel) could not carry the full bitrate. Nothing to fix: quality returns step by step once the connection keeps up. For more than one or two viewers, use a server with a public IP instead of the public link. |
+| Host page says OBS is sending a keyframe only every few seconds | OBS is not using the settings Nextra chose, so viewers wait that long for a picture and OBS adds delay of its own. Restart OBS, then start sharing again. If it persists, set them by hand in **Settings > Output > Streaming**: keyframe interval 1 s, no B-frames, look-ahead off. |
+| Picture is green or garbled after changing resolution | OBS kept an encoder from an earlier stream. Nextra clears it with a short test stream each time you start sharing; if the host page reports that the test stream could not run, restart OBS. |
 | One public-link viewer freezes or jumps ahead | That viewer's connection is slower than the stream; they skip ahead to stay live instead of falling behind. Other viewers are not affected. |
 | iPhone/iPad viewer says the browser cannot play the relay stream | iPhone relay playback needs iOS 17.1 or later and a host on Chrome, Edge, or Brave, which record the relay as H.264 MP4. Hosts that can only record WebM/VP8 (for example Firefox) serve a relay iPhones cannot play. |
 | macOS says the app "cannot be opened" or "is damaged" | Run the `chmod` and `xattr` commands from [macOS Quick Start](#macos-apple-silicon) in the folder that holds the download. |

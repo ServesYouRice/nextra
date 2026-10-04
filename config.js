@@ -342,6 +342,9 @@ const config = {
     // relay viewer is considered too slow (WebM viewers are kicked to recover;
     // fMP4 viewers just skip fragments and seek past the gap client-side).
     RELAY_SOCKET_MAX_BUFFERED_BYTES: parseIntEnv(process.env.RELAY_SOCKET_MAX_BUFFERED_BYTES, 16 * 1024 * 1024),
+    // What one connection through the public link carries, in kbps. 0 measures
+    // it when the link comes up; set it to skip the measurement.
+    RELAY_PUBLIC_LINK_KBPS: parseIntEnv(process.env.RELAY_PUBLIC_LINK_KBPS, 0),
     // How long viewers wait on "host reconnecting" before the room is destroyed.
     // The reclaim-host flow covers a page reload in seconds; a long grace just
     // leaves viewers staring at a frozen frame when the host is really gone.
@@ -376,12 +379,13 @@ const config = {
     WHIP_ALLOW_INSECURE_REMOTE: parseBoolEnv(process.env.WHIP_ALLOW_INSECURE_REMOTE, false),
     FFMPEG_PATH: (process.env.FFMPEG_PATH || getBundledFfmpegPath() || 'ffmpeg').trim(),
     FALLBACK_AUDIO_BITRATE: (process.env.FALLBACK_AUDIO_BITRATE || '192k').trim(),
-    // How much the relay delays OBS audio to match video (milliseconds). The video
-    // picks up real latency that audio does not (decode -> NVENC re-encode -> 1s-GOP
-    // fragmentation), so without this audio leads the picture by ~a second. If audio
-    // still plays AHEAD of the lips, raise this; if it lags BEHIND, lower it.
-    FALLBACK_AUDIO_OFFSET_MS: parseIntEnv(process.env.FALLBACK_AUDIO_OFFSET_MS, 1500),
-    FALLBACK_FRAGMENT_DURATION_MS: parseIntEnv(process.env.FALLBACK_FRAGMENT_DURATION_MS, 500),
+    // Relay A/V fine-tune (milliseconds). Audio and video keep their own
+    // timestamps and start on the same instant, so this is 0 unless a particular
+    // setup needs correcting: positive plays audio later, negative earlier.
+    FALLBACK_AUDIO_OFFSET_MS: parseIntEnv(process.env.FALLBACK_AUDIO_OFFSET_MS, 0),
+    // Length of one relay fragment. A fragment is sent when it is complete and
+    // played when it has arrived, so this is delay the viewer sees.
+    FALLBACK_FRAGMENT_DURATION_MS: parseIntEnv(process.env.FALLBACK_FRAGMENT_DURATION_MS, 50),
     MAX_FALLBACK_VIEWERS: parseIntEnv(process.env.MAX_FALLBACK_VIEWERS, 50),
     MAX_FALLBACK_PIPELINES: parseIntEnv(process.env.MAX_FALLBACK_PIPELINES, 2),
     FALLBACK_RESTART_CAP: parseIntEnv(process.env.FALLBACK_RESTART_CAP, 5),
@@ -460,7 +464,7 @@ function validateConfig(value) {
         'PUBLIC_WHIP_MAX_PENDING_STARTS',
     ].forEach((name) => assertNumberInRange(name, value[name], 1, Number.MAX_SAFE_INTEGER));
 
-    assertNumberInRange('FALLBACK_AUDIO_OFFSET_MS', value.FALLBACK_AUDIO_OFFSET_MS, 0, 60_000);
+    assertNumberInRange('FALLBACK_AUDIO_OFFSET_MS', value.FALLBACK_AUDIO_OFFSET_MS, -10_000, 60_000);
     assertNumberInRange('FALLBACK_RESTART_CAP', value.FALLBACK_RESTART_CAP, 0, 100);
     assertNumberInRange('WORKER_RECOVERY_MIN_UPTIME_SECONDS', value.WORKER_RECOVERY_MIN_UPTIME_SECONDS, 0, 3600);
 }

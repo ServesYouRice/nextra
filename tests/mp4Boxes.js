@@ -25,10 +25,11 @@ function u32(...values) {
     return out;
 }
 
-function trak(trackId, handler) {
+function trak(trackId, handler, { timescale = 15360 } = {}) {
     const tkhd = fullBox('tkhd', 0, u32(0, 0, trackId), Buffer.alloc(68));
+    const mdhd = fullBox('mdhd', 0, u32(0, 0, timescale, 0), Buffer.alloc(4));
     const hdlr = fullBox('hdlr', 0, u32(0), Buffer.from(handler, 'ascii'), Buffer.alloc(13));
-    return box('trak', tkhd, box('mdia', hdlr));
+    return box('trak', tkhd, box('mdia', mdhd, hdlr));
 }
 
 function initSegment({ videoDefaultFlags = NON_SYNC } = {}) {
@@ -43,7 +44,7 @@ function fragment(trafs, mdatBytes = 4) {
     return Buffer.concat([box('moof', fullBox('mfhd', 0, u32(1)), ...trafs), box('mdat', Buffer.alloc(mdatBytes))]);
 }
 
-function traf(trackId, { tfhdDefaultFlags, firstSampleFlags, perSampleFlags } = {}) {
+function traf(trackId, { tfhdDefaultFlags, firstSampleFlags, perSampleFlags, decodeTime } = {}) {
     const tfhdFields = [u32(trackId)];
     let tfhdFlags = 0;
     if (tfhdDefaultFlags !== undefined) {
@@ -60,7 +61,13 @@ function traf(trackId, { tfhdDefaultFlags, firstSampleFlags, perSampleFlags } = 
         trunFlags |= 0x100 | 0x200 | 0x400;
         trunFields.push(u32(33, 100, perSampleFlags));
     }
-    return box('traf', fullBox('tfhd', tfhdFlags, ...tfhdFields), fullBox('trun', trunFlags, ...trunFields));
+    const boxes = [fullBox('tfhd', tfhdFlags, ...tfhdFields)];
+    if (decodeTime !== undefined) {
+        // Version 1 (64-bit) base media decode time, as FFmpeg writes it.
+        boxes.push(box('tfdt', Buffer.from([1, 0, 0, 0]), u32(Math.floor(decodeTime / 0x100000000), decodeTime % 0x100000000)));
+    }
+    boxes.push(fullBox('trun', trunFlags, ...trunFields));
+    return box('traf', ...boxes);
 }
 
 module.exports = { NON_SYNC, box, fragment, fullBox, initSegment, traf, trak, u32 };
