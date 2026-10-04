@@ -57,3 +57,4 @@ cloudflared
 
 # Local test-audit scratch is never part of the executor work queue.
 /testing/
+implementation/HOSTING.md
