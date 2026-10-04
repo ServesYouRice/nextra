@@ -57,6 +57,28 @@ export function getAv1EncoderCandidates(renderer = '') {
     return vendorOrder.flatMap((vendor) => AV1_ENCODERS_BY_VENDOR[vendor]);
 }
 
+const H264_HARDWARE_ENCODERS = Object.freeze([
+    'obs_nvenc_h264_tex',
+    'jim_nvenc',
+    'h264_texture_amf',
+    'obs_amf_h264',
+    'obs_qsv11',
+]);
+
+/**
+ * The encoders to try, best first. `candidates` come from the page's guess at
+ * the GPU; `available` is OBS's own list of the encoders it has, when known.
+ * With that list a hardware encoder is used wherever OBS has one, whatever the
+ * page guessed, and an encoder OBS lacks is never chosen.
+ */
+export function chooseEncoderCandidates({ videoCodec, candidates, available }) {
+    if (!Array.isArray(available) || available.length === 0) return candidates;
+    const preferred = videoCodec === 'h264'
+        ? [...candidates.filter((id) => id !== 'obs_x264'), ...H264_HARDWARE_ENCODERS, 'obs_x264']
+        : candidates;
+    return [...new Set(preferred)].filter((id) => available.includes(id));
+}
+
 export function buildLiveOutputPatch({
     encoderKind,
     videoCodec,
@@ -107,6 +129,62 @@ export function buildLiveOutputPatch({
     }
 
     return common;
+}
+
+/**
+ * The contents of OBS's streamEncoder.json: the stream encoder's own settings in
+ * Advanced output mode. OBS reads them from that file only, so this is what
+ * decides the bitrate, the keyframe interval, and whether the encoder adds delay.
+ */
+export function buildStreamEncoderSettings({
+    encoderKind,
+    videoCodec,
+    bitrateKbps,
+    keyframeIntervalSec,
+    preset,
+    nvencPreset,
+    nvencMultipass,
+}) {
+    const common = {
+        rate_control: 'CBR',
+        bitrate: bitrateKbps,
+        keyint_sec: keyframeIntervalSec,
+        // WebRTC carries no B-frames, and a viewer who joins needs the stream's
+        // parameter sets with the next keyframe, not only at the very start.
+        bf: 0,
+        repeat_headers: true,
+    };
+
+    if (encoderKind === 'nvenc') {
+        const settings = {
+            ...common,
+            max_bitrate: bitrateKbps,
+            preset: nvencPreset,
+            preset2: nvencPreset,
+            tune: 'll',
+            multipass: nvencMultipass,
+            // Look-ahead holds frames back before they are encoded.
+            lookahead: false,
+            disable_scenecut: true,
+        };
+        if (videoCodec === 'h264') settings.profile = 'high';
+        return settings;
+    }
+
+    if (encoderKind === 'x264' && videoCodec === 'h264') {
+        return {
+            ...common,
+            preset,
+            profile: 'high',
+            tune: 'zerolatency',
+            x264opts: 'bframes=0',
+        };
+    }
+
+    const settings = { ...common, bframes: 0 };
+    if (encoderKind === 'qsv') settings.latency = 'ultra-low';
+    if (videoCodec === 'h264') settings.profile = 'high';
+    return settings;
 }
 
 export function getSimpleOutputEncoderId(selectedEncoderId, encoderKind, videoCodec) {

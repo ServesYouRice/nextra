@@ -41,3 +41,19 @@ test('room metrics builder preserves request payload defaults', () => {
     assert.equal('runtime' in metrics, false);
     assert.deepEqual(metrics.relay, EMPTY_RELAY_METRICS);
 });
+
+test('room metrics report what OBS is actually sending', () => {
+    const metrics = buildHostRoomMetricsPayload({
+        summary,
+        room: { fallbackSource: { keyframeIntervalMs: 8333, bitrateKbps: 9800, lostPackets: 12 } },
+        eventLoopDelayMs: { p95: 1 },
+    });
+    assert.equal(metrics.obsKeyframeIntervalMs, 8333);
+    assert.equal(metrics.obsBitrateKbps, 9800);
+    assert.equal(metrics.obsLostPackets, 12);
+
+    const idle = buildHostRoomMetricsPayload({ summary, room: {}, eventLoopDelayMs: { p95: 1 } });
+    assert.equal(idle.obsKeyframeIntervalMs, 0);
+    assert.equal(idle.obsBitrateKbps, 0);
+    assert.equal(idle.obsLostPackets, 0);
+});

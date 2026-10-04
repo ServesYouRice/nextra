@@ -3,6 +3,8 @@
 
 import {
     buildLiveOutputPatch,
+    buildStreamEncoderSettings,
+    chooseEncoderCandidates,
     formatEncoderLabel,
     getEncoderKind,
     getSimpleOutputEncoderId,
@@ -212,8 +214,11 @@ async function getStreamStatus(sendRequest) {
 async function stopActiveStream(sendRequest) {
     const status = await getStreamStatus(sendRequest);
     if (!status?.outputActive && !status?.outputReconnecting) {
-        return { stopped: false, ok: true };
+        return { stopped: false, ok: true, wasLive: false };
     }
+    // A stream that was really running hands its encoder back when it stops;
+    // one that was only retrying does not.
+    const wasLive = status.outputReconnecting !== true;
 
     const stopResponse = await sendRequest('StopStream');
     if (stopResponse.requestStatus?.result !== true) {
@@ -228,15 +233,55 @@ async function stopActiveStream(sendRequest) {
         await delay(250);
         const nextStatus = await getStreamStatus(sendRequest);
         if (!nextStatus?.outputActive && !nextStatus?.outputReconnecting) {
-            return { stopped: true, ok: true };
+            return { stopped: true, ok: true, wasLive };
         }
     }
 
     return {
         stopped: true,
         ok: false,
+        wasLive,
         message: 'OBS did not stop the previous stream in time.',
     };
+}
+
+/**
+ * Make OBS let go of an encoder it set up for a stream that never connected.
+ *
+ * Each time OBS retries a target that is gone (the room ended, the server was
+ * closed) it sets its stream encoder up again, and neither the failed attempt
+ * nor stopping the retry releases it. An encoder left like that ignores new
+ * settings and, worse, a new output resolution: it goes on encoding the old size
+ * from a video pipeline that no longer exists, which is a green picture. OBS
+ * does not say whether it holds one, so unless a running stream was just stopped
+ * it has to be assumed. Only a stream that actually ran and was stopped releases
+ * it — so run one, briefly, at the target that is about to be used anyway.
+ */
+async function releaseStaleEncoder(sendRequest) {
+    // A test stream that fails to connect leaves exactly the encoder it was
+    // meant to clear, so one that did not run is tried once more.
+    for (let run = 0; run < 2; run += 1) {
+        if (run > 0) await delay(300);
+        const started = await sendRequest('StartStream');
+        if (started.requestStatus?.result !== true) return false;
+        let ran = false;
+        for (let attempt = 0; attempt < 60 && !ran; attempt += 1) {
+            await delay(100);
+            const status = await getStreamStatus(sendRequest);
+            // Retrying already: the target refused the stream, and waiting longer
+            // only lets OBS set the encoder up once more.
+            if (status?.outputReconnecting === true) break;
+            ran = status?.outputActive === true;
+        }
+        await sendRequest('StopStream');
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+            await delay(100);
+            const status = await getStreamStatus(sendRequest);
+            if (!status?.outputActive && !status?.outputReconnecting) break;
+        }
+        if (ran) return true;
+    }
+    return false;
 }
 
 async function getProfileValue(sendRequest, category, name) {
@@ -274,15 +319,6 @@ async function setAndVerifyProfile(sendRequest, category, name, value) {
         verified: actual === expected,
         actual,
     };
-}
-
-async function setOneOf(sendRequest, categories, name, value) {
-    for (const category of [...new Set(categories.filter(Boolean))]) {
-        if (await trySetProfile(sendRequest, category, name, value)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 async function getOutputSettings(sendRequest, outputName) {
@@ -496,8 +532,12 @@ export function createObsConfigurationTransaction(sendRequest) {
  * @param {boolean} [opts.autoStart]
  * @param {object} [opts.videoSettings] - { outputWidth, outputHeight, fpsNumerator, fpsDenominator }
  * @param {object} [opts.encoderSettings] - { bitrateKbps, keyframeIntervalSec, preset, encoder }
+ * @param {function} [opts.writeEncoderSettings] - async ({ profileName, settings }) =>
+ *   { applied, reason }; stores the encoder's settings where OBS reads them.
+ * @param {function} [opts.listEncoders] - async () => the ids of the video encoders
+ *   OBS has, or null when that is not known.
  */
-export async function configureObsStream({ whipUrl, bearerToken, password = '', autoStart = false, videoSettings = null, encoderSettings = null }) {
+export async function configureObsStream({ whipUrl, bearerToken, password = '', autoStart = false, videoSettings = null, encoderSettings = null, writeEncoderSettings = null, listEncoders = null }) {
     return withObsConnection(password, async (rawSendRequest, done) => {
         const transaction = createObsConfigurationTransaction(rawSendRequest);
         const requestedAv1 = String(encoderSettings?.videoCodec || encoderSettings?.encoder || '').toLowerCase() === 'av1';
@@ -562,6 +602,16 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         }
         applied.push('WHIP URL + token');
 
+        if (!stopResult.wasLive) {
+            // Uses the raw channel: this start/stop is housekeeping, not a step
+            // a failed setup should roll back.
+            if (await releaseStaleEncoder(rawSendRequest)) {
+                applied.push('encoder reset');
+            } else {
+                warnings.push('OBS could not run the short test stream that clears the encoder settings of an earlier stream; if the picture or the delay is wrong, restart OBS');
+            }
+        }
+
         if (videoSettings) {
             const videoResult = await sendRequest('SetVideoSettings', videoSettings);
             if (videoResult.requestStatus?.result === true) {
@@ -596,8 +646,34 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
                 return;
             }
             const selectedVideoCodec = encoderRequest.videoCodec;
-            const encoderCandidates = encoderRequest.encoderCandidates;
+            // Setting an encoder always "succeeds", even one OBS does not have,
+            // so the choice is made from OBS's own list when the server has it.
+            let availableEncoders = null;
+            if (typeof listEncoders === 'function') {
+                try {
+                    availableEncoders = await listEncoders();
+                } catch {
+                    availableEncoders = null;
+                }
+            }
+            const encoderCandidates = chooseEncoderCandidates({
+                videoCodec: selectedVideoCodec,
+                candidates: encoderRequest.encoderCandidates,
+                available: availableEncoders,
+            });
+            if (encoderCandidates.length === 0) {
+                await finish({
+                    success: false,
+                    message: `OBS has no ${selectedVideoCodec.toUpperCase()} encoder on this machine that Nextra can use.`,
+                });
+                return;
+            }
 
+            // OBS builds its outputs — the mode and which encoder — when it starts
+            // or when the profile changes, not when these values change. Remember
+            // what they were so a change can be reported as needing a restart.
+            const previousMode = await getProfileValue(sendRequest, 'Output', 'Mode');
+            const previousEncoderId = await getProfileValue(sendRequest, 'AdvOut', 'Encoder');
             if ((await setAndVerifyProfile(sendRequest, 'Output', 'Mode', 'Advanced')).verified) {
                 applied.push('Advanced mode');
             } else {
@@ -631,6 +707,13 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             await setAndVerifyProfile(sendRequest, 'AdvOut', 'AudioBitrate', '256');
             await setAndVerifyProfile(sendRequest, 'Audio', 'SampleRate', '48000');
             await setAndVerifyProfile(sendRequest, 'Stream1', 'IgnoreRecommended', 'true');
+            // Lets OBS's WHIP service turn B-frames off and repeat the stream's
+            // parameter sets on every keyframe, as WebRTC needs.
+            await setAndVerifyProfile(sendRequest, 'AdvOut', 'ApplyServiceSettings', 'true');
+            if (String(previousMode || '').toLowerCase() !== 'advanced'
+                || (previousEncoderId && previousEncoderId !== selectedEncoderId)) {
+                warnings.push(`OBS switches to ${encoderLabel} in Advanced output mode only after it restarts: restart OBS once, then start sharing again`);
+            }
 
             const streamOutputName = await findStreamOutputName(sendRequest);
             // Not fatal: the encoder is configured via the profile parameters above,
@@ -676,64 +759,51 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
                 }
             }
 
-            if (encoderKind === 'nvenc') {
-                const section = selectedEncoderId;
-                await setAndVerifyProfile(sendRequest, section, 'bitrate', bitrateKbps);
-                await setAndVerifyProfile(sendRequest, section, 'rate_control', 'CBR');
-                await setAndVerifyProfile(sendRequest, section, 'keyint_sec', keyframeIntervalSec);
-                await setAndVerifyProfile(sendRequest, section, 'lookahead', 'false');
-                await setAndVerifyProfile(sendRequest, section, 'multipass', nvencMultipass);
-                await setAndVerifyProfile(sendRequest, section, 'preset2', nvencPreset);
-                if (selectedVideoCodec === 'h264') {
-                    await setAndVerifyProfile(sendRequest, section, 'tune', 'll');
-                    await setAndVerifyProfile(sendRequest, section, 'profile', 'high');
-                }
-                applied.push(`${bitrateKbps} kbps`);
-                applied.push(`NVENC preset: ${nvencPreset} + ${nvencMultipass} multipass`);
-            } else if (encoderKind === 'amf') {
-                const sections = [selectedEncoderId, 'h264_texture_amf', 'obs_amf_h264'];
-                const targetSections = selectedVideoCodec === 'av1'
-                    ? [selectedEncoderId, 'av1_texture_amf', 'obs_amf_av1', 'amd_amf_av1']
-                    : sections;
-                await setOneOf(sendRequest, targetSections, 'bitrate', bitrateKbps);
-                await setOneOf(sendRequest, targetSections, 'rate_control', 'CBR');
-                await setOneOf(sendRequest, targetSections, 'keyint_sec', keyframeIntervalSec);
-                if (selectedVideoCodec === 'h264') {
-                    await setOneOf(sendRequest, targetSections, 'profile', 'high');
-                }
-                applied.push(`${bitrateKbps} kbps`);
-            } else if (encoderKind === 'qsv') {
-                const sections = selectedVideoCodec === 'av1'
-                    ? [selectedEncoderId, 'obs_qsv11_av1', 'obs_qsv_av1']
-                    : [selectedEncoderId, 'obs_qsv11', 'obs_qsv'];
-                await setOneOf(sendRequest, sections, 'bitrate', bitrateKbps);
-                await setOneOf(sendRequest, sections, 'rate_control', 'CBR');
-                await setOneOf(sendRequest, sections, 'keyint_sec', keyframeIntervalSec);
-                if (selectedVideoCodec === 'h264') {
-                    await setOneOf(sendRequest, sections, 'profile', 'high');
-                }
-                applied.push(`${bitrateKbps} kbps`);
-            } else if (encoderKind === 'x264') {
-                if (selectedVideoCodec !== 'h264') {
-                    await finish({
-                        success: false,
-                        message: 'x264 cannot be used for AV1 output.',
-                    });
-                    return;
-                }
-                await setAndVerifyProfile(sendRequest, 'obs_x264', 'bitrate', bitrateKbps);
-                await setAndVerifyProfile(sendRequest, 'obs_x264', 'rate_control', 'CBR');
-                await setAndVerifyProfile(sendRequest, 'obs_x264', 'keyint_sec', keyframeIntervalSec);
-                await setAndVerifyProfile(sendRequest, 'obs_x264', 'preset', preset);
-                await setAndVerifyProfile(sendRequest, 'obs_x264', 'profile', 'high');
-                await setAndVerifyProfile(sendRequest, 'obs_x264', 'tune', 'zerolatency');
-                await setAndVerifyProfile(sendRequest, 'obs_x264', 'x264opts', 'bframes=0');
-                applied.push(`${bitrateKbps} kbps`);
-                applied.push(`x264 preset: ${preset}`);
+            if (encoderKind === 'x264' && selectedVideoCodec !== 'h264') {
+                await finish({
+                    success: false,
+                    message: 'x264 cannot be used for AV1 output.',
+                });
+                return;
             }
 
-            applied.push(`keyframe: ${keyframeIntervalSec}s`);
-            applied.push('low-latency tuning');
+            // The encoder's own settings. OBS has no WebSocket request for them
+            // and reads them from a file in its profile folder, so they go
+            // through the Nextra server, which writes that file when OBS is on
+            // the same machine.
+            const encoderFileSettings = buildStreamEncoderSettings({
+                encoderKind,
+                videoCodec: selectedVideoCodec,
+                bitrateKbps,
+                keyframeIntervalSec,
+                preset,
+                nvencPreset,
+                nvencMultipass,
+            });
+            let encoderSettingsApplied = false;
+            if (typeof writeEncoderSettings === 'function') {
+                const profileList = await sendRequest('GetProfileList');
+                const profileName = profileList.requestStatus?.result === true
+                    ? profileList.responseData?.currentProfileName
+                    : '';
+                if (profileName) {
+                    try {
+                        const written = await writeEncoderSettings({ profileName, settings: encoderFileSettings });
+                        encoderSettingsApplied = written?.applied === true;
+                    } catch {
+                        encoderSettingsApplied = false;
+                    }
+                }
+            }
+            if (encoderSettingsApplied) {
+                applied.push(`${bitrateKbps} kbps`);
+                if (encoderKind === 'nvenc') applied.push(`NVENC preset: ${nvencPreset} + ${nvencMultipass} multipass`);
+                if (encoderKind === 'x264') applied.push(`x264 preset: ${preset}`);
+                applied.push(`keyframe: ${keyframeIntervalSec}s`);
+                applied.push('low-latency tuning');
+            } else {
+                warnings.push(`could not set the encoder's own settings (OBS is not on the Nextra server's machine, or its profile folder was not found): in OBS Settings > Output > Streaming set bitrate ${bitrateKbps} kbps, keyframe interval ${keyframeIntervalSec} s, no B-frames and no look-ahead`);
+            }
 
             await setAndVerifyProfile(sendRequest, 'Video', 'ColorSpace', '709');
             await setAndVerifyProfile(sendRequest, 'Video', 'ColorRange', 'Full');
@@ -787,10 +857,9 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
  * stopObsStream() opens, identifies, and closes per call, and that handshake
  * cannot complete while the page is unloading — which is why closing the host
  * tab leaves OBS streaming into a room that no longer exists. An already
- * identified channel only has to write one frame, and the browser flushes
- * queued data before the close frame.
+ * identified channel only has to write one frame.
  *
- * @returns {{ ready: Promise<{success: boolean, message: string}>, stopStream: () => boolean, close: () => void }}
+ * @returns {{ ready: Promise<{success: boolean, message: string}>, stopStream: () => Promise<boolean>, close: () => void }}
  */
 export function openObsControlChannel({ password = '', ...options } = {}) {
     let sendRequest = null;
@@ -817,16 +886,17 @@ export function openObsControlChannel({ password = '', ...options } = {}) {
     return {
         ready,
         /**
-         * Fire-and-forget: a caller on the unload path is gone before any
-         * response could arrive. Returns whether the frame was written.
+         * Ask OBS to stop streaming. The frame is written at once, so a caller
+         * on the unload path has done all it can by calling this. Resolves to
+         * whether OBS answered. OBS drops a request whose connection closes
+         * right behind it, so keep the channel open until this settles.
          */
         stopStream() {
-            if (!sendRequest) return false;
+            if (!sendRequest) return Promise.resolve(false);
             try {
-                sendRequest('StopStream').catch(() => {});
-                return true;
+                return sendRequest('StopStream').then(() => true, () => false);
             } catch {
-                return false;
+                return Promise.resolve(false);
             }
         },
         close() {
