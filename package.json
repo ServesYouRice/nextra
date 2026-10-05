@@ -39,18 +39,18 @@
   },
   "dependencies": {
     "compression": "^1.8.2",
-    "dotenv": "^18.0.3",
+    "dotenv": "^18.0.5",
     "express": "^5.2.1",
     "helmet": "^8.3.0",
     "mediasoup": "^3.27.1",
     "qrcode": "^1.5.4",
     "selfsigned": "^5.5.0",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.4"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.63.0",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.4",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
@@ -60,13 +60,13 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.12.0",
-    "mediasoup-client": "^3.24.1",
+    "mediasoup-client": "^3.24.4",
     "rcedit": "^5.0.2",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "socket.io-client": "^4.8.3",
+    "socket.io-client": "^4.8.4",
     "typescript": "^7.0.2",
-    "vite": "^8.3.1",
+    "vite": "^8.3.2",
     "ws": "^8.21.3"
   },
   "overrides": {
