@@ -51,11 +51,8 @@ cloudflared
 !README.md
 !SOURCE.md
 !THIRD_PARTY_NOTICES.md
-!implementation/
-!implementation/*.md
-!implementation/tasks/**/*.md
 !.arbitra/**/*.md
 
-# Local test-audit scratch is never part of the executor work queue.
+# Local scratch and the maintainer's local hosting notes stay out of git.
 /testing/
-implementation/HOSTING.md
+implementation/
