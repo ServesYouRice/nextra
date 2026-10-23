@@ -1,6 +1,6 @@
 'use strict';
 
-// Long-running churn / leak harness (implementation/KANBAN.md, T10).
+// Long-running churn / leak harness.
 //
 // Holds a small pool of persistent host+viewer socket pairs and, on each pair,
 // repeatedly creates and tears down a room, a host send transport, a viewer join,
