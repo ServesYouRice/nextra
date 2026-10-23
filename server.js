@@ -47,11 +47,10 @@ const {
     isLocalHostname,
     isLocalClientIp,
     isLoopbackIp,
-    shouldTrustForwardedHeaders,
-    getTrustedForwardedClientIp,
     classifyClient,
     timingSafeTokenEqual,
 } = require('./lib/network');
+const { createRequestIdentity, normalizeOrigin, parseUrlHostParts } = require('./lib/requestIdentity');
 const { createWhipRouter, setIo: setWhipIo, setMediaLifecycle: setWhipMediaLifecycle } = require('./lib/whipRoutes');
 const { createWhepRouter } = require('./lib/whepRoutes');
 const { warmNvencProbe, getNvencProbeStatus } = require('./lib/ffmpegRelay');
@@ -229,33 +228,6 @@ function getRemoteAddressFromReq(req) {
     );
 }
 
-function parseUrlHostParts(hostValue) {
-    if (!hostValue) return null;
-    const trimmed = hostValue.trim();
-    if (!trimmed || trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes(' ')) return null;
-
-    const probe = trimmed.startsWith('[') ? `https://${trimmed}` : `https://${trimmed}`;
-    try {
-        const parsed = new URL(probe);
-        const hostname = parsed.hostname;
-        if (!hostname) return null;
-        const port = parsed.port || '';
-        return { hostname, port, hostWithPort: port ? `${hostname}:${port}` : hostname };
-    } catch {
-        return null;
-    }
-}
-
-function normalizeOrigin(origin) {
-    if (!origin || typeof origin !== 'string') return '';
-    try {
-        const parsed = new URL(origin);
-        return `${parsed.protocol}//${parsed.host}`;
-    } catch {
-        return '';
-    }
-}
-
 function normalizeBaseUrl(url) {
     const normalized = normalizeOrigin(url);
     return normalized.replace(/\/$/, '');
@@ -283,99 +255,45 @@ function getKnownPublicShareOrigins() {
     ].filter((origin) => origin && isPublicOrigin(origin));
 }
 
-function isKnownPublicShareOrigin(origin) {
-    const normalized = normalizeBaseUrl(origin);
-    if (!normalized || !isPublicOrigin(normalized)) return false;
-    return getKnownPublicShareOrigins().includes(normalized);
-}
-
-function getForwardedOrigin(headers = {}) {
-    const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
-    const forwardedHost = parseForwardedFirst(headers['x-forwarded-host']);
-    const proto = (forwardedProto || '').toLowerCase();
-    const hostParts = parseUrlHostParts(forwardedHost);
-    if ((proto === 'http' || proto === 'https') && hostParts) {
-        return `${proto}://${hostParts.hostWithPort}`;
-    }
-
-    return '';
-}
-
-function getRequestHostOrigin(headers = {}, encrypted = true) {
-    const hostHeader = typeof headers.host === 'string' ? headers.host : '';
-    const hostParts = parseUrlHostParts(hostHeader);
-    if (!hostParts) return '';
-    return `${encrypted ? 'https' : 'http'}://${hostParts.hostWithPort}`;
-}
-
-function isKnownPublicShareRequest(headers = {}, encrypted = true) {
-    const candidates = [
-        getForwardedOrigin(headers),
-        getRequestHostOrigin(headers, encrypted),
-        normalizeOrigin(headers.origin),
-        normalizeOrigin(headers.referer || headers.referrer),
-    ];
-
-    return candidates.some((origin) => isKnownPublicShareOrigin(origin));
-}
-
-function shouldTrustRequestForwardedHeaders(headers = {}, remoteAddress = '', encrypted = true) {
-    if (shouldTrustForwardedHeaders(remoteAddress, config.TRUST_X_FORWARDED_HEADERS)) {
-        return true;
-    }
-
-    return isLoopbackIp(remoteAddress)
-        && isKnownPublicShareRequest(headers, encrypted);
-}
-
-function getClientIpFromHeaders(headers = {}, remoteAddress = '', encrypted = true) {
-    const normalizedRemote = normalizeIp(remoteAddress || 'unknown');
-    const trustForwarded = shouldTrustRequestForwardedHeaders(headers, normalizedRemote, encrypted);
-    const forwardedIp = getTrustedForwardedClientIp(headers, normalizedRemote, trustForwarded);
-    if (forwardedIp) return forwardedIp;
-
-    if (isKnownPublicShareRequest(headers, encrypted)) {
-        // The built-in cloudflared tunnel proxies from loopback, so we don't trust
-        // forwarded headers for security decisions — but cloudflared does set
-        // cf-connecting-ip to the real viewer address. Fold it into a namespaced,
-        // per-viewer identity so each internet viewer gets its OWN rate-limit
-        // bucket instead of every tunnel viewer sharing 'public-share-proxy' (which
-        // let one client's traffic rate-limit everyone off the tunnel). The
-        // 'public-share:' prefix keeps this from ever matching isLocalClientIp, so
-        // LAN-URL and metrics gating are unchanged.
-        const tunnelViewerIp = parseForwardedFirst(headers['cf-connecting-ip']);
-        return tunnelViewerIp
-            ? `public-share:${normalizeIp(tunnelViewerIp)}`
-            : 'public-share-proxy';
-    }
-
-    return normalizedRemote;
-}
+// Who a request or socket comes from; see lib/requestIdentity.js. The tunnel and any same-host proxy relay from
+// loopback, so a relayed request is classified as a known proxy, never as the local operator.
+const {
+    isKnownPublicShareOrigin,
+    isKnownPublicShareRequest,
+    isRelayedFromLoopback,
+    shouldTrustRequestForwardedHeaders,
+    getClientIpFromHeaders,
+} = createRequestIdentity({
+    getKnownPublicShareOrigins,
+    getTrustForwardedHeaders: () => config.TRUST_X_FORWARDED_HEADERS,
+});
 
 function getRequestClientIp(req) {
-    return getClientIpFromHeaders(
-        req?.headers || {},
-        getRemoteAddressFromReq(req),
-        !!req?.socket?.encrypted
-    );
+    return getClientIpFromHeaders(req?.headers || {}, getRemoteAddressFromReq(req));
 }
 
 function getRequestClientClassification(req) {
+    const headers = req?.headers || {};
     return classifyClient({
         ip: getRequestClientIp(req),
         trustedLanCidrs: config.TRUSTED_LAN_CIDRS,
-        viaKnownProxy: isKnownPublicShareRequest(req?.headers || {}, !!req?.socket?.encrypted),
+        viaKnownProxy: isKnownPublicShareRequest(headers) || isRelayedFromLoopback(headers, getRemoteAddressFromReq(req)),
     });
 }
 
+function getSocketRemoteAddress(socket) {
+    return socket?.request?.socket?.remoteAddress
+        || socket?.conn?.remoteAddress
+        || socket?.handshake?.address
+        || '';
+}
+
 function getSocketClientClassification(socket) {
+    const headers = socket?.handshake?.headers || {};
     return classifyClient({
         ip: getSocketHandshakeIp(socket),
         trustedLanCidrs: config.TRUSTED_LAN_CIDRS,
-        viaKnownProxy: isKnownPublicShareRequest(
-            socket?.handshake?.headers || {},
-            !!socket?.request?.socket?.encrypted
-        ),
+        viaKnownProxy: isKnownPublicShareRequest(headers) || isRelayedFromLoopback(headers, getSocketRemoteAddress(socket)),
     });
 }
 
@@ -408,7 +326,7 @@ function isSocketExternallySecure(socket) {
         || socket?.conn?.remoteAddress
         || socket?.handshake?.address
         || '';
-    if (!shouldTrustRequestForwardedHeaders(headers, remoteAddress, false)) return false;
+    if (!shouldTrustRequestForwardedHeaders(headers, remoteAddress)) return false;
     return parseForwardedFirst(headers['x-forwarded-proto']).toLowerCase() === 'https';
 }
 
@@ -445,7 +363,7 @@ function getSocketRequestHostOrigin(req) {
     const remoteAddress = getRemoteAddressFromReq(req);
     let proto = req?.socket?.encrypted ? 'https' : 'http';
 
-    if (shouldTrustRequestForwardedHeaders(req?.headers || {}, remoteAddress, !!req?.socket?.encrypted)) {
+    if (shouldTrustRequestForwardedHeaders(req?.headers || {}, remoteAddress)) {
         const forwardedProto = parseForwardedFirst(req?.headers?.['x-forwarded-proto']);
         if (forwardedProto === 'http' || forwardedProto === 'https') {
             proto = forwardedProto;
@@ -540,7 +458,7 @@ function getShareBaseUrl(req) {
         return manualShareBase;
     }
 
-    if (shouldTrustRequestForwardedHeaders(req.headers || {}, getRemoteAddressFromReq(req), !!req?.socket?.encrypted)) {
+    if (shouldTrustRequestForwardedHeaders(req.headers || {}, getRemoteAddressFromReq(req))) {
         const forwardedProto = parseForwardedFirst(req.headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(req.headers['x-forwarded-host']);
         const proto = (forwardedProto || '').toLowerCase();
@@ -659,7 +577,7 @@ async function exitIfAlreadyRunning() {
 }
 
 function getShareBaseUrlFromHeaders(headers = {}, remoteAddress = '') {
-    if (shouldTrustRequestForwardedHeaders(headers, remoteAddress, config.LOCAL_HTTPS)) {
+    if (shouldTrustRequestForwardedHeaders(headers, remoteAddress)) {
         const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(headers['x-forwarded-host']);
         const proto = (forwardedProto || '').toLowerCase();
@@ -704,16 +622,7 @@ function getShareBaseUrlForSocket(socket) {
 }
 
 function getSocketHandshakeIp(socket) {
-    const remoteAddress = socket?.request?.socket?.remoteAddress
-        || socket?.conn?.remoteAddress
-        || socket?.handshake?.address
-        || '';
-
-    return getClientIpFromHeaders(
-        socket?.handshake?.headers || {},
-        remoteAddress,
-        !!socket?.request?.socket?.encrypted
-    );
+    return getClientIpFromHeaders(socket?.handshake?.headers || {}, getSocketRemoteAddress(socket));
 }
 
 function shouldExposeLanForSocket(socket) {
@@ -1237,11 +1146,7 @@ function getSocketClientIp(rawSocket) {
     const req = rawSocket.request;
     const remoteAddress = req?.socket?.remoteAddress || req?.connection?.remoteAddress || '';
 
-    return getClientIpFromHeaders(
-        req?.headers || {},
-        remoteAddress,
-        !!req?.socket?.encrypted
-    );
+    return getClientIpFromHeaders(req?.headers || {}, remoteAddress);
 }
 
 async function detectPublicIpIfEnabled() {
