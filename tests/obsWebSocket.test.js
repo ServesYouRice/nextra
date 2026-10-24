@@ -1744,10 +1744,10 @@ test('a stream that was simply live is stopped once, with no extra start', async
 // it is down. `refuseStart` is the comment OBS refuses every StartStream with.
 // `stallRequest(requestType, requestData)` leaves any request unanswered when
 // it returns true.
-function testStreamObs({ stallStatus = () => false, stop = () => ({}), refuseStart = null, stallRequest = () => false } = {}) {
+function testStreamObs({ stallStatus = () => false, stop = () => ({}), refuseStart = null, stallRequest = () => false, encoderId = 'obs_nvenc_h264_tex' } = {}) {
     const log = [];
     const status = { outputActive: false, outputReconnecting: false };
-    const profile = new Map([['Output/Mode', 'Advanced'], ['AdvOut/Encoder', 'obs_nvenc_h264_tex']]);
+    const profile = new Map([['Output/Mode', 'Advanced'], ['AdvOut/Encoder', encoderId]]);
     let stops = 0;
     let stillStopping = 0;
     const WebSocketImpl = fakeObsWebSocket((ws, request) => {
@@ -1972,7 +1972,8 @@ function stallFirstColorSpaceWrite() {
 }
 
 test('a failed auto-start writes the previous encoder settings file back before it says OBS was restored (VAL-118)', async () => {
-    const obs = testStreamObs({ refuseStart: 'output busy' });
+    // OBS already holds the AV1 encoder, so no restart is needed and the auto-start is attempted.
+    const obs = testStreamObs({ refuseStart: 'output busy', encoderId: 'obs_nvenc_av1_tex' });
     const calls = [];
 
     const result = await configureWith(obs, {
@@ -2115,6 +2116,45 @@ test('a changed encoder or output mode is reported as needing an OBS restart', a
     const fromX264 = await configureWith(x264, { encoderSettings: nvencEncoderSettings, writeEncoderSettings: async () => ({ applied: true }) });
     assert.match(fromX264.message, /H\.264 NVENC in Advanced output mode only after it restarts/);
     assert.equal(x264.profile.get('AdvOut/Encoder'), 'obs_nvenc_h264_tex');
+});
+
+test('auto-start is not sent when OBS needs a restart for the new output mode, and the result says so (VAL-119)', async () => {
+    // A live output is stopped first, so the encoder-reset test stream does not
+    // run and the order log shows only the auto-start.
+    const obs = scriptedObs({
+        profile: new Map([['Output/Mode', 'Simple'], ['AdvOut/Encoder', 'obs_nvenc_h264_tex']]),
+        status: { outputActive: true, outputReconnecting: false },
+    });
+
+    const result = await configureWith(obs, {
+        autoStart: true,
+        encoderSettings: nvencEncoderSettings,
+        writeEncoderSettings: async () => ({ applied: true }),
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.restartRequired, true);
+    assert.match(result.message, /only after it restarts/);
+    assert.equal(obs.order.includes('StartStream'), false, `StartStream was sent: ${obs.order.join(', ')}`);
+    assert.equal(obs.status.outputActive, false);
+});
+
+test('with no restart needed, auto-start still starts the stream and the result says no restart is needed', async () => {
+    const obs = scriptedObs({
+        profile: new Map([['Output/Mode', 'Advanced'], ['AdvOut/Encoder', 'obs_nvenc_h264_tex']]),
+        status: { outputActive: true, outputReconnecting: false },
+    });
+
+    const result = await configureWith(obs, {
+        autoStart: true,
+        encoderSettings: nvencEncoderSettings,
+        writeEncoderSettings: async () => ({ applied: true }),
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.restartRequired, false);
+    assert.deepEqual(obs.order, ['StopStream', 'SetStreamServiceSettings', 'StartStream']);
+    assert.equal(obs.status.outputActive, true);
 });
 
 test('the encoder is chosen from the ones OBS has, not from the page\'s guess at the GPU', async () => {
