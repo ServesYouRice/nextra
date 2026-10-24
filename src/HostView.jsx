@@ -17,6 +17,11 @@ import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosti
 import { setNavigationGuard } from './lib/navigationGuard.mjs';
 import { RELOAD_PRESERVE, createStartAttempt, startOperationGuardFor } from './lib/startOperationGuard.mjs';
 import {
+    createCancellableWait,
+    reclaimWithRetry,
+    shouldStopObsAfterFailedReclaim,
+} from './lib/hostRecovery.mjs';
+import {
     RELAY_BITRATE_STEP_UP_AFTER_MS,
     RELAY_MP4_MIME_TYPE,
     lowerRelayBitrate,
@@ -409,6 +414,15 @@ function clearHostRecoverySession() {
     try { window.sessionStorage.removeItem(HOST_RECOVERY_SESSION_STORAGE_KEY); } catch { }
 }
 
+// Clears the record only while it still names the room it was loaded for: a room
+// the host has started since may have written its own over it.
+function forgetHostRecoverySession(stored) {
+    const current = loadHostRecoverySession();
+    if (current?.code === stored.code && current?.hostToken === stored.hostToken) {
+        clearHostRecoverySession();
+    }
+}
+
 export default function HostView() {
     const socket = useContext(SocketContext);
     const [storedByokTurnSession] = useState(() => loadStoredByokTurnSession());
@@ -612,9 +626,11 @@ export default function HostView() {
     // a room that is gone. Unload handlers cannot await, so this stays
     // synchronous: the open control channel writes the stop frame immediately,
     // and only the fallback (no channel — e.g. after a reload-recovery reclaim)
-    // pays for a fresh connect.
-    const stopObsIngest = useCallback(() => {
-        if (ingestModeRef.current !== 'obs') return;
+    // pays for a fresh connect. A page that was reloaded starts in 'browser' until
+    // a reclaim succeeds, so a teardown after a failed reclaim names the stored
+    // room's mode instead.
+    const stopObsIngest = useCallback((ingestModeOverride) => {
+        if ((ingestModeOverride ?? ingestModeRef.current) !== 'obs') return;
         const channel = obsControlChannelRef.current;
         obsControlChannelRef.current = null;
         if (channel) {
@@ -939,12 +955,12 @@ export default function HostView() {
         releaseHostSession();
     }, [releaseHostSession]);
 
-    const terminateHostSession = useCallback((reason) => {
+    const terminateHostSession = useCallback((reason, { ingestMode: storedIngestMode } = {}) => {
         startGuardRef.current.invalidate('terminate');
         // Covers a graceful server shutdown: the room-ended broadcast is the
         // only warning OBS will ever get, since WHIP has no server-initiated
         // stop and OBS keeps pushing RTP at a closed transport otherwise.
-        stopObsIngest();
+        stopObsIngest(storedIngestMode);
         cleanup();
         setResumePending(false);
         setTerminalRoomEnded(true);
@@ -1059,55 +1075,92 @@ export default function HostView() {
         return () => socket.off('connect', onReconnect);
     }, [socket, isSharing, roomCode, terminateHostSession]);
 
+    // After a reload, reclaim the room kept in sessionStorage. A transient
+    // failure (a timeout, a connection that dropped, a socket that is not up
+    // yet) is retried inside the recovery window with the stored record intact;
+    // only a terminal rejection or the end of the window ends the session.
     useEffect(() => {
         const stored = loadHostRecoverySession();
         if (!stored) return undefined;
         let cancelled = false;
+        const retryWait = createCancellableWait();
+        const startGuard = startGuardRef.current;
 
-        const reclaimStoredRoom = async () => {
-            try {
-                const response = await socketRequest(socket, 'reclaim-host', {
-                    ...stored,
-                    reloadRecovery: true,
-                });
-                if (cancelled) return;
-                if (response.reloadRecoveryEnabled !== true) {
-                    clearHostRecoverySession();
-                    return;
-                }
-                setRoomCode(stored.code);
-                roomCodeRef.current = stored.code;
-                setHostToken(stored.hostToken);
-                hostTokenRef.current = stored.hostToken;
-                setReloadRecoveryEnabled(true);
-                reloadRecoveryEnabledRef.current = true;
-                setIngestMode(response.ingestMode === 'obs' ? 'obs' : 'browser');
-                setObsVideoCodec(response.obsVideoCodec || null);
-                setRoomHasTurnServer(!!response.hasRoomTurnServer);
-                // Room-state responses also carry a stable `code` describing the
-                // transition (for example `host-reconnected`). Preserve the room
-                // identity from the authenticated recovery session explicitly.
-                resumeRoomRef.current = {
-                    ...response,
-                    code: stored.code,
-                    hostToken: stored.hostToken,
-                };
-                if (response.ingestMode === 'obs') {
-                    setIsSharing(true);
-                    setStatus('streaming');
-                    setResumePending(false);
-                } else {
-                    setResumePending(true);
-                    setStatus('idle');
-                }
-            } catch (err) {
-                if (cancelled) return;
-                terminateHostSession(err.reason || err.message || 'The previous room ended. Create a new room to continue.');
+        const adoptReclaimedRoom = (response) => {
+            if (response.reloadRecoveryEnabled !== true) {
+                clearHostRecoverySession();
+                return;
+            }
+            setRoomCode(stored.code);
+            roomCodeRef.current = stored.code;
+            setHostToken(stored.hostToken);
+            hostTokenRef.current = stored.hostToken;
+            setReloadRecoveryEnabled(true);
+            reloadRecoveryEnabledRef.current = true;
+            setIngestMode(response.ingestMode === 'obs' ? 'obs' : 'browser');
+            setObsVideoCodec(response.obsVideoCodec || null);
+            setRoomHasTurnServer(!!response.hasRoomTurnServer);
+            // Room-state responses also carry a stable `code` describing the
+            // transition (for example `host-reconnected`). Preserve the room
+            // identity from the authenticated recovery session explicitly.
+            resumeRoomRef.current = {
+                ...response,
+                code: stored.code,
+                hostToken: stored.hostToken,
+            };
+            if (response.ingestMode === 'obs') {
+                setIsSharing(true);
+                setStatus('streaming');
+                setResumePending(false);
+            } else {
+                setResumePending(true);
+                setStatus('idle');
             }
         };
 
+        const reclaimStoredRoom = async () => {
+            const outcome = await reclaimWithRetry({
+                request: (attempt) => socketRequest(socket, 'reclaim-host', {
+                    ...stored,
+                    reloadRecovery: true,
+                }, attempt),
+                isCancelled: () => cancelled,
+                // A room the host started on this page since the reload owns the
+                // session; the old room is no longer worth retrying for.
+                shouldGiveUp: () => startGuard.activeOperation !== null,
+                wait: retryWait.wait,
+                onRetry: (attempts, err) => {
+                    console.warn(`[Nextra] Reclaiming the previous room failed (attempt ${attempts}), trying again:`, err?.message);
+                },
+            });
+            if (outcome.status === 'cancelled') return;
+            if (outcome.status === 'reclaimed') {
+                adoptReclaimedRoom(outcome.response);
+                return;
+            }
+            // The host has started a room of their own: the old room's failure must
+            // neither tear that one down nor stop an OBS output it may be using.
+            if (outcome.status === 'gave-up' || startGuard.activeOperation !== null) {
+                forgetHostRecoverySession(stored);
+                return;
+            }
+            const err = outcome.error;
+            const reason = outcome.terminal
+                ? (err?.reason || err?.message || 'The previous room ended. Create a new room to continue.')
+                : 'Could not reconnect to the previous room in time. Create a new room to continue.';
+            if (!outcome.terminal) {
+                console.warn(`[Nextra] Gave up reclaiming the previous room after ${outcome.attempts} attempts:`, err?.message);
+            }
+            terminateHostSession(reason, {
+                ingestMode: shouldStopObsAfterFailedReclaim(stored) ? 'obs' : undefined,
+            });
+        };
+
         reclaimStoredRoom();
-        return () => { cancelled = true; };
+        return () => {
+            cancelled = true;
+            retryWait.cancel();
+        };
     }, [socket, terminateHostSession]);
 
     useEffect(() => {
