@@ -14,6 +14,7 @@ const {
     maxOrNull,
     evaluateResourceThresholds,
 } = require('./runtime-benchmark-model');
+const { closeSockets, settleWithin } = require('./runtime-harness-cleanup');
 
 function numberArg(name, fallback) {
     const prefix = `--${name}=`;
@@ -43,6 +44,7 @@ const durationMs = numberArg('duration-ms', 60_000);
 const sampleIntervalMs = numberArg('sample-ms', 1_000);
 const clients = Math.floor(numberArg('clients', 10));
 const ackIntervalMs = numberArg('ack-interval-ms', 250);
+const ackTimeoutMs = 5_000;
 const minimumRequirements = minimumRequirementsForScenario(scenario);
 const requirements = {
     rooms: nonNegativeIntegerArg('require-rooms', minimumRequirements.rooms),
@@ -69,7 +71,9 @@ function percentile(values, percentileValue) {
     return sorted[Math.min(sorted.length - 1, Math.ceil((percentileValue / 100) * sorted.length) - 1)];
 }
 
-function connectClient() {
+// Every socket is added to `sockets` as soon as it is created, so a run that fails
+// part-way can still close the ones that did connect.
+function connectClient(sockets) {
     return new Promise((resolve, reject) => {
         const socket = io(baseUrl, {
             transports: ['websocket'],
@@ -77,15 +81,19 @@ function connectClient() {
             timeout: 5_000,
             rejectUnauthorized: !allowInsecureTls,
         });
+        sockets.push(socket);
         socket.once('connect', () => resolve(socket));
-        socket.once('connect_error', reject);
+        socket.once('connect_error', (err) => {
+            socket.close();
+            reject(err);
+        });
     });
 }
 
 function measureAck(socket) {
     return new Promise((resolve, reject) => {
         const started = performance.now();
-        socket.timeout(5_000).emit('get-rtp-capabilities', {}, (err, response) => {
+        socket.timeout(ackTimeoutMs).emit('get-rtp-capabilities', {}, (err, response) => {
             if (err) return reject(err);
             if (!response?.success) return reject(new Error(response?.error || 'Signaling acknowledgement failed'));
             resolve(performance.now() - started);
@@ -102,36 +110,53 @@ async function main() {
     if (definitionFailures.length > 0) {
         throw new Error(`Invalid benchmark definition: ${definitionFailures.join('; ')}`);
     }
-    const sockets = await Promise.all(Array.from({ length: clients }, () => connectClient()));
+    const sockets = [];
+    const ackLoops = [];
     const ackLatencies = [];
     const errors = [];
     const samples = [];
     let running = true;
 
-    // Discard process-startup history so event-loop histogram values represent
-    // only the measured steady-state intervals.
-    await fetchMetrics();
-    await new Promise((resolve) => setTimeout(resolve, sampleIntervalMs));
+    // Whatever ends the measurement, including a failed connect or metrics request,
+    // the acknowledgement loops are stopped and every socket is closed; otherwise the
+    // open sockets keep the process alive after it has failed.
+    try {
+        // Wait for every connect attempt to settle before failing, so no socket that
+        // connects after the first refusal is left out of `sockets`.
+        const connections = await Promise.allSettled(Array.from({ length: clients }, () => connectClient(sockets)));
+        const refused = connections.find((connection) => connection.status === 'rejected');
+        if (refused) throw refused.reason;
 
-    const ackLoops = sockets.map(async (socket) => {
-        while (running) {
-            try {
-                ackLatencies.push(await measureAck(socket));
-            } catch (err) {
-                errors.push(err.message);
-            }
-            await new Promise((resolve) => setTimeout(resolve, ackIntervalMs));
-        }
-    });
-
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < durationMs) {
-        samples.push({ at: Date.now(), metrics: await fetchMetrics() });
+        // Discard process-startup history so event-loop histogram values represent
+        // only the measured steady-state intervals.
+        await fetchMetrics();
         await new Promise((resolve) => setTimeout(resolve, sampleIntervalMs));
+
+        for (const socket of sockets) {
+            ackLoops.push((async () => {
+                while (running) {
+                    try {
+                        ackLatencies.push(await measureAck(socket));
+                    } catch (err) {
+                        errors.push(err.message);
+                    }
+                    await new Promise((resolve) => setTimeout(resolve, ackIntervalMs));
+                }
+            })());
+        }
+
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < durationMs) {
+            samples.push({ at: Date.now(), metrics: await fetchMetrics() });
+            await new Promise((resolve) => setTimeout(resolve, sampleIntervalMs));
+        }
+    } finally {
+        running = false;
+        // An acknowledgement in flight ends within ackTimeoutMs, and a loop then ends
+        // after one more interval; the bound only guards against one that never does.
+        await settleWithin(ackLoops, ackTimeoutMs + ackIntervalMs + 1_000);
+        closeSockets(sockets);
     }
-    running = false;
-    await Promise.all(ackLoops);
-    sockets.forEach((socket) => socket.close());
 
     const first = samples[0];
     const last = samples[samples.length - 1];

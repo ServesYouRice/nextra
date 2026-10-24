@@ -135,9 +135,19 @@ function completeBenchmarkMetrics(startedAt) {
 
 // A stand-in for the Nextra server: signalling acknowledgements plus an /api/metrics
 // endpoint whose payload each test can degrade (`degrade(metrics, requestNumber)`).
-async function startBenchmarkFixture(degrade = (metrics) => metrics) {
+// `metricsStatus(requestNumber)` can make a metrics request fail with that HTTP status
+// and `acceptConnection(attemptNumber)` can refuse a socket handshake. The fixture
+// also records how many sockets connected, how many are still connected and why each
+// one went away, so a test can tell a client that closed its sockets from one that
+// was only killed.
+async function startBenchmarkFixture(degrade = (metrics) => metrics, {
+    metricsStatus = () => 200,
+    acceptConnection = () => true,
+} = {}) {
     const startedAt = Date.now();
     let requestNumber = 0;
+    let handshakeAttempts = 0;
+    const connections = { connected: 0, acks: 0, disconnectReasons: [] };
     const server = http.createServer((req, res) => {
         if (req.url.split('?')[0] !== '/api/metrics') {
             res.writeHead(404);
@@ -145,21 +155,46 @@ async function startBenchmarkFixture(degrade = (metrics) => metrics) {
             return;
         }
         requestNumber += 1;
+        const status = metricsStatus(requestNumber);
+        if (status !== 200) {
+            res.writeHead(status);
+            res.end();
+            return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(degrade(completeBenchmarkMetrics(startedAt), requestNumber)));
     });
     const io = new SocketServer(server);
+    io.use((_socket, next) => {
+        handshakeAttempts += 1;
+        next(acceptConnection(handshakeAttempts) ? undefined : new Error('connection limit'));
+    });
     io.on('connection', (socket) => {
-        socket.on('get-rtp-capabilities', (_payload, ack) => ack({ success: true, rtpCapabilities: {} }));
+        connections.connected += 1;
+        socket.on('disconnect', (reason) => connections.disconnectReasons.push(reason));
+        socket.on('get-rtp-capabilities', (_payload, ack) => {
+            connections.acks += 1;
+            ack({ success: true, rtpCapabilities: {} });
+        });
     });
     const port = await listen(server);
     return {
         baseUrl: `http://127.0.0.1:${port}`,
+        connections,
+        liveSockets: () => io.of('/').sockets.size,
         async close() {
             await io.close();
             if (server.listening) await closeServer(server).catch(() => {});
         },
     };
+}
+
+async function waitForNoLiveSockets(fixture, timeoutMs = 2_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (fixture.liveSockets() > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return fixture.liveSockets();
 }
 
 function runBenchmarkHarness(baseUrl) {
@@ -261,6 +296,93 @@ test('benchmark fails closed when the worker usage lacks the system CPU time', a
         assert.equal(exitCode, 1);
         assert.equal(summary.observed.workerCpuPercent, null);
         assert.deepEqual(summary.failures, ['media-worker CPU unavailable']);
+    } finally {
+        await fixture.close();
+    }
+});
+
+// --- A failed run must close every socket it opened and exit with code 1 ---
+
+// Runs the harness for a case that fails before it can print a summary. `killed` is
+// true when the process had to be stopped because it did not exit by itself.
+function runFailingBenchmarkHarness(baseUrl, { clients = 2, timeoutMs = 10_000 } = {}) {
+    return new Promise((resolve) => {
+        const startedAt = Date.now();
+        execFile(process.execPath, [
+            'scripts/benchmark-runtime.js',
+            `--url=${baseUrl}`,
+            '--scenario=webrtc',
+            '--label=fixture',
+            `--clients=${clients}`,
+            '--duration-ms=1500',
+            '--sample-ms=100',
+            '--ack-interval-ms=50',
+        ], { cwd: projectRoot, timeout: timeoutMs }, (err, stdout, stderr) => {
+            resolve({
+                exitCode: err ? err.code : 0,
+                killed: Boolean(err?.killed),
+                stdout,
+                stderr,
+                elapsedMs: Date.now() - startedAt,
+            });
+        });
+    });
+}
+
+function assertClosedByTheClient(fixture, expectedConnected) {
+    assert.equal(fixture.connections.connected, expectedConnected);
+    assert.equal(fixture.connections.disconnectReasons.length, expectedConnected);
+    assert.deepEqual(
+        [...new Set(fixture.connections.disconnectReasons)],
+        ['client namespace disconnect'],
+        'every connected socket should have been closed by the harness, not dropped with the process',
+    );
+}
+
+test('benchmark closes its sockets and exits 1 when the warm-up metrics request fails', async () => {
+    const fixture = await startBenchmarkFixture(undefined, { metricsStatus: () => 500 });
+    try {
+        const result = await runFailingBenchmarkHarness(fixture.baseUrl);
+        assert.equal(result.killed, false, 'the harness should exit by itself');
+        assert.equal(result.exitCode, 1);
+        assert.match(result.stderr, /Benchmark failed: \/api\/metrics returned 500/);
+        assert.equal(await waitForNoLiveSockets(fixture), 0);
+        assertClosedByTheClient(fixture, 2);
+    } finally {
+        await fixture.close();
+    }
+});
+
+test('benchmark stops its acknowledgement loops, closes its sockets and exits 1 when sampling fails mid-run', async () => {
+    // Request 1 is the warm-up; the third request (the second sample) fails while
+    // the acknowledgement loops are running.
+    const fixture = await startBenchmarkFixture(undefined, {
+        metricsStatus: (requestNumber) => (requestNumber >= 3 ? 500 : 200),
+    });
+    try {
+        const result = await runFailingBenchmarkHarness(fixture.baseUrl);
+        assert.equal(result.killed, false, 'the harness should exit by itself');
+        assert.equal(result.exitCode, 1);
+        assert.match(result.stderr, /Benchmark failed: \/api\/metrics returned 500/);
+        assert.ok(fixture.connections.acks > 0, 'the acknowledgement loops should have been running');
+        assert.equal(await waitForNoLiveSockets(fixture), 0);
+        assertClosedByTheClient(fixture, 2);
+    } finally {
+        await fixture.close();
+    }
+});
+
+test('benchmark closes the sockets that did connect and exits 1 when one connection is refused', async () => {
+    const fixture = await startBenchmarkFixture(undefined, {
+        acceptConnection: (attemptNumber) => attemptNumber !== 2,
+    });
+    try {
+        const result = await runFailingBenchmarkHarness(fixture.baseUrl, { clients: 3 });
+        assert.equal(result.killed, false, 'the harness should exit by itself');
+        assert.equal(result.exitCode, 1);
+        assert.match(result.stderr, /Benchmark failed: connection limit/);
+        assert.equal(await waitForNoLiveSockets(fixture), 0);
+        assertClosedByTheClient(fixture, 2);
     } finally {
         await fixture.close();
     }
