@@ -700,3 +700,42 @@ test('WHIP answer for a setup:actpass offer is unchanged apart from the o= line'
         '',
     ]);
 });
+
+// ── TCP ICE candidates carry tcptype (RFC 6544 §4.5) ─────────────────────────
+
+test('WHIP answer gives a TCP ICE candidate its tcptype, and leaves the UDP candidate line unchanged', (t) => {
+    const transport = {
+        ...SERVER_TRANSPORT,
+        iceCandidates: [
+            { ip: '192.0.2.10', port: 40000, protocol: 'udp', type: 'host' },
+            { ip: '192.0.2.10', port: 40001, protocol: 'tcp', type: 'host', tcpType: 'passive' },
+        ],
+    };
+    const answer = createAnswer(parseOffer(offerWithSections(h264Video('0'), opusAudio('1'))), transport);
+    const candidates = answer.split('\r\n').filter((line) => line.startsWith('a=candidate:'));
+    assert.deepEqual(candidates, [
+        'a=candidate:1 1 UDP 2130706431 192.0.2.10 40000 typ host',
+        'a=candidate:1 1 TCP 2130706431 192.0.2.10 40001 typ host tcptype passive',
+        'a=candidate:1 1 UDP 2130706431 192.0.2.10 40000 typ host',
+        'a=candidate:1 1 TCP 2130706431 192.0.2.10 40001 typ host tcptype passive',
+    ]);
+    t.diagnostic(answer.trim().replace(/\r\n/g, ' | '));
+});
+
+test('WHIP answer uses the candidate tcpType, and defaults a TCP candidate without one to passive', () => {
+    const transport = {
+        ...SERVER_TRANSPORT,
+        iceCandidates: [
+            { ip: '192.0.2.10', port: 40001, protocol: 'tcp', type: 'host', tcpType: 'active' },
+            { ip: '192.0.2.11', port: 40002, protocol: 'tcp', type: 'host' },
+        ],
+    };
+    const answer = createAnswer(parseOffer(offerWithSections(opusAudio('0'))), transport);
+    assert.deepEqual(
+        answer.split('\r\n').filter((line) => line.startsWith('a=candidate:')),
+        [
+            'a=candidate:1 1 TCP 2130706431 192.0.2.10 40001 typ host tcptype active',
+            'a=candidate:1 1 TCP 2130706431 192.0.2.11 40002 typ host tcptype passive',
+        ],
+    );
+});
