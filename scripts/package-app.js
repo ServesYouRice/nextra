@@ -54,15 +54,121 @@ function copyEntry(relativePath) {
     fs.cpSync(src, dest, { recursive: true, dereference: true });
 }
 
+// Looks a variable up the way Windows does, ignoring case, in a plain copy of
+// the environment (only process.env itself is case-insensitive).
+function getEnvValue(env, name) {
+    const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+    return key ? env[key] : undefined;
+}
+
+// npm sets npm_execpath to its own bin/npm-cli.js for the scripts it runs. Any
+// other runner (npx, pnpm, yarn) puts its own entry point there, which cannot
+// run `npm ci`, so only npm's CLI is used.
+function getNpmCliPath(env) {
+    const npmExecpath = String(env.npm_execpath || '');
+    if (!path.win32.isAbsolute(npmExecpath)) return '';
+    return /^npm-cli\.[cm]?js$/i.test(path.win32.basename(npmExecpath)) ? npmExecpath : '';
+}
+
+// caxa's command-line script, from the "bin" field of its package.json. caxa
+// exports only its entry module, so its package.json cannot be resolved by
+// name; walk up from the entry to the package that calls itself caxa.
+function getCaxaBinPath(resolve = require.resolve) {
+    let entry;
+    try {
+        entry = resolve('caxa');
+    } catch (err) {
+        throw new Error(`caxa is not installed (it is a devDependency; run npm install first): ${err.message}`, { cause: err });
+    }
+
+    let dir = path.dirname(entry);
+    for (;;) {
+        const manifestPath = path.join(dir, 'package.json');
+        if (fs.existsSync(manifestPath)) {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            if (manifest.name === 'caxa') {
+                const bin = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin && manifest.bin.caxa;
+                if (!bin) throw new Error(`caxa's package.json names no caxa bin: ${manifestPath}`);
+                return path.resolve(dir, bin);
+            }
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir) throw new Error(`Could not find caxa's package.json above ${entry}`);
+        dir = parent;
+    }
+}
+
+// Inside double quotes cmd.exe leaves spaces, &, |, <, >, ^, ( and ) alone, but
+// it still expands %VAR% (and !VAR! when delayed expansion is on), a " ends the
+// quoting and a line break ends the command. Such an argument is refused rather
+// than escaped.
+function quoteForCmd(arg) {
+    const value = String(arg);
+    if (/["%!\r\n]/.test(value)) {
+        throw new Error(`Packaging cannot pass ${JSON.stringify(value)} through cmd.exe: it contains ", %, ! or a line break, which cmd.exe does not leave alone inside double quotes.`);
+    }
+    // Backslashes right before the closing quote would escape it for the
+    // child's own argument parser; doubled, they stay literal backslashes.
+    return `"${value.replace(/(\\+)$/, '$1$1')}"`;
+}
+
+// A bare command name such as npm stays unquoted: cmd.exe finds it through PATH
+// either way, but a batch file started by a quoted bare name gets a wrong %~dp0
+// (the current directory instead of its own), and npm.cmd finds npm-cli.js
+// through %~dp0. A command given as a path is quoted like any argument.
+function commandForCmd(command) {
+    return /^[A-Za-z0-9._-]+$/.test(command) ? command : quoteForCmd(command);
+}
+
+// How run() starts a command. On Windows npm and npx are .cmd shims, which Node
+// will not start without a shell, and with shell: true Node joins the command
+// and its arguments into one cmd.exe line without quoting any of them: the caxa
+// paths (stage directory, output exe, icon stub in the temp folder) were split
+// at spaces and cmd.exe acted on &, |, ^, ( and ) in them. So on Windows npm and
+// caxa run as node plus their JavaScript entry point, with no shell at all, and
+// any other command goes through cmd.exe as one line in which every argument is
+// double-quoted (quoteForCmd). Elsewhere the command is started as given,
+// without a shell, as it always was.
+function buildPackagerCommand(command, args, options = {}) {
+    const platform = options.platform || process.platform;
+    if (platform !== 'win32') {
+        return { command, args: [...args], shell: false, windowsVerbatimArguments: false };
+    }
+
+    const execPath = options.execPath || process.execPath;
+    const env = options.env || process.env;
+    const npmCli = command === 'npm' ? getNpmCliPath(env) : '';
+    if (npmCli) {
+        return { command: execPath, args: [npmCli, ...args], shell: false, windowsVerbatimArguments: false };
+    }
+    if (command === 'npx' && args[0] === 'caxa') {
+        const resolveCaxaBin = options.resolveCaxaBin || getCaxaBinPath;
+        return { command: execPath, args: [resolveCaxaBin(), ...args.slice(1)], shell: false, windowsVerbatimArguments: false };
+    }
+
+    // cmd.exe /s strips the outer quotes and runs the rest as written, the form
+    // Node itself uses for shell: true.
+    const line = [commandForCmd(command), ...args.map(quoteForCmd)].join(' ');
+    return {
+        command: getEnvValue(env, 'ComSpec') || 'cmd.exe',
+        args: ['/d', '/s', '/c', `"${line}"`],
+        shell: false,
+        windowsVerbatimArguments: true,
+    };
+}
+
 function run(command, args, options = {}) {
-    const result = spawnSync(command, args, {
+    const env = {
+        ...process.env,
+        ...(options.env || {}),
+    };
+    const invocation = buildPackagerCommand(command, args, { env });
+    const result = spawnSync(invocation.command, invocation.args, {
         cwd: options.cwd || projectRoot,
         stdio: 'inherit',
-        shell: process.platform === 'win32',
-        env: {
-            ...process.env,
-            ...(options.env || {}),
-        },
+        shell: invocation.shell,
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+        env,
     });
 
     if (result.status !== 0) {
@@ -899,11 +1005,14 @@ if (require.main === module) {
 }
 
 module.exports = {
+    buildPackagerCommand,
     copyCloudflaredToStage,
     decideCloudflaredCandidate,
     downloadFileWithRedirects,
+    getCaxaBinPath,
     getCloudflaredAssetName,
     getFfmpegAsset,
+    run,
     stageCloudflaredCandidate,
     stageLocalCloudflared,
     stageVerifiedCloudflaredArchive,
