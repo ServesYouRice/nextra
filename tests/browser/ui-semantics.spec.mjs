@@ -130,6 +130,32 @@ test('Host downloads an allowlisted diagnostics JSON file', async ({ page }) => 
     await expect(page.locator('.host-diagnostics [role="status"]')).toContainText('Downloaded nextra-diagnostics-');
 });
 
+// VAL-086: the skip link moves focus to <main>; it must not be treated as a
+// hash route, which would render NotFound and unmount the current view.
+for (const { route, marker } of [
+    { route: '/#watch', marker: '.join-form' },
+    { route: '/#host', marker: '.host-side-panel' },
+]) {
+    test(`skip to content on ${route} focuses main and keeps the view mounted`, async ({ page }) => {
+        await page.goto(route);
+        await expect(page.locator(marker)).toBeVisible();
+
+        // Focus the link directly: the watch view autofocuses its room code
+        // field, which would take a Tab from body. Tab order is covered by the
+        // keyboard test below.
+        const skipLink = page.getByRole('link', { name: 'Skip to content' });
+        await skipLink.focus();
+        await expect(skipLink).toBeFocused();
+        await page.keyboard.press('Enter');
+
+        await expect.poll(() => page.evaluate(() => document.activeElement?.id || '')).toBe('main');
+        await expect(page.getByRole('heading', { name: 'Page not found' })).toHaveCount(0);
+        await expect(page.locator(marker)).toBeVisible();
+        expect(new URL(page.url()).hash).toBe(route.slice(route.indexOf('#')));
+        await expect(page.getByTestId('route-announcer')).toHaveText('');
+    });
+}
+
 test('keyboard users can reach the main content and the join controls', async ({ page }) => {
     await page.goto('/#watch');
 
@@ -215,3 +241,64 @@ for (const width of HOST_OBS_WIDTHS) {
             .toBeLessThanOrEqual(metrics.innerWidth + 1);
     });
 }
+
+// A viewer joining bumps the host's viewer count, which re-renders HostView
+// while the leave-host dialog is open. The dialog's own handlers must not move
+// focus on that re-render, and closing it must return focus to the nav link.
+test('a viewer joining while the leave-host dialog is open keeps focus on the button in use', async ({ browser, page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'chromium', 'desktop media flow');
+    await page.addInitScript(() => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 360;
+        const context = canvas.getContext('2d');
+        const draw = () => {
+            context.fillStyle = `hsl(${Date.now() % 360} 80% 45%)`;
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            window.setTimeout(draw, 33);
+        };
+        draw();
+        const stream = canvas.captureStream(30);
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getDisplayMedia: async () => stream },
+        });
+    });
+
+    await page.goto('/#host');
+    await page.getByRole('button', { name: 'Start Sharing' }).click();
+    await expect(page.getByText(/Streaming \(/)).toBeVisible();
+    const localLink = await page.locator('.copy-field', { hasText: 'Local Link' })
+        .locator('.copy-field-value').innerText();
+    const code = localLink.trim().split('#watch/')[1];
+    expect(code).toMatch(/^[A-Z0-9]{6}$/);
+
+    await page.getByRole('link', { name: 'Watch' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Leave the host page?' });
+    await expect(dialog).toBeVisible();
+    const stay = dialog.getByRole('button', { name: 'Stay Here' });
+    const leave = dialog.getByRole('button', { name: 'Leave and Stop' });
+    await leave.focus();
+    await expect(leave).toBeFocused();
+
+    const viewerContext = await browser.newContext({
+        baseURL: 'https://127.0.0.1:3210',
+        ignoreHTTPSErrors: true,
+        viewport: { width: 1280, height: 800 },
+    });
+    try {
+        const viewer = await viewerContext.newPage();
+        await viewer.goto(`/#watch/${code}`);
+        await viewer.getByRole('button', { name: 'Join Room' }).click();
+        await viewer.getByRole('button', { name: 'Watch Stream' }).click();
+        await expect(dialog.getByText(/1 viewer is currently watching/)).toBeVisible();
+        await expect(leave).toBeFocused();
+        await expect(stay).not.toBeFocused();
+    } finally {
+        await viewerContext.close();
+    }
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole('link', { name: 'Watch' })).toBeFocused();
+});
