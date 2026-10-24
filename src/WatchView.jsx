@@ -15,11 +15,11 @@ import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
 import { createLifecycleController } from './lib/lifecycleController.mjs';
 import { useViewerSessionController } from './hooks/useViewerSessionController';
 import UserErrorAlert from './components/UserErrorAlert';
-import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
+import { getLocalStorageSafely, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
-const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, window.localStorage);
+const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, getLocalStorageSafely(window));
 
 function mediaDebugLog(...args) {
     if (MEDIA_DEBUG_LOGS) {

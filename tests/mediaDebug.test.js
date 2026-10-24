@@ -19,3 +19,11 @@ test('module-scope storage read is guarded when window.localStorage throws Secur
     assert.equal(getLocalStorageSafely({ localStorage: storage }), storage);
     assert.equal(getLocalStorageSafely({}), null);
 });
+
+test('WatchView reads storage at module scope only through the safe accessor', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'WatchView.jsx'), 'utf8');
+    assert.doesNotMatch(source, /window\.localStorage/, 'WatchView must not touch window.localStorage directly');
+    assert.match(source, /isMediaDebugEnabled\(window\.location, getLocalStorageSafely\(window\)\)/);
+});
