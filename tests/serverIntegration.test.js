@@ -605,9 +605,7 @@ function requestFromServer(baseUrl, requestPath, method = 'GET') {
 }
 
 async function readCspFromServer({ localHttps, allowInsecureLanRelay }) {
-    const port = await reserveTcpPort();
-    let rtcPort = await reserveTcpPort();
-    while (rtcPort === port) rtcPort = await reserveTcpPort();
+    const { port, rtcPort } = await claimServerPorts();
     const baseUrl = `${localHttps ? 'https' : 'http'}://127.0.0.1:${port}`;
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-csp-'));
     await fs.writeFile(path.join(tempDir, 'index.html'), '<!doctype html><div id="root"></div>');
