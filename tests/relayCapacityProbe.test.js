@@ -133,10 +133,18 @@ test('the probe endpoint serves one armed download and nothing else', async () =
     try {
         let armedUrl = '';
         let secondStatus = 0;
+        const wrongWhileArmed = {};
         probe = createRelayCapacityProbe({
             logger: silent,
             fetchImpl: async (url, options) => {
                 armedUrl = url;
+                const token = url.split('/').pop();
+                const prefix = url.slice(0, -token.length);
+                // While armed, a token that differs in one hex character, and one of another length, get 404.
+                const flipped = (token[0] === '0' ? '1' : '0') + token.slice(1);
+                wrongWhileArmed.sameLength = (await fetch(`${prefix}${flipped}`)).status;
+                wrongWhileArmed.otherLength = (await fetch(`${prefix}${token.slice(1)}`)).status;
+                // The wrong attempts did not spend the token: the armed download still succeeds below.
                 const response = await fetch(url, options);
                 // The token is spent by the first request.
                 secondStatus = (await fetch(url)).status;
@@ -149,6 +157,7 @@ test('the probe endpoint serves one armed download and nothing else', async () =
 
         const result = await probe.measure(base, '/probe');
         // Loopback finishes inside the ramp-up window.
+        assert.deepEqual(wrongWhileArmed, { sameLength: 404, otherLength: 404 });
         assert.equal(result.status, 'fast');
         assert.equal(secondStatus, 404);
         assert.equal((await fetch(armedUrl)).status, 404);
