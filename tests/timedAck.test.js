@@ -225,3 +225,53 @@ test('WatchView sends fallback-consume-start only through the timed helper, neve
     const ledger = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'subscriptionLedger.mjs'), 'utf8');
     assert.match(ledger, /emitWithTimedAck\(socket, event, payload, \{ timeoutMs \}\)/);
 });
+
+// socket.io-client dispatches every packet it decodes in a microtask of its own,
+// in order. The packets of one transport frame (HTTP long-polling carries many)
+// are queued together, so code that awaits the request's promise runs only after
+// the events that followed the answer have been dispatched. onAnswer listeners
+// get the answer in its own dispatch, ahead of those events.
+test('onAnswer gets the answer in its own dispatch, before the events after it and before anything awaiting the promise', async () => {
+    const { emitWithTimedAck } = await loadModule();
+    const socket = new FakeSocket();
+    const order = [];
+    const request = emitWithTimedAck(socket, 'relay-consume-start', {});
+    assert.equal(typeof request.onAnswer, 'function', 'the request takes answer listeners');
+    assert.equal(request.onAnswer((answer) => order.push(`onAnswer ${answer.generation}`)), request);
+    void (async () => {
+        const answer = await request;
+        order.push(`await ${answer.generation}`);
+    })();
+
+    // One frame: the answer, then an event, each dispatched in a microtask of its own.
+    const [ack] = socket.pendingAcks;
+    void Promise.resolve().then(() => ack({ success: true, generation: 3 }));
+    void Promise.resolve().then(() => order.push('next event'));
+    await drainMicrotasks();
+    assert.deepEqual(order, ['onAnswer 3', 'next event', 'await 3']);
+});
+
+test('onAnswer listeners run once each, in order, and never for an answer after the timeout', async (t) => {
+    const { emitWithTimedAck, isAckTimeoutError } = await loadModule();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+
+    const socket = new FakeSocket();
+    const seen = [];
+    const request = emitWithTimedAck(socket, 'relay-consume-start', {})
+        .onAnswer((answer) => seen.push(['first', answer]))
+        .onAnswer((answer) => seen.push(['second', answer]));
+    const [ack] = socket.pendingAcks;
+    ack({ success: true });
+    ack({ success: true, again: true });
+    assert.deepEqual(await request, { success: true });
+    assert.deepEqual(seen, [['first', { success: true }], ['second', { success: true }]]);
+
+    const late = new FakeSocket();
+    const lateSeen = [];
+    const timedOut = emitWithTimedAck(late, 'relay-consume-start', {}, { timeoutMs: 1000 })
+        .onAnswer((answer) => lateSeen.push(answer));
+    t.mock.timers.tick(1000);
+    await assert.rejects(timedOut, (err) => isAckTimeoutError(err));
+    late.pendingAcks[0]({ success: true });
+    assert.deepEqual(lateSeen, [], 'a late answer is nobody\'s');
+});

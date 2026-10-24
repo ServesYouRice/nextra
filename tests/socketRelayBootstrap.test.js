@@ -705,3 +705,38 @@ test('a late MP4 relay viewer whose link has not taken its bootstrap yet stays i
         await relay.close();
     }
 });
+
+// From its start acknowledgement on, a later viewer receives every live chunk,
+// and they continue the bootstrap the acknowledgement carries. The
+// acknowledgement names their generation, so the viewer can take them from the
+// moment it is answered instead of waiting for get-media-init.
+test('a relay start acknowledgement names the generation of its bootstrap and of the live chunks after it', { concurrency: false }, async () => {
+    const relay = await startRelayRoom({}, ['first', 'late']);
+    const [firstViewer, lateViewer] = relay.viewers;
+    try {
+        const firstStart = await request(firstViewer, 'relay-consume-start');
+        assert.equal(firstStart.success, true);
+        assert.equal(firstStart.generation, null, 'the first relay viewer waits for a new generation');
+
+        relay.host.emit('media-init', { mimeType: 'video/webm;codecs=vp8,opus', generation: 4 });
+        for (let index = 0; index < 5; index += 1) {
+            relay.host.emit('media-chunk', { generation: 4, chunk: Buffer.from([index]) });
+        }
+        await nextEvent(firstViewer, 'media-chunk', ({ chunk }) => Buffer.from(chunk)[0] === 4);
+
+        const lateChunks = [];
+        lateViewer.on('media-chunk', ({ generation, chunk }) => lateChunks.push([generation, Buffer.from(chunk)[0]]));
+        const lateStart = await request(lateViewer, 'relay-consume-start');
+        assert.equal(lateStart.success, true);
+        assert.equal(lateStart.generation, 4);
+        assert.deepEqual(Buffer.from(lateStart.bootstrapChunks[0]), Buffer.from([0, 1, 2, 3, 4]));
+
+        for (let index = 5; index < 8; index += 1) {
+            relay.host.emit('media-chunk', { generation: 4, chunk: Buffer.from([index]) });
+        }
+        await nextEvent(lateViewer, 'media-chunk', ({ chunk }) => Buffer.from(chunk)[0] === 7);
+        assert.deepEqual(lateChunks, [[4, 5], [4, 6], [4, 7]], 'the live chunks after the answer, in the named generation');
+    } finally {
+        await relay.close();
+    }
+});

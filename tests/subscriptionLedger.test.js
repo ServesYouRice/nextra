@@ -325,3 +325,39 @@ test('WatchView and its session controller send relay starts and stops only thro
     assert.match(read('hooks/useViewerSessionController.js'),
         /releaseSubscription\(subscriptionLedger, 'relay', claim, socket, 'relay-consume-stop'\)/);
 });
+
+// startRelayPlayback reads the relay start's answer (its generation) in the
+// answer's own dispatch, before the live chunks that follow it are dispatched.
+test('a claimed start hands its answer to onAnswer listeners before anything awaiting the acknowledgement', async () => {
+    const { createSubscriptionLedger, emitClaimedStart } = await loadLedger();
+    const ledger = createSubscriptionLedger();
+    const socket = new FakeSocket('socket-3');
+    const order = [];
+    const { acknowledged } = emitClaimedStart(ledger, 'relay', 7, socket, 'relay-consume-start');
+    acknowledged.onAnswer((answer) => order.push(`onAnswer ${answer.generation}`));
+    void acknowledged.then((answer) => order.push(`then ${answer.generation}`));
+
+    const ack = socket.takeAck('relay-consume-start');
+    void Promise.resolve().then(() => ack({ success: true, generation: 5 }));
+    void Promise.resolve().then(() => order.push('media-chunk'));
+    await drainMicrotasks();
+    assert.deepEqual(order, ['onAnswer 5', 'media-chunk', 'then 5']);
+});
+
+test('WatchView takes the relay start\'s generation from the answer in its own dispatch, and prepends only that generation\'s bootstrap', () => {
+    const watchView = fs.readFileSync(path.join(__dirname, '..', 'src', 'WatchView.jsx'), 'utf8');
+    const from = watchView.indexOf('const startRelayPlayback = useCallback(');
+    const to = watchView.indexOf('}, [socket, playVideoElement', from);
+    assert.ok(from > 0 && to > from, 'startRelayPlayback is defined');
+    const start = watchView.slice(from, to);
+    const emit = start.indexOf("emitClaimedStart(subscriptionLedger, 'relay', attempt.id, socket, 'relay-consume-start')");
+    const onAnswer = start.indexOf('relayRequest.acknowledged.onAnswer(');
+    const awaited = start.indexOf('await relayRequest.acknowledged');
+    assert.ok(emit > 0 && onAnswer > emit && awaited > onAnswer, 'the listener is registered before the answer is awaited');
+    assert.match(start.slice(onAnswer, awaited), /selectedGeneration = answer\.generation/);
+    assert.match(start, /relayStart\.generation === selectedGeneration/, 'a bootstrap of a generation since replaced is not prepended');
+
+    const server = fs.readFileSync(path.join(__dirname, '..', 'lib', 'socket.js'), 'utf8');
+    const handler = server.slice(server.indexOf("socket.on('relay-consume-start'"), server.indexOf("socket.on('relay-consume-stop'"));
+    assert.match(handler, /generation: room\.mediaGeneration \?\? null/, 'the server names the generation in its answer');
+});

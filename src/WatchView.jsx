@@ -705,6 +705,19 @@ export default function WatchView({ initialCode = '' }) {
             // disconnected socket refuses (the start would go out on the next connection).
             const relayRequest = emitClaimedStart(subscriptionLedger, 'relay', attempt.id, socket, 'relay-consume-start');
             ownedClaim = relayRequest.claim;
+            // From its answer on, the server sends this viewer every live chunk, and
+            // they continue the bootstrap the answer carries (chunks before it are in
+            // that bootstrap, or belong to an earlier start). The answer's generation
+            // is selected in the answer's own dispatch: the chunks that follow it in
+            // the same transport frame are dispatched before an await of it resumes,
+            // and get-media-init answers a round trip later still, so waiting for
+            // either dropped them and left a hole after the bootstrap.
+            relayRequest.acknowledged.onAnswer((answer) => {
+                if (!answer?.success || selectedGeneration !== null || !ownsPlayback()) return;
+                if (Number.isSafeInteger(answer.generation) && answer.generation > 0) {
+                    selectedGeneration = answer.generation;
+                }
+            });
             const relayStart = await relayRequest.acknowledged;
             if (!relayStart?.success) {
                 // The server refused: this start subscribed nothing, so there is nothing to stop.
@@ -811,8 +824,11 @@ export default function WatchView({ initialCode = '' }) {
 
             // The relay-start acknowledgement is ordered before subsequent live
             // chunks. Prepend its bounded snapshot so a later viewer sees the
-            // active WebM generation from byte zero without restarting it.
-            if (relayStart.relayViewerCount > 1 && relayStart.bootstrapChunks?.length) {
+            // active WebM generation from byte zero without restarting it. Only
+            // while that generation is still the selected one: after a media-init
+            // of a newer generation the queue starts at that generation's init.
+            if (relayStart.relayViewerCount > 1 && relayStart.bootstrapChunks?.length
+                && relayStart.generation === selectedGeneration) {
                 appendQueue.prepend(relayStart.bootstrapChunks
                     .map(toUint8ArraySync)
                     .filter((chunk) => chunk?.byteLength));
@@ -960,107 +976,6 @@ export default function WatchView({ initialCode = '' }) {
             socket.off('server-restarting', onRoomEnded);
         };
     }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback, dropFallbackClaim, recoveryGuard, viewerSession]);
-
-    useEffect(() => {
-        const recoverTransport = async (reason, { wasWatching, previousPlaybackMode }) => {
-            cleanupPlayback();
-            setWatching(false);
-            setHostDisconnected(false);
-            setHostReconnectingReason('');
-            setPlaybackMode('');
-            setFallbackMode(false);
-            setFallbackState(null);
-            setError(reason || 'Stream connection interrupted. Reconnecting...');
-
-            if (!wasWatching) return;
-
-            setWatchLoading(true);
-            try {
-                if (previousPlaybackMode === 'relay') {
-                    await startRelayPlayback();
-                } else {
-                    try {
-                        await withDeadline(activePlaybackAttemptRef, (attempt) => startMediasoupPlayback({
-                            relayAllowedOverride: relayAllowed,
-                            turnAvailableOverride: roomHasTurnServer || hasTurnServer,
-                            attempt,
-                        }));
-                    } catch (err) {
-                        if (isSupersededAttemptError(err) || relayAllowed === false) throw err;
-                        console.warn('[Nextra] Recovered WebRTC transport failed; trying relay:', err.message);
-                        cleanupPlayback();
-                        await startRelayPlayback();
-                    }
-                }
-                setError('');
-            } catch (err) {
-                // Whoever superseded the attempt owns the session now.
-                if (isSupersededAttemptError(err)) return;
-                console.warn('[Nextra] Failed to recover viewer transport:', err.message);
-                cleanupPlayback();
-                setWatching(false);
-                setPlaybackMode('');
-                setFallbackMode(false);
-                setFallbackState(null);
-                setError(err.message || 'Stream connection was interrupted. Click Watch Stream to reconnect.');
-            } finally {
-                setWatchLoading(false);
-            }
-        };
-
-        const onTransportFailed = ({ reason, recoverable } = {}) => {
-            if (recoverable && joinedRef.current) {
-                // A transport failure reported while a recovery runs is dropped: that
-                // recovery replaces the transport anyway.
-                void recoveryGuard.run('transport-failed', (intent) => recoverTransport(reason, intent), {
-                    captureIntent: () => readResumeIntent(watchingRef, playbackModeRef, fallbackModeRef),
-                });
-                return;
-            }
-
-            // The session ends here: a join still on its way must not restore it.
-            viewerSession.invalidate();
-            recoveryGuard.clearFollowUp();
-            dropFallbackClaim();
-            fallbackResumeRef.current = false;
-            cleanupPlayback();
-            resetDevice();
-            joinedRoomCodeRef.current = '';
-            setJoinedRoomCode('');
-            setJoined(false);
-            setWatching(false);
-            setWatchLoading(false);
-            setHasProducer(false);
-            setHostDisconnected(false);
-            setHostReconnectingReason('');
-            setPlaybackMode('');
-            setIsMuted(false);
-            setRoomHasTurnServer(false);
-            setIngestMode('browser');
-            setRelayAllowed(true);
-            setObsVideoCodec(null);
-            setFallbackMode(false);
-            setFallbackState(null);
-            setFallbackCodec(null);
-            setCodecUnsupported(false);
-            setWhipReconnecting(false);
-            setError(reason || 'Stream connection failed. Please rejoin the room.');
-        };
-
-        socket.on('transport-failed', onTransportFailed);
-        return () => socket.off('transport-failed', onTransportFailed);
-    }, [
-        socket,
-        cleanupPlayback,
-        dropFallbackClaim,
-        hasTurnServer,
-        recoveryGuard,
-        relayAllowed,
-        roomHasTurnServer,
-        startMediasoupPlayback,
-        startRelayPlayback,
-        viewerSession,
-    ]);
 
     // Joins the room as the viewer session `session` (see viewerSession.mjs) and
     // loads the mediasoup device. The session is checked after every await and
@@ -1337,10 +1252,14 @@ export default function WatchView({ initialCode = '' }) {
 
 
     const handleTryMediasoup = useCallback(async () => {
+        // Nothing starts once the session has ended (Leave Room is waiting for its
+        // answer, ...): whatever ended it resets the view.
+        const session = viewerSession.current();
+        if (!session) return;
         setError('');
         setWatchLoading(true);
         exitFallbackMode();
-        
+
         try {
             // Unlike handleWatch, nothing else bounds this start.
             await withDeadline(activePlaybackAttemptRef, (attempt) => startMediasoupPlayback({
@@ -1348,8 +1267,9 @@ export default function WatchView({ initialCode = '' }) {
                 attempt,
             }));
         } catch (err) {
-            // Superseded by a cleanup or a newer start, which own the session now.
-            if (isSupersededAttemptError(err)) return;
+            // Superseded by a cleanup or a newer start, or the session ended: whoever
+            // did that owns the view now.
+            if (isSupersededAttemptError(err) || !session.isCurrent()) return;
             console.warn('[Nextra] Mediasoup override failed:', err.message);
             setError(err.message || 'WebRTC connection failed.');
             cleanupPlayback();
@@ -1358,10 +1278,14 @@ export default function WatchView({ initialCode = '' }) {
         } finally {
             setWatchLoading(false);
         }
-    }, [startMediasoupPlayback, cleanupPlayback, exitFallbackMode]);
+    }, [startMediasoupPlayback, cleanupPlayback, exitFallbackMode, viewerSession]);
 
 
     const handleWatch = useCallback(async () => {
+        // Nothing starts once the session has ended (Leave Room is waiting for its
+        // answer, ...), and a start that fails after it ended tries no other mode.
+        const session = viewerSession.current();
+        if (!session) return;
         setError('');
         setWatchLoading(true);
         cleanupPlayback();
@@ -1387,7 +1311,7 @@ export default function WatchView({ initialCode = '' }) {
                 console.log('[Nextra] Relay playback connected.');
             } catch (primaryErr) {
                 // A superseded attempt leaves the session to whoever superseded it.
-                if (watchTimedOut || isSupersededAttemptError(primaryErr)) return;
+                if (watchTimedOut || isSupersededAttemptError(primaryErr) || !session.isCurrent()) return;
                 console.warn('[Nextra] Relay-first playback failed; trying WebRTC fallback:', primaryErr.message);
                 if (isRelayPlaybackUnsupported(primaryErr)) relayUnsupportedError = primaryErr;
                 cleanupPlayback();
@@ -1398,7 +1322,7 @@ export default function WatchView({ initialCode = '' }) {
                     if (watchTimedOut) return;
                     console.log('[Nextra] Mediasoup fallback connected.');
                 } catch (fallbackErr) {
-                    if (watchTimedOut || isSupersededAttemptError(fallbackErr)) return;
+                    if (watchTimedOut || isSupersededAttemptError(fallbackErr) || !session.isCurrent()) return;
                     cleanupPlayback();
                     setWatching(false);
                     console.error('[Nextra] Secondary playback attempt failed:', fallbackErr.message);
@@ -1419,7 +1343,7 @@ export default function WatchView({ initialCode = '' }) {
             if (watchTimedOut) return;
             console.log('[Nextra] Mediasoup playback connected.');
         } catch (primaryErr) {
-            if (watchTimedOut || isSupersededAttemptError(primaryErr)) return;
+            if (watchTimedOut || isSupersededAttemptError(primaryErr) || !session.isCurrent()) return;
             if (!relayAllowed) {
                 cleanupPlayback();
                 setWatching(false);
@@ -1435,7 +1359,7 @@ export default function WatchView({ initialCode = '' }) {
                 if (watchTimedOut) return;
                 console.log('[Nextra] Relay playback connected.');
             } catch (fallbackErr) {
-                if (watchTimedOut || isSupersededAttemptError(fallbackErr)) return;
+                if (watchTimedOut || isSupersededAttemptError(fallbackErr) || !session.isCurrent()) return;
                 cleanupPlayback();
                 setWatching(false);
                 console.error('[Nextra] Relay fallback also failed:', fallbackErr.message);
@@ -1447,7 +1371,7 @@ export default function WatchView({ initialCode = '' }) {
                 setWatchLoading(false);
             }
         }
-    }, [cleanupPlayback, preferRelayFirst, relayAllowed, startMediasoupPlayback, startRelayPlayback]);
+    }, [cleanupPlayback, preferRelayFirst, relayAllowed, startMediasoupPlayback, startRelayPlayback, viewerSession]);
 
     const handleToggleMedia = useCallback(async () => {
         setMediaControlStatus('');
@@ -1472,13 +1396,17 @@ export default function WatchView({ initialCode = '' }) {
         // player in whichever room joins next.
         dropFallbackClaim();
         fallbackResumeRef.current = false;
+        // Playback ends with the session, before the wait for the server's answer
+        // (up to 5 s): a start, its fallback to the other mode or a recovery still
+        // on its way is superseded now, so none of them sends a request into the
+        // room being left.
+        cleanupPlayback();
         try {
             await socketRequest(socket, 'leave-room', {}, { timeoutMs: 5000, maxAttempts: 1 });
         } catch (err) {
             console.warn('[Nextra] leave-room failed:', err.message);
         }
 
-        cleanupPlayback();
         terminalRoomEndedRef.current = false;
         resetDevice();
         joinedRoomCodeRef.current = '';
@@ -1503,6 +1431,121 @@ export default function WatchView({ initialCode = '' }) {
         setCodecUnsupported(false);
         setWhipReconnecting(false);
     }, [cleanupPlayback, recoveryGuard, dropFallbackClaim, socket, viewerSession]);
+
+    useEffect(() => {
+        const recoverTransport = async (reason, { wasWatching, previousPlaybackMode, wasFallbackMode }) => {
+            // The session has ended (Leave Room is waiting for its answer, ...):
+            // whatever ended it resets the view, and nothing starts in the room left.
+            const session = viewerSession.current();
+            if (!session) return;
+            // The fMP4 relay is given up the way Try WebRTC gives it up: its player
+            // stops, and the subscription it holds or a start still waiting for its
+            // answer goes back through the ledger, so a late answer starts nothing.
+            exitFallbackMode();
+            setWatching(false);
+            setHostDisconnected(false);
+            setHostReconnectingReason('');
+            setPlaybackMode('');
+            setError(reason || 'Stream connection interrupted. Reconnecting...');
+
+            // In relay mode or entering it: the viewer asked for the relay, which the
+            // failed WebRTC transport has no part in. Ask for it again.
+            if (wasFallbackMode) {
+                enterFallbackMode();
+                return;
+            }
+            if (!wasWatching) return;
+
+            setWatchLoading(true);
+            try {
+                if (previousPlaybackMode === 'relay') {
+                    await startRelayPlayback();
+                } else {
+                    try {
+                        await withDeadline(activePlaybackAttemptRef, (attempt) => startMediasoupPlayback({
+                            relayAllowedOverride: relayAllowed,
+                            turnAvailableOverride: roomHasTurnServer || hasTurnServer,
+                            attempt,
+                        }));
+                    } catch (err) {
+                        // A session that ended meanwhile starts no relay either.
+                        if (isSupersededAttemptError(err) || !session.isCurrent() || relayAllowed === false) throw err;
+                        console.warn('[Nextra] Recovered WebRTC transport failed; trying relay:', err.message);
+                        cleanupPlayback();
+                        await startRelayPlayback();
+                    }
+                }
+                setError('');
+            } catch (err) {
+                // Whoever superseded the attempt, or ended the session, owns the view now.
+                if (isSupersededAttemptError(err) || !session.isCurrent()) return;
+                console.warn('[Nextra] Failed to recover viewer transport:', err.message);
+                cleanupPlayback();
+                setWatching(false);
+                setPlaybackMode('');
+                setFallbackMode(false);
+                setFallbackState(null);
+                setError(err.message || 'Stream connection was interrupted. Click Watch Stream to reconnect.');
+            } finally {
+                setWatchLoading(false);
+            }
+        };
+
+        const onTransportFailed = ({ reason, recoverable } = {}) => {
+            if (recoverable && joinedRef.current) {
+                // A transport failure reported while a recovery runs is dropped: that
+                // recovery replaces the transport anyway.
+                void recoveryGuard.run('transport-failed', (intent) => recoverTransport(reason, intent), {
+                    captureIntent: () => readResumeIntent(watchingRef, playbackModeRef, fallbackModeRef),
+                });
+                return;
+            }
+
+            // The session ends here: a join still on its way must not restore it.
+            viewerSession.invalidate();
+            recoveryGuard.clearFollowUp();
+            dropFallbackClaim();
+            fallbackResumeRef.current = false;
+            cleanupPlayback();
+            resetDevice();
+            joinedRoomCodeRef.current = '';
+            setJoinedRoomCode('');
+            setJoined(false);
+            setWatching(false);
+            setWatchLoading(false);
+            setHasProducer(false);
+            setHostDisconnected(false);
+            setHostReconnectingReason('');
+            setPlaybackMode('');
+            setIsMuted(false);
+            setRoomHasTurnServer(false);
+            setIngestMode('browser');
+            setRelayAllowed(true);
+            setObsVideoCodec(null);
+            setFallbackMode(false);
+            setFallbackState(null);
+            setFallbackCodec(null);
+            setCodecUnsupported(false);
+            setWhipReconnecting(false);
+            setError(reason || 'Stream connection failed. Please rejoin the room.');
+        };
+
+        socket.on('transport-failed', onTransportFailed);
+        return () => socket.off('transport-failed', onTransportFailed);
+    }, [
+        socket,
+        cleanupPlayback,
+        dropFallbackClaim,
+        enterFallbackMode,
+        exitFallbackMode,
+        hasTurnServer,
+        recoveryGuard,
+        relayAllowed,
+        roomHasTurnServer,
+        startMediasoupPlayback,
+        startRelayPlayback,
+        viewerSession,
+    ]);
 
     useEffect(() => {
         const rejoinAfterReconnect = async ({ wasWatching, previousPlaybackMode, wasFallbackMode: wasInFallbackMode }) => {

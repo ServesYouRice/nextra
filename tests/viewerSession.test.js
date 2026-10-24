@@ -802,3 +802,40 @@ test('WatchView sends the fallback start through the ledger and ties every stop 
     assert.match(bodyOf('const onReconnect = () => {', 'socket.on(\'connect\', onReconnect)'), /dropFallbackClaim\(\)/);
     assert.match(exit, /isEnteringFallbackRef\.current = false/);
 });
+
+// Leave Room waits up to 5 s for the server. Playback started, failing or
+// recovering in that wait must not go on in the room being left (the browser
+// tests in media-flow.spec.mjs show it); a transport recovery gives the fMP4
+// relay up through the ledger instead of only resetting its flags.
+test('WatchView ends playback with the session, starts playback only in a session, and a recovery gives the relay up through the ledger', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'WatchView.jsx'), 'utf8');
+    const bodyOf = (start, end) => {
+        const from = source.indexOf(start);
+        assert.ok(from > 0, `${start} is defined`);
+        const to = source.indexOf(end, from);
+        assert.ok(to > from, `${end} follows ${start}`);
+        return source.slice(from, to);
+    };
+
+    const leave = bodyOf('const handleLeave = useCallback(async () => {', '}, [cleanupPlayback, recoveryGuard');
+    assert.ok(leave.indexOf('cleanupPlayback()') > 0, 'Leave Room cleans playback up');
+    assert.ok(leave.indexOf('cleanupPlayback()') < leave.indexOf('await '), 'before it waits for the server');
+
+    const starts = {
+        handleWatch: bodyOf('const handleWatch = useCallback(async () => {', 'const handleToggleMedia'),
+        handleTryMediasoup: bodyOf('const handleTryMediasoup = useCallback(async () => {', 'const handleWatch'),
+        recoverTransport: bodyOf('const recoverTransport = async (', 'const onTransportFailed'),
+    };
+    for (const [name, body] of Object.entries(starts)) {
+        assert.match(body, /const session = viewerSession\.current\(\);\s+if \(!session\) return;/,
+            `${name} starts nothing once the session has ended`);
+        assert.ok(body.indexOf('if (!session) return;') < body.search(/cleanupPlayback\(\)|exitFallbackMode\(\)|setWatchLoading\(true\)/),
+            `${name} checks before it changes anything`);
+    }
+
+    const recover = starts.recoverTransport;
+    assert.match(recover, /exitFallbackMode\(\);/, 'the fallback start or player is given up through the ledger');
+    assert.doesNotMatch(recover, /setFallbackMode\(false\);\s+setFallbackState\(null\);\s+setError\(reason/,
+        'not just reset');
+    assert.match(recover, /if \(wasFallbackMode\) \{\s+enterFallbackMode\(\);\s+return;\s+\}/, 'and asked for again');
+});

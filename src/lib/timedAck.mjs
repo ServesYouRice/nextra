@@ -20,6 +20,14 @@
 //   never calls the acknowledgement of a packet it had already sent).
 // - Once settled, the timer and the disconnect listener are gone and a late
 //   answer is ignored.
+// - The returned promise takes onAnswer listeners, which get the answer in the
+//   dispatch of the answer itself. socket.io-client dispatches each packet it
+//   decodes in a microtask of its own, in order; the packets of one transport
+//   frame (HTTP long-polling carries several) are queued together, so whatever
+//   awaits the promise runs only after the events that followed the answer. A
+//   caller that must tell the events before the answer from those after it
+//   (the relay start: the live chunks after it continue its bootstrap) reads
+//   the answer in onAnswer.
 //
 // No React here, so the unit tests drive the same code with a fake socket.
 
@@ -72,6 +80,15 @@ export const isAckDisconnectError = (err) => err instanceof AckDisconnectError;
  */
 
 /**
+ * @typedef {Promise<any> & { onAnswer: (listener: (answer: any) => void) => AnsweredRequest }} AnsweredRequest
+ * The request's promise. `onAnswer(listener)` (it returns the same promise)
+ * registers a listener that gets the answer in the answer's own dispatch, before
+ * the events that follow it on the connection and before anything awaiting the
+ * promise. It is not called for an answer that comes after the request settled
+ * (timed out, disconnected). A listener must not throw.
+ */
+
+/**
  * Emits `event` once and resolves with the raw acknowledgement.
  *
  * The emit happens before this returns (the promise executor runs at once), so
@@ -81,10 +98,12 @@ export const isAckDisconnectError = (err) => err instanceof AckDisconnectError;
  * @param {string} event
  * @param {unknown} [payload]
  * @param {{ timeoutMs?: number }} [options]
- * @returns {Promise<any>}
+ * @returns {AnsweredRequest}
  */
 export function emitWithTimedAck(socket, event, payload = {}, { timeoutMs = DEFAULT_ACK_TIMEOUT_MS } = {}) {
-    return new Promise((resolve, reject) => {
+    /** @type {Array<(answer: any) => void>} */
+    const answerListeners = [];
+    const request = new Promise((resolve, reject) => {
         if (!socket || socket.connected !== true) {
             reject(new SocketNotConnectedError(event));
             return;
@@ -117,6 +136,7 @@ export function emitWithTimedAck(socket, event, payload = {}, { timeoutMs = DEFA
                 if (settled) return;
                 finish();
                 resolve(response);
+                for (const listener of answerListeners) listener(response);
             });
         } catch (err) {
             if (settled) return;
@@ -124,4 +144,13 @@ export function emitWithTimedAck(socket, event, payload = {}, { timeoutMs = DEFA
             reject(err);
         }
     });
+    /** @type {AnsweredRequest} */
+    const answered = Object.assign(request, {
+        /** @param {(answer: any) => void} listener */
+        onAnswer(listener) {
+            answerListeners.push(listener);
+            return answered;
+        },
+    });
+    return answered;
 }

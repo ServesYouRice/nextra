@@ -113,7 +113,8 @@ export { SocketNotConnectedError };
  * synchronous block. Throws a SocketNotConnectedError, claiming and emitting
  * nothing, while the socket is disconnected. The promise resolves with the raw
  * acknowledgement and rejects on a timeout or a disconnect; nothing is retried
- * (see timedAck.mjs).
+ * (see timedAck.mjs). Its onAnswer listeners get the answer in the answer's own
+ * dispatch, before the events that follow it on the connection.
  * @param {SubscriptionLedger} ledger
  * @param {SubscriptionKind} kind
  * @param {unknown} token The attempt that sends the start.
@@ -121,7 +122,7 @@ export { SocketNotConnectedError };
  * @param {string} event
  * @param {unknown} [payload]
  * @param {{ timeoutMs?: number }} [options]
- * @returns {{ claim: SubscriptionClaim, acknowledged: Promise<any> }}
+ * @returns {{ claim: SubscriptionClaim, acknowledged: import('./timedAck.mjs').AnsweredRequest }}
  */
 export function emitClaimedStart(ledger, kind, token, socket, event, payload = {}, { timeoutMs = 15000 } = {}) {
     if (!socket || socket.connected !== true || typeof socket.id !== 'string') {
