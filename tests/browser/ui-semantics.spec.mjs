@@ -302,3 +302,163 @@ test('a viewer joining while the leave-host dialog is open keeps focus on the bu
     await expect(dialog).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'Watch' })).toBeFocused();
 });
+
+// The 16:9 video stage is also bounded by the height left over after the page
+// chrome. On a landscape phone that term is zero or a sliver (a 390px-tall
+// viewport is shorter than the host page's chrome budget), so the stage needs
+// its own floor: --stage-min-width, 18rem, still capped by the container.
+const STAGE_MIN_WIDTH_PX = 18 * 16;
+const SHORT_VIEWPORTS = [{ width: 844, height: 390 }, { width: 667, height: 375 }];
+
+// The stage's width, the width of the box that holds it, and the viewport
+// height, read after the layout stops moving.
+async function stageWidths(page) {
+    const stage = await settledBox(page, '.video-container');
+    const metrics = await page.evaluate(() => {
+        const parent = document.querySelector('.video-container').parentElement;
+        const style = getComputedStyle(parent);
+        return {
+            containerWidth: parent.clientWidth
+                - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+            innerHeight: window.innerHeight,
+        };
+    });
+    return { stage, ...metrics };
+}
+
+function expectFlooredStage({ stage, containerWidth }, label) {
+    expect(stage.width, `${label}: the stage must have a width`).toBeGreaterThan(0);
+    expect(stage.width, `${label}: the stage keeps its minimum width`)
+        .toBeGreaterThanOrEqual(Math.min(STAGE_MIN_WIDTH_PX, containerWidth) - 0.5);
+    expect(stage.width, `${label}: the stage never outgrows its container`)
+        .toBeLessThanOrEqual(containerWidth + 0.5);
+    expect(stage.width / stage.height, `${label}: the stage stays 16:9`)
+        .toBeCloseTo(16 / 9, 1);
+}
+
+// Publishes a canvas as the screen to share, so a host can start without a picker.
+async function useFakeScreenShare(page) {
+    await page.addInitScript(() => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 360;
+        const context = canvas.getContext('2d');
+        const draw = () => {
+            context.fillStyle = `hsl(${Date.now() % 360} 80% 45%)`;
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            window.setTimeout(draw, 33);
+        };
+        draw();
+        const stream = canvas.captureStream(30);
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getDisplayMedia: async () => stream },
+        });
+    });
+}
+
+// Starts sharing in a desktop context and returns the room code for viewers.
+async function startSharingRoom(browser, baseURL) {
+    const hostContext = await browser.newContext({
+        baseURL,
+        ignoreHTTPSErrors: true,
+        viewport: { width: 1280, height: 800 },
+    });
+    const host = await hostContext.newPage();
+    await useFakeScreenShare(host);
+    await host.goto('/#host');
+    await host.getByRole('button', { name: 'Start Sharing' }).click();
+    await expect(host.getByText(/Streaming \(/)).toBeVisible();
+    const localLink = await host.locator('.copy-field', { hasText: 'Local Link' })
+        .locator('.copy-field-value').innerText();
+    const code = localLink.trim().split('#watch/')[1];
+    expect(code).toMatch(/^[A-Z0-9]{6}$/);
+    return { hostContext, code };
+}
+
+for (const { width, height } of SHORT_VIEWPORTS) {
+    test(`the host video stage keeps its minimum width on a ${width}x${height} landscape phone`, async ({ browser }, testInfo) => {
+        test.skip(testInfo.project.name !== 'chromium', 'makes its own landscape-phone context');
+        const context = await browser.newContext({
+            baseURL: testInfo.project.use.baseURL,
+            ignoreHTTPSErrors: true,
+            viewport: { width, height },
+            isMobile: true,
+            hasTouch: true,
+        });
+        try {
+            const page = await context.newPage();
+            await page.goto('/#host');
+            await expect(page.locator('.host-side-panel')).toBeVisible();
+            expectFlooredStage(await stageWidths(page), `host at ${width}x${height}`);
+        } finally {
+            await context.close();
+        }
+    });
+
+    test(`the watch video stage keeps its minimum width on a ${width}x${height} landscape phone`, async ({ browser }, testInfo) => {
+        test.skip(testInfo.project.name !== 'chromium', 'makes its own landscape-phone context');
+        const { hostContext, code } = await startSharingRoom(browser, testInfo.project.use.baseURL);
+        const viewerContext = await browser.newContext({
+            baseURL: testInfo.project.use.baseURL,
+            ignoreHTTPSErrors: true,
+            viewport: { width, height },
+            isMobile: true,
+            hasTouch: true,
+        });
+        try {
+            const viewer = await viewerContext.newPage();
+            await viewer.goto(`/#watch/${code}`);
+            await viewer.getByRole('button', { name: 'Join Room' }).click();
+            await expect(viewer.locator('.watch-video')).toBeVisible();
+            expectFlooredStage(await stageWidths(viewer), `watch at ${width}x${height}`);
+        } finally {
+            await viewerContext.close();
+            await hostContext.close();
+        }
+    });
+}
+
+// Where the height term is nowhere near the floor, the floor must change
+// nothing: these are the stage widths the CSS produced before it existed.
+// 1366x768 is a laptop where the height term is what sizes the host stage.
+function stageWidthWithoutFloor({ containerWidth, innerHeight }, { chromeRem, maxWidthShare = 1 }) {
+    const heightTerm = (innerHeight - chromeRem * 16) * 16 / 9;
+    return Math.min(containerWidth, 1680, heightTerm, containerWidth * maxWidthShare);
+}
+
+for (const { width, height } of [{ width: 1440, height: 900 }, { width: 1366, height: 768 }]) {
+    test(`the host and watch video stages are unchanged at ${width}x${height}`, async ({ browser }, testInfo) => {
+        test.skip(testInfo.project.name !== 'chromium', 'desktop layout tiers');
+        const baseURL = testInfo.project.use.baseURL;
+        const { hostContext, code } = await startSharingRoom(browser, baseURL);
+        const desktopContext = await browser.newContext({
+            baseURL,
+            ignoreHTTPSErrors: true,
+            viewport: { width, height },
+        });
+        try {
+            const page = await desktopContext.newPage();
+            await page.goto('/#host');
+            await expect(page.locator('.host-side-panel')).toBeVisible();
+            const host = await stageWidths(page);
+            // 26rem of chrome from 820px down, 24rem above it.
+            const hostChromeRem = height <= 820 ? 26 : 24;
+            expect(host.stage.width, `host at ${width}x${height}`)
+                .toBeCloseTo(stageWidthWithoutFloor(host, { chromeRem: hostChromeRem }), 0);
+            expect(host.stage.width).toBeGreaterThan(STAGE_MIN_WIDTH_PX);
+
+            await page.goto(`/#watch/${code}`);
+            await page.getByRole('button', { name: 'Join Room' }).click();
+            await expect(page.locator('.watch-video')).toBeVisible();
+            const watch = await stageWidths(page);
+            // .watch-video brings its own 19rem of chrome and a 60% cap above 900px.
+            expect(watch.stage.width, `watch at ${width}x${height}`)
+                .toBeCloseTo(stageWidthWithoutFloor(watch, { chromeRem: 19, maxWidthShare: 0.6 }), 0);
+            expect(watch.stage.width).toBeGreaterThan(STAGE_MIN_WIDTH_PX);
+        } finally {
+            await desktopContext.close();
+            await hostContext.close();
+        }
+    });
+}
