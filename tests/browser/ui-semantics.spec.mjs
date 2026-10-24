@@ -130,6 +130,42 @@ test('Host downloads an allowlisted diagnostics JSON file', async ({ page }) => 
     await expect(page.locator('.host-diagnostics [role="status"]')).toContainText('Downloaded nextra-diagnostics-');
 });
 
+// Blocked site data, and sandboxed iframes without allow-same-origin, make reading
+// window.localStorage throw a SecurityError. HostView and WatchView used to read it
+// while their module evaluated, so the lazily loaded route chunk failed to load and
+// the route never rendered. The getter below throws like that on every read.
+for (const { route, control } of [
+    { route: '/#watch', control: (page) => page.getByRole('button', { name: 'Join Room' }) },
+    { route: '/#host', control: (page) => page.locator('.host-side-panel') },
+]) {
+    test(`${route} still renders when reading window.localStorage throws`, async ({ page }) => {
+        const pageErrors = [];
+        page.on('pageerror', (err) => pageErrors.push(`${err.name}: ${err.message}`));
+        await page.addInitScript(() => {
+            Object.defineProperty(window, 'localStorage', {
+                configurable: true,
+                get() {
+                    throw new DOMException('The operation is insecure.', 'SecurityError');
+                },
+            });
+        });
+
+        await page.goto(route);
+        await expect(control(page)).toBeVisible();
+        await expect(page.getByText('Something went wrong')).toHaveCount(0);
+        // The init script took effect: a read really throws on this page.
+        expect(await page.evaluate(() => {
+            try {
+                void window.localStorage;
+                return 'readable';
+            } catch (err) {
+                return err.name;
+            }
+        })).toBe('SecurityError');
+        expect(pageErrors).toEqual([]);
+    });
+}
+
 // VAL-086: the skip link moves focus to <main>; it must not be treated as a
 // hash route, which would render NotFound and unmount the current view.
 for (const { route, marker } of [
@@ -183,6 +219,44 @@ for (const width of REFLOW_WIDTHS) {
             expect(metrics.bodyScrollWidth, `${route} at ${width}px`)
                 .toBeLessThanOrEqual(metrics.innerWidth + 1);
         }
+    });
+}
+
+// Selecting OBS ingest adds the OBS card and the tuning-profile toggle to the
+// host page. The loop above never selects it, so a layout that only overflows
+// with OBS on went unnoticed: at 320px the three-cell toggle was wider than the
+// column and took the stage, the start button and the capture rows with it, so
+// the page ran 12px past the viewport. The bound is the layout viewport
+// (clientWidth), not innerWidth: a mobile browser widens innerWidth to fit
+// overflowing content, which hid the overflow from the mobile project.
+for (const width of REFLOW_WIDTHS) {
+    test(`the host page reflows without horizontal scrolling at ${width}px with OBS ingest selected`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 800 });
+        await remountHost(page);
+
+        await page.locator('#obsMode').check();
+        await expect(page.locator('.settings-wrapper')).toHaveClass(/settings-expanded/);
+        await expect(page.locator('.obs-config-panel')).toBeVisible();
+        await settledBox(page, '.video-container');
+
+        const metrics = await page.evaluate(() => {
+            const right = (selector) => {
+                const el = document.querySelector(selector);
+                return el ? Math.round(el.getBoundingClientRect().right * 10) / 10 : null;
+            };
+            return {
+                documentScrollWidth: document.documentElement.scrollWidth,
+                bodyScrollWidth: document.body.scrollWidth,
+                viewportWidth: document.documentElement.clientWidth,
+                stageRight: right('.video-container'),
+                tuningRight: right('.controls .mode-toggle'),
+            };
+        });
+        const label = `host with OBS on at ${width}px (stage right edge ${metrics.stageRight}, tuning toggle ${metrics.tuningRight})`;
+        expect(metrics.documentScrollWidth, label).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+        expect(metrics.bodyScrollWidth, label).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+        expect(metrics.stageRight, label).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+        expect(metrics.tuningRight, label).toBeLessThanOrEqual(metrics.viewportWidth + 1);
     });
 }
 
@@ -282,7 +356,7 @@ test('a viewer joining while the leave-host dialog is open keeps focus on the bu
     await expect(leave).toBeFocused();
 
     const viewerContext = await browser.newContext({
-        baseURL: 'https://127.0.0.1:3210',
+        baseURL: testInfo.project.use.baseURL,
         ignoreHTTPSErrors: true,
         viewport: { width: 1280, height: 800 },
     });

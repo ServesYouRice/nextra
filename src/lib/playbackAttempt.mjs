@@ -10,6 +10,10 @@
 // the resources it created itself and rejects with a SupersededAttemptError,
 // which its callers ignore (the newer owner decides what the viewer sees).
 //
+// A start that nothing else bounds runs under withDeadline, and the wait for a
+// transport's ICE connection (waitForTransportConnected) is a timed event wait
+// that nothing else, such as video playback, can hold up.
+//
 // No React here, so the unit tests drive the same code.
 
 export class SupersededAttemptError extends Error {
@@ -62,6 +66,13 @@ export function beginPlaybackAttempt(attemptRef) {
         isCurrent: () => isAttemptCurrent(id, attemptRef),
         assertCurrent: () => assertAttemptCurrent(id, attemptRef),
         /**
+         * Gives this attempt up: moves the counter on if the attempt is still the
+         * current one. A newer attempt's counter value is left alone.
+         */
+        supersede() {
+            if (isAttemptCurrent(id, attemptRef)) attemptRef.current += 1;
+        },
+        /**
          * Records how to release a resource this attempt created (its transport,
          * object URL, ...). Releasing must not touch shared refs. A resource
          * created after dispose() is released at once.
@@ -94,6 +105,133 @@ export function beginPlaybackAttempt(attemptRef) {
 }
 
 /** @typedef {ReturnType<typeof beginPlaybackAttempt>} PlaybackAttempt */
+
+/** The overall deadline of a playback start that has no safety timer of its own. */
+export const PLAYBACK_DEADLINE_MS = 40000;
+
+export class PlaybackDeadlineError extends Error {
+    constructor(message = 'Connection timed out. Check your network or try again.') {
+        super(message);
+        this.name = 'PlaybackDeadlineError';
+    }
+}
+
+/**
+ * Runs a playback start under an overall deadline, so a start that waits on
+ * something that never settles cannot hold the viewer in "Connecting..." for
+ * good (handleWatch has its own 40 s timer; Try WebRTC and the recovery paths
+ * do not).
+ *
+ * The attempt is begun here and handed to `start`, which must run as that
+ * attempt: the deadline needs to know which attempt it may give up. If `start`
+ * settles first, its outcome passes through. At the deadline an attempt that is
+ * still current is superseded, its own resources are released, and the result
+ * rejects with a PlaybackDeadlineError, which the caller reports like any
+ * other failure (and cleanupPlayback releases the rest). An attempt that a
+ * newer owner replaced meanwhile rejects with a SupersededAttemptError
+ * instead, so the caller leaves the session to that owner. Whatever `start`
+ * does after the deadline is ignored.
+ *
+ * @template T
+ * @param {{ current: number }} attemptRef
+ * @param {(attempt: PlaybackAttempt) => Promise<T>} start
+ * @param {{ ms?: number, message?: string }} [options]
+ * @returns {Promise<T>}
+ */
+export function withDeadline(attemptRef, start, { ms = PLAYBACK_DEADLINE_MS, message } = {}) {
+    const attempt = beginPlaybackAttempt(attemptRef);
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            const owned = attempt.isCurrent();
+            attempt.supersede();
+            attempt.dispose();
+            reject(owned ? new PlaybackDeadlineError(message) : new SupersededAttemptError());
+        }, ms);
+
+        /** @type {Promise<T>} */
+        let running;
+        try {
+            running = Promise.resolve(start(attempt));
+        } catch (err) {
+            running = Promise.reject(err);
+        }
+        running.then(
+            (value) => {
+                clearTimeout(timer);
+                resolve(value);
+            },
+            (err) => {
+                clearTimeout(timer);
+                reject(err);
+            },
+        );
+    });
+}
+
+/**
+ * @typedef {object} ConnectableTransport
+ * @property {string} connectionState
+ * @property {(event: string, listener: (...args: any[]) => void) => unknown} on
+ * @property {(event: string, listener: (...args: any[]) => void) => unknown} off
+ * @property {{ on: (event: string, listener: (...args: any[]) => void) => unknown, off: (event: string, listener: (...args: any[]) => void) => unknown }} [observer]
+ */
+
+/**
+ * Waits for a mediasoup transport's ICE/DTLS connection, for at most
+ * `timeoutMs`. It ends at once when the transport connects, fails or closes,
+ * and a transport closed by cleanupPlayback (which supersedes the attempt
+ * waiting on it) must end it too: mediasoup-client's close() changes
+ * connectionState to 'closed' but emits no connectionstatechange, only the
+ * transport observer's 'close'. Nothing here waits on video playback.
+ *
+ * @param {ConnectableTransport} transport
+ * @param {{ timeoutMs: number, timeoutMessage: string, onStateChange?: (state: string) => void }} options
+ * @returns {Promise<void>}
+ */
+export function waitForTransportConnected(transport, { timeoutMs, timeoutMessage, onStateChange }) {
+    return new Promise((resolve, reject) => {
+        const initial = transport.connectionState;
+        if (initial === 'connected') {
+            resolve();
+            return;
+        }
+        if (initial === 'failed' || initial === 'closed') {
+            reject(new Error(`WebRTC connection ${initial}.`));
+            return;
+        }
+
+        const timeout = setTimeout(() => {
+            cleanup();
+            reject(new Error(timeoutMessage));
+        }, timeoutMs);
+
+        const cleanup = () => {
+            clearTimeout(timeout);
+            transport.off('connectionstatechange', onConnectionStateChange);
+            transport.observer?.off('close', onClosed);
+        };
+
+        /** @param {string} state */
+        const onConnectionStateChange = (state) => {
+            onStateChange?.(state);
+            if (state === 'connected') {
+                cleanup();
+                resolve();
+            } else if (state === 'failed' || state === 'closed') {
+                cleanup();
+                reject(new Error(`WebRTC connection ${state}.`));
+            }
+        };
+
+        const onClosed = () => {
+            cleanup();
+            reject(new Error('WebRTC connection closed.'));
+        };
+
+        transport.on('connectionstatechange', onConnectionStateChange);
+        transport.observer?.on('close', onClosed);
+    });
+}
 
 /**
  * One viewer recovery (transport-failed or socket reconnect) at a time.

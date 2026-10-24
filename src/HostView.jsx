@@ -16,6 +16,7 @@ import { evaluateHostPreflight } from './lib/hostPreflight.mjs';
 import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
 import { setNavigationGuard } from './lib/navigationGuard.mjs';
 import { RELOAD_PRESERVE, createStartAttempt, startOperationGuardFor } from './lib/startOperationGuard.mjs';
+import { obsOperationQueue } from './lib/obsOperationQueue.mjs';
 import {
     START_PHASES,
     createCancellableWait,
@@ -28,6 +29,8 @@ import {
 import {
     RELAY_BITRATE_STEP_UP_AFTER_MS,
     RELAY_MP4_MIME_TYPE,
+    RELAY_RECORDER_RESTART_BUDGET,
+    createRelayRecorderRestartBudget,
     lowerRelayBitrate,
     raiseRelayBitrate,
     selectRelayRecorderFormat,
@@ -67,6 +70,9 @@ const OBS_TUNING_PROFILES = {
     },
 };
 const OBS_WS_PASSWORD_STORAGE_KEY = 'nextra.obsWsPassword.v1';
+const OBS_CONNECTING_MESSAGE = 'Connecting to OBS...';
+// OBS requests from this page run one at a time (src/lib/obsOperationQueue.mjs).
+const OBS_WAITING_MESSAGE = 'Waiting for the previous OBS setup to finish...';
 const BYOK_TURN_SESSION_STORAGE_KEY = 'nextra.byokTurnSession.v1';
 const HOST_RECOVERY_SESSION_STORAGE_KEY = 'nextra.hostRecovery.v1';
 const CAPTURE_PREFS_STORAGE_KEY = 'nextra.capturePrefs.v1';
@@ -454,6 +460,9 @@ export default function HostView() {
     // Latched when this browser's MP4 relay recorder fails, so the relay falls
     // back to VP8 for the rest of the page session.
     const [relayMp4Failed, setRelayMp4Failed] = useState(false);
+    // Bumped when the current relay recorder errors or stops by itself, so the
+    // membership effect runs again and starts a new one.
+    const [relayRecorderRestartToken, setRelayRecorderRestartToken] = useState(0);
     // Lowered when the server reports that every relay viewer is falling behind
     // (the host uplink cannot carry the recording); null means no limit.
     const [relayBitrateLimit, setRelayBitrateLimit] = useState(null);
@@ -525,6 +534,10 @@ export default function HostView() {
     const hostUnmountTimerRef = useRef(null);
     const prevRelayViewerCountRef = useRef(0);
     const relayGenerationRef = useRef(0);
+    const relayRestartBudgetRef = useRef(null);
+    if (relayRestartBudgetRef.current === null) {
+        relayRestartBudgetRef.current = createRelayRecorderRestartBudget();
+    }
     const obsPasswordRef = useRef('');
     const obsControlChannelRef = useRef(null);
     // One per socket, so a start left pending by an unmounted host view still
@@ -628,17 +641,22 @@ export default function HostView() {
     }, [obsPassword]);
 
     // Every teardown path routes through here so OBS is never left streaming at
-    // a room that is gone. Unload handlers cannot await, so this stays
-    // synchronous: the open control channel writes the stop frame immediately,
-    // and only the fallback (no channel — e.g. after a reload-recovery reclaim)
-    // pays for a fresh connect. A page that was reloaded starts in 'browser' until
-    // a reclaim succeeds, so a teardown after a failed reclaim names the stored
-    // room's mode instead.
-    const stopObsIngest = useCallback((ingestModeOverride) => {
+    // a room that is gone. `token` names the session being torn down (its start
+    // operation, or null for a reclaimed room that has none). The stop runs in
+    // the page's OBS queue, after anything already sent to OBS: through the
+    // open control channel, or else (no channel — e.g. after a reload-recovery
+    // reclaim) through a fresh connection. While the session's own configure is
+    // still queued or running, that configure sends the stop once it has
+    // finished with OBS, since a stop sent now could land before its
+    // start-stream step. Only an unloading page, which cannot wait, writes the
+    // stop frame on the open channel at once. A page that was reloaded starts
+    // in 'browser' until a reclaim succeeds, so a teardown after a failed
+    // reclaim names the stored room's mode instead.
+    const stopObsIngest = useCallback((token, { ingestMode: ingestModeOverride, unloading = false } = {}) => {
         if ((ingestModeOverride ?? ingestModeRef.current) !== 'obs') return;
         const channel = obsControlChannelRef.current;
         obsControlChannelRef.current = null;
-        if (channel) {
+        if (unloading && channel) {
             // OBS drops a request whose connection closes right behind it, and
             // then keeps retrying a room that is gone. Close only once OBS has
             // answered; a page that is unloading never gets that far, and its
@@ -646,7 +664,40 @@ export default function HostView() {
             channel.stopStream().finally(() => channel.close());
             return;
         }
-        stopObsStream({ password: obsPasswordRef.current }).catch(() => {});
+        if (obsOperationQueue.deferStopToConfigure(token)) {
+            channel?.close();
+            return;
+        }
+        const guard = startGuardRef.current;
+        const password = obsPasswordRef.current;
+        obsOperationQueue.stop({
+            token,
+            isCurrent: (session) => guard.isCurrent(session),
+            stop: channel
+                ? () => channel.stopStream()
+                : () => stopObsStream({ password }),
+        }).finally(() => channel?.close());
+    }, []);
+
+    // Start Sharing and Retry Auto-Configure configure OBS through here: in the
+    // page's OBS queue, after anything sent to OBS before, for the session
+    // `token`. The result comes back only while that session is current. A
+    // stale one never reaches the caller; the queued operation has stopped OBS
+    // instead, if the session still owned it and the configure may have left
+    // it streaming at the dead room, or if its teardown left the stop to it.
+    // A page that kept its room for reload recovery keeps OBS streaming to it.
+    const runObsConfigure = useCallback((token, options) => {
+        const guard = startGuardRef.current;
+        setObsAutoMessage(obsOperationQueue.pending > 0 ? OBS_WAITING_MESSAGE : OBS_CONNECTING_MESSAGE);
+        return obsOperationQueue.configure({
+            token,
+            isCurrent: (session) => guard.isCurrent(session),
+            configure: () => configureObsStream(options),
+            shouldCompensate: (result) => guard.staleReason(token) !== RELOAD_PRESERVE
+                && (options.autoStart === true || result?.success === true),
+            stop: () => stopObsStream({ password: options.password }),
+            onStart: () => setObsAutoMessage(OBS_CONNECTING_MESSAGE),
+        });
     }, []);
 
     // The one place a control channel is opened, by the start and by Retry
@@ -753,7 +804,10 @@ export default function HostView() {
             safetyFlushIntervalRef.current = null;
         }
 
+        // The ref is cleared before the stop: the recorder's own onstop then
+        // sees it is no longer the current one and does not restart it.
         const recorder = mediaRecorderRef.current;
+        mediaRecorderRef.current = null;
         if (recorder) {
             try {
                 if (recorder.state !== 'inactive') {
@@ -761,7 +815,6 @@ export default function HostView() {
                 }
             } catch { }
         }
-        mediaRecorderRef.current = null;
 
         if (silentAudioTrackRef.current) {
             try {
@@ -871,15 +924,43 @@ export default function HostView() {
                 emitRelayChunk(evt.data, generation);
             }
         };
+        // An error or stop that nobody asked for. stopRelayRecorder clears the
+        // ref before it stops a recorder, so a recorder that is still the current
+        // one here ended by itself; one the host replaced is not acted on.
+        const isCurrentRecorder = () => (
+            mediaRecorderRef.current === recorder && relayGenerationRef.current === generation
+        );
+        const restartEndedRecorder = () => {
+            // Same release as an intentional stop: safety-flush interval, silent
+            // audio track and context. The new recorder makes its own.
+            stopRelayRecorder();
+            const hasLiveCapture = streamRef.current?.getVideoTracks?.()
+                .some((track) => track.readyState === 'live');
+            // A capture that has ended is torn down by its own handler.
+            if (!hasLiveCapture) return;
+            const decision = relayRestartBudgetRef.current.request();
+            if (decision === 'exhausted') {
+                console.warn(
+                    `[Nextra-Host] Relay recorder restart budget exhausted (${RELAY_RECORDER_RESTART_BUDGET.max} in ${RELAY_RECORDER_RESTART_BUDGET.windowMs / 1000} s); not restarting it again until relay viewers change or sharing restarts.`,
+                );
+            }
+            if (decision !== 'restart') return;
+            setRelayRecorderRestartToken((token) => token + 1);
+        };
         recorder.onerror = (evt) => {
             const message = evt?.error?.message || evt?.error?.name || 'unknown recorder error';
+            if (!isCurrentRecorder()) {
+                mediaDebugLog('[Nextra-Host] Ignored an error from a replaced relay recorder:', message);
+                return;
+            }
             console.error('[Nextra-Host] Relay recorder error:', message);
             if (isMp4) setRelayMp4Failed(true);
+            restartEndedRecorder();
         };
         recorder.onstop = () => {
-            if (mediaRecorderRef.current === recorder) {
-                mediaRecorderRef.current = null;
-            }
+            if (!isCurrentRecorder()) return;
+            console.warn('[Nextra-Host] Relay recorder stopped unexpectedly.');
+            restartEndedRecorder();
         };
 
         try {
@@ -906,6 +987,7 @@ export default function HostView() {
     }, [
         socket,
         emitRelayChunk,
+        stopRelayRecorder,
         effectiveRelayBitsPerSecond,
         relayMp4Failed,
         relayFlushPollIntervalMs,
@@ -963,17 +1045,26 @@ export default function HostView() {
         releaseHostSession();
     }, [releaseHostSession]);
 
+    // Ends the start operation that owns the session and returns it, the
+    // token of the session the caller tears down.
+    const endStartOperation = useCallback((reason) => {
+        const guard = startGuardRef.current;
+        const token = guard.activeOperation;
+        guard.invalidate(reason);
+        return token;
+    }, []);
+
     const terminateHostSession = useCallback((reason, { ingestMode: storedIngestMode } = {}) => {
-        startGuardRef.current.invalidate('terminate');
+        const token = endStartOperation('terminate');
         // Covers a graceful server shutdown: the room-ended broadcast is the
         // only warning OBS will ever get, since WHIP has no server-initiated
         // stop and OBS keeps pushing RTP at a closed transport otherwise.
-        stopObsIngest(storedIngestMode);
+        stopObsIngest(token, { ingestMode: storedIngestMode });
         cleanup();
         setResumePending(false);
         setTerminalRoomEnded(true);
         setError(reason || 'This room ended. Create a new room to share again.');
-    }, [cleanup, stopObsIngest]);
+    }, [cleanup, endStartOperation, stopObsIngest]);
 
     // Leaving #host unmounts this view, which stops the stream and retires the
     // room code, so hold the route change until the host confirms.
@@ -1016,8 +1107,9 @@ export default function HostView() {
                 });
                 return;
             }
+            const token = startGuard.activeOperation;
             startGuard.invalidate('pagehide');
-            stopObsIngest();
+            stopObsIngest(token, { unloading: true });
             socket.emit('host-stopped');
             cleanup();
         };
@@ -1051,8 +1143,9 @@ export default function HostView() {
             hostUnmountTimerRef.current = setTimeout(() => {
                 hostUnmountTimerRef.current = null;
                 if (!pageHidingRef.current) {
+                    const token = startGuard.activeOperation;
                     startGuard.invalidate('unmount');
-                    stopObsIngest();
+                    stopObsIngest(token);
                     socket.emit('host-stopped');
                     cleanup();
                 }
@@ -1326,10 +1419,13 @@ export default function HostView() {
 
     // Keep one recorder generation alive while relay is needed. The server caches
     // initialization/media for late joiners, so viewer churn does not restart the
-    // encoder or disrupt viewers already watching.
+    // encoder or disrupt viewers already watching. A recorder that errors or stops
+    // by itself bumps relayRecorderRestartToken, which runs this effect again with
+    // no recorder, so it starts a new one.
     useEffect(() => {
         if (!isSharing) {
             prevRelayViewerCountRef.current = 0;
+            relayRestartBudgetRef.current.reset();
             return;
         }
 
@@ -1346,7 +1442,14 @@ export default function HostView() {
         } else {
             stopRelayRecorder();
         }
-    }, [isSharing, relayViewerCount, shouldPrewarmRelay, startRelayRecorder, stopRelayRecorder]);
+    }, [
+        isSharing,
+        relayViewerCount,
+        shouldPrewarmRelay,
+        relayRecorderRestartToken,
+        startRelayRecorder,
+        stopRelayRecorder,
+    ]);
 
     // Recorder parameter changes (quality tier, fps, flush interval, bitrate)
     // need a restart with the new settings — but only if it is already running;
@@ -1384,13 +1487,12 @@ export default function HostView() {
         // pagehide, cleanup) or a newer start can overtake at any await below.
         // After each one it checks it is still current; a stale one releases
         // only what it acquired, sets no state, and compensates on the socket's
-        // room or OBS's output only when no other start owns the session.
+        // room only when no other start owns the session. Its OBS configure
+        // runs in the page's OBS queue, which compensates on OBS's output
+        // itself (runObsConfigure).
         const guard = startGuardRef.current;
         const attempt = createStartAttempt(guard, {
             emitHostStopped: () => socket.emit('host-stopped'),
-            stopObsOutput: () => {
-                stopObsStream({ password: obsPasswordRef.current }).catch(() => {});
-            },
             escalate: (message) => console.error(`[Nextra-Host] ${message}`),
         });
         const { op } = attempt;
@@ -1638,12 +1740,13 @@ export default function HostView() {
                     }
                 } else {
                     setObsAutoStatus('configuring');
-                    setObsAutoMessage('Connecting to OBS...');
-                    attempt.obsConfigureStarted();
-                    const result = await configureObsStream(buildObsAutoConfig(whipUrl, hostToken));
+                    // Waits for any OBS request sent before it (an earlier
+                    // session's configure or stop).
+                    const { result } = await runObsConfigure(op, buildObsAutoConfig(whipUrl, hostToken));
                     // Stop is live during configuration. After a teardown the
-                    // result belongs to no session: no state, no channel, and
-                    // OBS is stopped only when no newer start owns it.
+                    // result belongs to no session: no state and no channel.
+                    // The queued configure has stopped OBS if this session
+                    // still owned it.
                     if (attempt.abandonIfStale()) return;
                     setObsAutoStatus(result.success ? 'success' : 'error');
                     setObsAutoMessage(result.message);
@@ -1686,7 +1789,7 @@ export default function HostView() {
             }
             // A failure after OBS auto-configuration can leave OBS streaming at
             // the room this catch is about to destroy.
-            stopObsIngest();
+            stopObsIngest(endStartOperation('start-failed'));
             socket.emit('host-stopped');
             cleanup();
         } finally {
@@ -1701,7 +1804,9 @@ export default function HostView() {
         reloadRecoveryEnabled,
         ingestMode,
         cleanup,
+        endStartOperation,
         stopObsIngest,
+        runObsConfigure,
         establishObsControlChannel,
         selectedProfile,
         qualityProfile,
@@ -1901,15 +2006,14 @@ export default function HostView() {
             setShowStopConfirm(true);
             return;
         }
-        startGuardRef.current.invalidate('stop');
-        stopObsIngest();
+        stopObsIngest(endStartOperation('stop'));
         // Drop the nav guard now rather than waiting for the isSharing effect, so
         // a navigation issued in this same task is not warned about a room that
         // is already gone.
         isSharingRef.current = false;
         socket.emit('host-stopped');
         cleanup();
-    }, [socket, cleanup, stopObsIngest, viewerCount, whepViewerCount]);
+    }, [socket, cleanup, endStartOperation, stopObsIngest, viewerCount, whepViewerCount]);
 
     const handleObsTryAv1Change = useCallback((enabled) => {
         setObsTryAv1(enabled);
@@ -2336,17 +2440,17 @@ export default function HostView() {
                                             }
                                             const whipUrl = buildWhipBroadcastUrl(roomCode);
                                             setObsAutoStatus('configuring');
-                                            setObsAutoMessage('Connecting to OBS...');
                                             const retryOpts = {
                                                 ...buildObsAutoConfig(whipUrl, hostTokenRef.current),
                                             };
                                             // The retry belongs to the start operation that
                                             // created this session. Stop, a room that ended
                                             // or the page going away end it while the retry
-                                            // runs, and its result then belongs to no session.
+                                            // runs, and its result then belongs to no session
+                                            // (the queued configure stops OBS for it).
                                             const retryOp = startGuardRef.current.activeOperation;
-                                            configureObsStream(retryOpts).then((result) => {
-                                                if (!startGuardRef.current.isCurrent(retryOp)) return;
+                                            runObsConfigure(retryOp, retryOpts).then(({ stale, result }) => {
+                                                if (stale || !startGuardRef.current.isCurrent(retryOp)) return;
                                                 setObsAutoStatus(result.success ? 'success' : 'error');
                                                 setObsAutoMessage(result.message);
                                                 // Whatever the result, as at start: a failed

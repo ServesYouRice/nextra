@@ -48,7 +48,9 @@ function fakeObsWebSocket(onRequest) {
 }
 
 // Gives a fake OBS the stream every setup now exercises: one that starts when
-// asked and stops when asked. Everything else goes to `onRequest`.
+// asked and stops when asked. Everything else goes to `onRequest`. The stream's
+// state is `status`: a test that wants to read it afterwards (a failed setup
+// must leave OBS not streaming) passes an object it keeps a reference to.
 function withStream(onRequest, status = { outputActive: false, outputReconnecting: false }) {
     return (ws, request) => {
         if (request.requestType === 'GetStreamStatus') {
@@ -1215,9 +1217,11 @@ test('a rollback that never finishes cannot hold the setup past its hard cap', a
 
 test('a rollback already under way when the deadline passes is not cut off', async () => {
     // The setup fails by itself (OBS has no AV1 encoder) and the restore is
-    // answered after the deadline. The result stays the failure it was.
+    // answered after the deadline. The result stays the failure it was. The
+    // restore is the third service write, after the encoder-reset probe and
+    // the room.
     const obs = deadlineObs((ws, request, count) => {
-        if (count !== 2) return undefined;
+        if (count !== 3) return undefined;
         setTimeout(() => ws.respond(request), 700);
         return 'stall';
     });
@@ -1365,6 +1369,7 @@ test('a mutation whose snapshot is still being read when the rollback begins is 
 
 test('configureObsStream restores the previous service after a later validation failure', async () => {
     const serviceWrites = [];
+    const status = { outputActive: false, outputReconnecting: false };
     const WebSocketImpl = fakeObsWebSocket(withStream((ws, request) => {
         if (request.requestType === 'GetStreamServiceSettings') {
             queueMicrotask(() => ws.respond(request, {
@@ -1380,7 +1385,7 @@ test('configureObsStream restores the previous service after a later validation 
             serviceWrites.push(request.requestData);
         }
         queueMicrotask(() => ws.respond(request));
-    }));
+    }, status));
     const previousWebSocket = globalThis.WebSocket;
     globalThis.WebSocket = WebSocketImpl;
     const { configureObsStream } = await obsWebSocketModule;
@@ -1393,9 +1398,21 @@ test('configureObsStream restores the previous service after a later validation 
         });
 
         assert.equal(result.success, false);
+        // The encoder-reset test stream ran and was stopped, and the rollback
+        // started nothing.
+        assert.equal(status.outputActive, false);
+        assert.equal(status.outputReconnecting, false);
         assert.match(result.message, /No AV1 OBS encoders/);
         assert.match(result.message, /settings were restored.*use H\.264/i);
         assert.deepEqual(serviceWrites, [
+            // The encoder-reset test stream's probe, then the room.
+            {
+                streamServiceType: 'whip_custom',
+                streamServiceSettings: {
+                    server: 'http://127.0.0.1:8889/whip/room/probe',
+                    bearer_token: 'new-token',
+                },
+            },
             {
                 streamServiceType: 'whip_custom',
                 streamServiceSettings: {
@@ -1489,6 +1506,7 @@ test('rejected AV1 encoder candidates roll back to the prior H.264 route', async
         ['Output/Mode', 'Simple'],
         ['AdvOut/Encoder', 'obs_x264'],
     ]);
+    const status = { outputActive: false, outputReconnecting: false };
     const WebSocketImpl = fakeObsWebSocket(withStream((ws, request) => {
         const { requestType, requestData = {} } = request;
         const key = `${requestData.parameterCategory}/${requestData.parameterName}`;
@@ -1515,7 +1533,7 @@ test('rejected AV1 encoder candidates roll back to the prior H.264 route', async
             return;
         }
         queueMicrotask(() => ws.respond(request));
-    }));
+    }, status));
     const previousWebSocket = globalThis.WebSocket;
     globalThis.WebSocket = WebSocketImpl;
     const { configureObsStream } = await obsWebSocketModule;
@@ -1531,6 +1549,10 @@ test('rejected AV1 encoder candidates roll back to the prior H.264 route', async
         });
 
         assert.equal(result.success, false);
+        // The encoder-reset test stream ran and was stopped, and the rollback
+        // started nothing.
+        assert.equal(status.outputActive, false);
+        assert.equal(status.outputReconnecting, false);
         assert.match(result.message, /Tried: AV1 NVENC, AV1 AMF/);
         assert.match(result.message, /settings were restored.*use H\.264/i);
         assert.deepEqual(streamService, {
@@ -1546,12 +1568,18 @@ test('rejected AV1 encoder candidates roll back to the prior H.264 route', async
 
 // A scripted OBS for whole-setup tests: a profile store, a stream that can be
 // active or stuck reconnecting, and a log of the requests that change something.
-function scriptedObs({ profile = new Map(), status = { outputActive: false, outputReconnecting: false }, profileName = 'Streaming', onStart = null } = {}) {
+// `reject` ({ [requestType]: comment }) makes OBS refuse every request of that
+// type with the comment: it changes nothing, and the log still shows it was sent.
+function scriptedObs({ profile = new Map(), status = { outputActive: false, outputReconnecting: false }, profileName = 'Streaming', onStart = null, reject = {} } = {}) {
     const order = [];
     const WebSocketImpl = fakeObsWebSocket((ws, request) => {
         const { requestType, requestData = {} } = request;
         const key = `${requestData.parameterCategory}/${requestData.parameterName}`;
         const reply = (data, requestStatus) => queueMicrotask(() => ws.respond(request, data, requestStatus));
+        if (Object.hasOwn(reject, requestType)) {
+            if (['StartStream', 'StopStream', 'SetStreamServiceSettings', 'SetVideoSettings'].includes(requestType)) order.push(requestType);
+            return reply({}, { result: false, comment: reject[requestType] });
+        }
         switch (requestType) {
         case 'GetStreamStatus':
             return reply({ ...status });
@@ -1690,9 +1718,10 @@ test('an encoder OBS kept from a stream that never connected is released before 
     });
 
     assert.equal(result.success, true);
-    // Stop the retry, point OBS at the new room, run a stream there just long
-    // enough for OBS to release the old encoder, and only then change the video.
-    assert.deepEqual(obs.order, ['StopStream', 'SetStreamServiceSettings', 'StartStream', 'StopStream', 'SetVideoSettings']);
+    // Stop the retry, point OBS at the server's probe, run a stream there just
+    // long enough for OBS to release the old encoder, point OBS at the new
+    // room, and only then change the video.
+    assert.deepEqual(obs.order, ['StopStream', 'SetStreamServiceSettings', 'StartStream', 'StopStream', 'SetStreamServiceSettings', 'SetVideoSettings']);
     assert.match(result.message, /encoder reset/);
     assert.doesNotMatch(result.message, /Warnings/);
 });
@@ -1709,7 +1738,8 @@ test('an idle OBS is assumed to hold an old encoder, because OBS does not say', 
     });
 
     assert.equal(result.success, true);
-    assert.deepEqual(obs.order, ['SetStreamServiceSettings', 'StartStream', 'StopStream', 'SetVideoSettings']);
+    // The probe, its test stream, then the room.
+    assert.deepEqual(obs.order, ['SetStreamServiceSettings', 'StartStream', 'StopStream', 'SetStreamServiceSettings', 'SetVideoSettings']);
     assert.match(result.message, /encoder reset/);
     assert.equal(obs.status.outputActive, false);
 });
@@ -1728,8 +1758,9 @@ test('a test stream the room refuses is stopped and reported, not waited on', as
     });
 
     assert.equal(result.success, true);
-    // Tried twice, since a test stream that fails leaves an encoder behind too.
-    assert.deepEqual(obs.order, ['SetStreamServiceSettings', 'StartStream', 'StopStream', 'StartStream', 'StopStream']);
+    // Tried twice, since a test stream that fails leaves an encoder behind too;
+    // then OBS is pointed at the room.
+    assert.deepEqual(obs.order, ['SetStreamServiceSettings', 'StartStream', 'StopStream', 'StartStream', 'StopStream', 'SetStreamServiceSettings']);
     assert.match(result.message, /could not run the short test stream/);
     assert.equal(obs.status.outputActive, false);
     assert.ok(Date.now() - startedAt < 3000, 'gave up on the first sign of a retry');
@@ -1899,7 +1930,7 @@ test('a stop OBS refuses for a test stream that is already down is not a failure
 
     assert.equal(result.success, true);
     assert.match(result.message, /encoder reset/);
-    assert.deepEqual(obs.log.slice(obs.log.indexOf('StopStream')), ['StopStream', 'GetStreamStatus', 'GetVideoSettings', 'SetVideoSettings']);
+    assert.deepEqual(obs.log.slice(obs.log.indexOf('StopStream')), ['StopStream', 'GetStreamStatus', 'SetStreamServiceSettings', 'GetVideoSettings', 'SetVideoSettings']);
 });
 
 test('a test stream OBS refuses to start is still stopped and seen idle before the video changes (VAL-116)', async () => {
@@ -1913,7 +1944,7 @@ test('a test stream OBS refuses to start is still stopped and seen idle before t
     assert.equal(result.success, true);
     assert.match(result.message, /could not run the short test stream/);
     // Tried once: a refused start is not retried.
-    assert.deepEqual(obs.log.slice(obs.log.indexOf('StartStream')), ['StartStream', 'StopStream', 'GetStreamStatus', 'GetVideoSettings', 'SetVideoSettings']);
+    assert.deepEqual(obs.log.slice(obs.log.indexOf('StartStream')), ['StartStream', 'StopStream', 'GetStreamStatus', 'SetStreamServiceSettings', 'GetVideoSettings', 'SetVideoSettings']);
 });
 
 test('a setup that fails after a clean test stream does not stop the stream again in its rollback', async () => {
@@ -1932,7 +1963,8 @@ test('a setup that fails after a clean test stream does not stop the stream agai
 
 test('without auto-start an idle OBS still runs the encoder-reset test stream once, and stops it (section-84098610a3c7f7be0c63f39f/Q-001, VAL-117)', async () => {
     // The decision: the reset is kept when autoStart is false; nothing is
-    // gated on the flag except the final start.
+    // gated on the flag except the final start. Its test stream goes to the
+    // server's probe (section-49e0545c60d121dd3e784d86/Q-002, tested below).
     const obs = testStreamObs();
 
     const result = await configureWith(obs, {
@@ -1945,17 +1977,239 @@ test('without auto-start an idle OBS still runs the encoder-reset test stream on
     assert.match(result.message, /Click "Start Streaming" in OBS\.$/);
     assert.equal(obs.log.filter((requestType) => requestType === 'StartStream').length, 1);
     assertEveryStartStopped(obs.log);
-    // The stop is confirmed (an idle status) before the video changes, and no
-    // start follows.
+    // The stop is confirmed (an idle status) before OBS is pointed at the room
+    // and the video changes, and no start follows.
     assert.deepEqual(obs.log.slice(obs.log.indexOf('StartStream')), [
         'StartStream',
         'GetStreamStatus',
         'StopStream',
         'GetStreamStatus',
+        'SetStreamServiceSettings',
         'GetVideoSettings',
         'SetVideoSettings',
     ]);
     assert.equal(obs.status.outputActive, false);
+});
+
+// ── The encoder-reset test stream goes to the server's probe, never to the room (section-49e0545c60d121dd3e784d86/Q-002) ──
+
+// The room's WHIP URL configureWith() passes, and the probe address next to it
+// that lib/whipRoutes.js answers without forwarding the stream to anyone.
+const ROOM_WHIP_URL = 'http://127.0.0.1:3001/whip/broadcast/ABC123';
+const ROOM_PROBE_URL = 'http://127.0.0.1:3001/whip/broadcast/ABC123/probe';
+
+// Wraps a fake OBS socket class to record where OBS's stream service points
+// each time a stream is started (`starts`), and the settings of every service
+// write it is sent (`serviceWrites`).
+function observeStreamTargets(WebSocketImpl) {
+    const starts = [];
+    const serviceWrites = [];
+    let server = null;
+    class ObservedObsSocket extends WebSocketImpl {
+        send(payload) {
+            const message = JSON.parse(payload);
+            if (message.op === 6) {
+                const { requestType, requestData } = message.d;
+                if (requestType === 'SetStreamServiceSettings') {
+                    server = requestData?.streamServiceSettings?.server ?? null;
+                    serviceWrites.push(requestData?.streamServiceSettings);
+                }
+                if (requestType === 'StartStream') starts.push(server);
+            }
+            super.send(payload);
+        }
+    }
+    return { WebSocketImpl: ObservedObsSocket, starts, serviceWrites };
+}
+
+test('without auto-start the encoder-reset test stream runs at the server\'s probe, never at the room\'s WHIP URL (section-49e0545c60d121dd3e784d86/Q-002)', async () => {
+    const obs = testStreamObs();
+    const observed = observeStreamTargets(obs.WebSocketImpl);
+
+    const result = await configureWith({ WebSocketImpl: observed.WebSocketImpl }, {
+        autoStart: false,
+        videoSettings: resetVideoSettings,
+    });
+
+    assert.equal(result.success, true);
+    assert.match(result.message, /encoder reset/);
+    assert.match(result.message, /Click "Start Streaming" in OBS\.$/);
+    // The one stream OBS ran went to the probe, which no viewer receives.
+    assert.deepEqual(observed.starts, [ROOM_PROBE_URL]);
+    // OBS is pointed at the room, with the host's token, only once that stream
+    // is stopped and seen idle, and before the video changes.
+    assert.deepEqual(observed.serviceWrites, [
+        { server: ROOM_PROBE_URL, bearer_token: 'token' },
+        { server: ROOM_WHIP_URL, bearer_token: 'token' },
+    ]);
+    assert.deepEqual(obs.log.slice(obs.log.indexOf('StopStream')), [
+        'StopStream',
+        'GetStreamStatus',
+        'SetStreamServiceSettings',
+        'GetVideoSettings',
+        'SetVideoSettings',
+    ]);
+    assert.equal(obs.status.outputActive, false);
+});
+
+test('with auto-start the only stream sent to the room is the auto-start after the video change; the test stream still goes to the probe (section-49e0545c60d121dd3e784d86/Q-002)', async () => {
+    const obs = testStreamObs();
+    const observed = observeStreamTargets(obs.WebSocketImpl);
+
+    const result = await configureWith({ WebSocketImpl: observed.WebSocketImpl }, {
+        autoStart: true,
+        videoSettings: resetVideoSettings,
+    });
+
+    assert.equal(result.success, true);
+    assert.match(result.message, /encoder reset/);
+    assert.match(result.message, /streaming started/);
+    assert.deepEqual(observed.starts, [ROOM_PROBE_URL, ROOM_WHIP_URL]);
+    assert.ok(obs.log.lastIndexOf('StartStream') > obs.log.indexOf('SetVideoSettings'), obs.log.join(', '));
+    assert.equal(obs.status.outputActive, true);
+});
+
+test('a setup that fails after the encoder reset puts back the service OBS had before, not the probe (section-49e0545c60d121dd3e784d86/Q-002)', async () => {
+    const obs = testStreamObs();
+    const observed = observeStreamTargets(obs.WebSocketImpl);
+
+    const result = await configureWith({ WebSocketImpl: observed.WebSocketImpl }, {
+        encoderSettings: { videoCodec: 'av1', obsEncoderIds: [] },
+        encoderResetOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.message, /No AV1 OBS encoders/);
+    assert.match(result.message, /OBS settings were restored/);
+    assert.deepEqual(observed.starts, [ROOM_PROBE_URL]);
+    assert.deepEqual(observed.serviceWrites, [
+        { server: ROOM_PROBE_URL, bearer_token: 'token' },
+        { server: ROOM_WHIP_URL, bearer_token: 'token' },
+        { server: 'rtmp://previous.example/live' },
+    ]);
+});
+
+test('a WHIP URL with no probe address next to it gets no test stream at all, only the restart warning (section-49e0545c60d121dd3e784d86/Q-002)', async () => {
+    const obs = testStreamObs();
+    const observed = observeStreamTargets(obs.WebSocketImpl);
+
+    const result = await configureWith({ WebSocketImpl: observed.WebSocketImpl }, {
+        whipUrl: 'not a URL',
+        videoSettings: resetVideoSettings,
+    });
+
+    assert.equal(result.success, true);
+    assert.match(result.message, /could not run the short test stream.*restart OBS/);
+    assert.deepEqual(observed.starts, []);
+    assert.deepEqual(observed.serviceWrites, [{ server: 'not a URL', bearer_token: 'token' }]);
+});
+
+// ── Rollback after the encoder-reset test stream, or after a stale stream was stopped (section-955d4948143d2e807b437925/Q-2, VAL-141) ──
+//
+// Failures that come after the test stream ran and was stopped cleanly (ones
+// that stop it badly are tested above). Open question Q-2 pins only what a
+// rollback does here: OBS ends not streaming, and the rollback starts nothing.
+// What it does after stopping a stream that was healthy and live is left open.
+
+// `order` is the log of the requests that change something (scriptedObs's
+// `order`), from the first to the restore of the service OBS had before, for an
+// OBS that was idle when the setup began.
+const failuresAfterTestStream = [
+    {
+        name: 'no AV1 encoder is available',
+        setup: { encoderSettings: { ...nvencEncoderSettings, videoCodec: 'av1', obsEncoderIds: [] } },
+        reject: {},
+        message: /No AV1 OBS encoders/,
+        order: ['SetStreamServiceSettings', 'StartStream', 'StopStream', 'SetStreamServiceSettings', 'SetStreamServiceSettings'],
+    },
+    {
+        // The video restore is a rollback step between the room and the old service.
+        name: 'OBS refuses every encoder write after the video changed',
+        setup: { videoSettings: resetVideoSettings, encoderSettings: nvencEncoderSettings },
+        reject: { SetProfileParameter: 'denied' },
+        message: /Failed to set OBS stream encoder/,
+        order: ['SetStreamServiceSettings', 'StartStream', 'StopStream', 'SetStreamServiceSettings', 'SetVideoSettings', 'SetVideoSettings', 'SetStreamServiceSettings'],
+    },
+];
+
+async function failAfterTestStream(failure, status) {
+    const obs = scriptedObs({
+        profile: new Map([['Output/Mode', 'Advanced'], ['AdvOut/Encoder', 'obs_nvenc_h264_tex']]),
+        status,
+        reject: failure.reject,
+    });
+    const observed = observeStreamTargets(obs.WebSocketImpl);
+    const result = await configureWith({ WebSocketImpl: observed.WebSocketImpl }, {
+        ...failure.setup,
+        transactionOptions: { videoSettleMs: 1, stopPollIntervalMs: 1, stopPollAttempts: 3 },
+        encoderResetOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+    });
+    return { obs, observed, result };
+}
+
+// Every stream service write of such a setup: the probe, the room, and the
+// service scriptedObs reports OBS had before (the rollback's restore).
+const SERVICE_WRITES_THROUGH_RESTORE = [
+    { server: ROOM_PROBE_URL, bearer_token: 'token' },
+    { server: ROOM_WHIP_URL, bearer_token: 'token' },
+    { server: 'http://old.example/whip' },
+];
+
+test('a setup that fails after the encoder-reset test stream ends with OBS not streaming, and its rollback starts no stream (VAL-141)', async () => {
+    for (const failure of failuresAfterTestStream) {
+        const { obs, observed, result } = await failAfterTestStream(failure);
+
+        assert.equal(result.success, false, failure.name);
+        assert.match(result.message, failure.message, failure.name);
+        assert.doesNotMatch(result.message, /Rollback incomplete/, failure.name);
+        // The one stream OBS ran went to the probe; the rollback added no start,
+        // and the log ends with the restore of the service OBS had before.
+        assert.deepEqual(obs.order, failure.order, failure.name);
+        assert.notEqual(obs.order.at(-1), 'StartStream', failure.name);
+        assert.deepEqual(observed.starts, [ROOM_PROBE_URL], failure.name);
+        assert.deepEqual(observed.serviceWrites, SERVICE_WRITES_THROUGH_RESTORE, failure.name);
+        assert.deepEqual(obs.status, { outputActive: false, outputReconnecting: false }, failure.name);
+    }
+});
+
+test('a setup that fails after it stopped a stream stuck retrying a dead room puts the previous service back after the test stream, never the probe or the room (VAL-141)', async () => {
+    for (const failure of failuresAfterTestStream) {
+        const stale = { outputActive: true, outputReconnecting: true };
+        const { obs, observed, result } = await failAfterTestStream(failure, stale);
+
+        assert.equal(result.success, false, failure.name);
+        assert.match(result.message, failure.message, failure.name);
+        assert.doesNotMatch(result.message, /Rollback incomplete/, failure.name);
+        // The retry is stopped before anything changes, then the same sequence
+        // as for an idle OBS, up to the restore of the previous service.
+        const throughRestore = ['StopStream', ...failure.order];
+        assert.deepEqual(obs.order.slice(0, throughRestore.length), throughRestore, failure.name);
+        assert.deepEqual(observed.serviceWrites, SERVICE_WRITES_THROUGH_RESTORE, failure.name);
+        // The only stream started before the previous service is back is the test stream at the probe.
+        assert.equal(observed.starts[0], ROOM_PROBE_URL, failure.name);
+        assert.ok(!observed.starts.includes(ROOM_WHIP_URL), `${failure.name}: a stream was started at the room`);
+    }
+});
+
+// Today a setup that stopped a retrying stream journals that stop like any
+// other, so its rollback undoes it with a StartStream after the previous
+// service is back: OBS ends retrying the room that no longer exists, in a
+// result that says its settings were restored. Open question Q-2 pins this case
+// to "ends not streaming". The fix is in src/lib/obsWebSocket.js (stopActiveStream
+// should not journal the stop of a stream that was only retrying), outside this
+// item, so the assertion is a todo until it lands. C-2e1af7e99156 is the plan
+// issue for the rollback of that StopStream.
+test('a setup that fails after it stopped a stream stuck retrying a dead room leaves OBS not streaming, and the rollback starts nothing', { todo: 'C-2e1af7e99156' }, async () => {
+    for (const failure of failuresAfterTestStream) {
+        const stale = { outputActive: true, outputReconnecting: true };
+        const { obs, observed, result } = await failAfterTestStream(failure, stale);
+
+        assert.equal(result.success, false, failure.name);
+        const restored = ['StopStream', ...failure.order].length;
+        assert.deepEqual(obs.order.slice(restored), [], `${failure.name}: the rollback sent ${obs.order.slice(restored).join(', ')} after it restored the previous service`);
+        assert.deepEqual(observed.starts, [ROOM_PROBE_URL], failure.name);
+        assert.deepEqual(obs.status, { outputActive: false, outputReconnecting: false }, failure.name);
+    }
 });
 
 // A setup that fails after the encoder settings file was written. The first
