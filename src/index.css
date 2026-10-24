@@ -1393,6 +1393,22 @@ input.select-input {
   min-width: 5.25rem;
 }
 
+/* A toggle clips its own cells (overflow: hidden), and as a grid item it shrinks
+   below its content instead of pushing the row wider. The Resolution toggle
+   (three 5.25rem cells, 260px) beside its label needs 332px plus the 1rem page
+   padding, so on a viewport narrower than about 365px it was squeezed and the
+   1080p cell was cut off with no way to scroll to it (about half of it at 320px).
+   Below 23em (368px: a few pixels over the exact fit, for labels that render
+   wider in a platform's system font, and under the 375px phones) the label sits
+   above its toggle, which then has the row's full width. em in a media query
+   follows the browser's default font size, as the rem cell widths do. */
+@media (max-width: 23em) {
+  .capture-settings .setting-row-inline {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.35rem;
+  }
+}
+
 .status-bar {
   display: flex;
   align-items: center;

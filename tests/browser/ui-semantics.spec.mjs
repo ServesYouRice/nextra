@@ -3,6 +3,9 @@ import { test, expect } from '@playwright/test';
 // Widths the README support table claims: small phone, common phone, tablet
 // breakpoint, small laptop, laptop/desktop tiers, and wide desktop.
 const REFLOW_WIDTHS = [320, 375, 640, 900, 1024, 1280, 1440, 1600, 2560];
+// The README widths plus two common Android phone widths inside the 320-364px
+// band where a capture row's Resolution toggle used to be squeezed.
+const TOGGLE_WIDTHS = [320, 340, 360, 375, 640, 900, 1024, 1280, 1440, 1600, 2560];
 const REFLOW_ROUTES = ['/', '/#watch', '/#how-to', '/#host', '/#status', '/#privacy', '/#copyright'];
 
 // The host page is the densest layout: a video stage beside settings cards that
@@ -42,6 +45,7 @@ async function horizontalOverflow(page) {
         documentScrollWidth: document.documentElement.scrollWidth,
         bodyScrollWidth: document.body.scrollWidth,
         innerWidth: window.innerWidth,
+        clientWidth: document.documentElement.clientWidth,
     }));
 }
 
@@ -213,11 +217,14 @@ for (const width of REFLOW_WIDTHS) {
         for (const route of REFLOW_ROUTES) {
             await page.goto(route);
             await expect(page.locator('main#main')).toBeVisible();
+            // The layout viewport (clientWidth), not innerWidth: a mobile browser
+            // widens innerWidth to fit overflowing content, so innerWidth could
+            // never see an overflow in the mobile-chrome project.
             const metrics = await horizontalOverflow(page);
             expect(metrics.documentScrollWidth, `${route} at ${width}px`)
-                .toBeLessThanOrEqual(metrics.innerWidth + 1);
+                .toBeLessThanOrEqual(metrics.clientWidth + 1);
             expect(metrics.bodyScrollWidth, `${route} at ${width}px`)
-                .toBeLessThanOrEqual(metrics.innerWidth + 1);
+                .toBeLessThanOrEqual(metrics.clientWidth + 1);
         }
     });
 }
@@ -259,6 +266,97 @@ for (const width of REFLOW_WIDTHS) {
         expect(metrics.tuningRight, label).toBeLessThanOrEqual(metrics.viewportWidth + 1);
     });
 }
+
+// Every toggle on the host page (the capture rows' Resolution and Frame rate,
+// the OBS tuning profile, and the live pair while sharing) clips its own cells
+// with overflow: hidden, so a toggle wider than its row hides cells without the
+// page ever scrolling: at 320px about half of the 1080p cell was cut off and a
+// keyboard user could focus a cell they could not see (WCAG 1.4.10 Reflow, 2.4.7
+// Focus Visible). A cell counts as visible when it lies inside its toggle's
+// padding box (what overflow: hidden clips to) and inside the layout viewport.
+// Returns the groups seen, in page order, and one line per cell that fails.
+async function hostToggleCells(page) {
+    return page.evaluate(() => {
+        const viewportWidth = document.documentElement.clientWidth;
+        const round = (n) => Math.round(n * 10) / 10;
+        const groups = [];
+        const hidden = [];
+        for (const toggle of document.querySelectorAll('.mode-toggle')) {
+            const group = toggle.getAttribute('aria-label');
+            groups.push(group);
+            const box = toggle.getBoundingClientRect();
+            const clipLeft = Math.max(box.left + toggle.clientLeft, 0);
+            const clipRight = Math.min(box.left + toggle.clientLeft + toggle.clientWidth, viewportWidth);
+            for (const cell of toggle.querySelectorAll('button')) {
+                const rect = cell.getBoundingClientRect();
+                if (rect.left < clipLeft - 0.5 || rect.right > clipRight + 0.5) {
+                    hidden.push(
+                        `${group} / ${cell.textContent.trim()}: cell ${round(rect.left)}..${round(rect.right)}`
+                        + ` outside the visible ${round(clipLeft)}..${round(clipRight)}`
+                        + ` (toggle ${round(box.left)}..${round(box.right)}, viewport ${viewportWidth})`,
+                    );
+                }
+            }
+        }
+        return { groups, hidden };
+    });
+}
+
+async function expectHostToggleCellsVisible(page, expectedGroups, label) {
+    await settledBox(page, '.controls >> nth=0');
+    const { groups, hidden } = await hostToggleCells(page);
+    expect(groups, `toggles on the host page ${label}`).toEqual(expectedGroups);
+    expect(hidden, `cells cut off by their toggle ${label}`).toEqual([]);
+}
+
+for (const width of TOGGLE_WIDTHS) {
+    test(`every capture toggle cell is fully visible at ${width}px, idle with OBS off and on`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 800 });
+        await remountHost(page);
+        await expectHostToggleCellsVisible(page, ['Resolution', 'Frame rate'], `at ${width}px, OBS off`);
+
+        await page.locator('#obsMode').check();
+        await expect(page.locator('.settings-wrapper')).toHaveClass(/settings-expanded/);
+        await expect(page.locator('.obs-config-panel')).toBeVisible();
+        await settledBox(page, '.video-container');
+        await expectHostToggleCellsVisible(
+            page,
+            ['OBS tuning profile', 'Resolution', 'Frame rate'],
+            `at ${width}px, OBS on`,
+        );
+    });
+}
+
+// While sharing, the Resolution and Frame rate toggles move up into the
+// start/stop row. One room serves every width (the server limits how fast a
+// client may create rooms), so this resizes the same page through the widths.
+test('every live toggle cell is fully visible at every tested width while sharing', async ({ page }) => {
+    await page.addInitScript(() => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 360;
+        const context = canvas.getContext('2d');
+        const draw = () => {
+            context.fillStyle = `hsl(${Date.now() % 360} 80% 45%)`;
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            window.setTimeout(draw, 33);
+        };
+        draw();
+        const stream = canvas.captureStream(30);
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: { getDisplayMedia: async () => stream },
+        });
+    });
+    await page.goto('/#host');
+    await page.getByRole('button', { name: 'Start Sharing' }).click();
+    await expect(page.getByText(/Streaming \(/)).toBeVisible();
+
+    for (const width of TOGGLE_WIDTHS) {
+        await page.setViewportSize({ width, height: 800 });
+        await expectHostToggleCellsVisible(page, ['Resolution', 'Frame rate'], `at ${width}px while sharing`);
+    }
+});
 
 // A laptop-height viewport has to show the host controls without the page
 // scrolling: the settings cards are the tallest thing on the page and used to
