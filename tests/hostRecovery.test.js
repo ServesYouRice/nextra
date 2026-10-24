@@ -569,6 +569,54 @@ test('reclaimWithRetry over socketRequest: an attempt still waiting for the conn
     assert.equal(timers.active(), 0);
 });
 
+test('reclaimAfterReconnect over socketRequest: a second attempt still waiting for the connection when the host stops is never sent', async () => {
+    const { reclaimAfterReconnect } = await loadRecovery();
+    const { socketRequest } = await loadClient();
+    const session = new AbortController();
+    const sent = [];
+    // A sharing host's socket has connected again. Its first reclaim-host loses
+    // the connection right after the emit and the socket stays down until the
+    // test brings it back; a later one gets the room handed over.
+    const socket = new FakeSocket({
+        onRequest: (event, _data, callback) => {
+            sent.push(event);
+            if (event !== 'reclaim-host') return;
+            if (sent.filter((name) => name === 'reclaim-host').length === 1) {
+                socket.connected = false;
+                socket.emit('disconnect', 'transport close');
+                return;
+            }
+            callback({ success: true, ...createRoomState(ROOM_STATE_CODES.HOST_RECONNECTED, 'Host reconnected.', true) });
+        },
+    });
+
+    // Wired the way HostView's onReconnect wires it.
+    const reclaim = reclaimAfterReconnect({
+        request: (event, data, options) => socketRequest(socket, event, data, options),
+        code: 'ABCDEF',
+        hostToken: 'a'.repeat(32),
+        signal: session.signal,
+    }).then(() => null, (error) => error);
+    await drainMicrotasks();
+    assert.deepEqual(sent, ['reclaim-host'], 'the first attempt was sent and cut off');
+    assert.equal(socket.listenerCount('connect'), 1, 'socketRequest\'s second attempt waits for the connection');
+
+    // The host stops sharing or leaves the host view: the teardown aborts the
+    // signal and sends host-stopped, which Socket.IO buffers while the socket
+    // is down and sends first once it is back. Then the socket reconnects.
+    session.abort();
+    socket.emit('host-stopped');
+    socket.connected = true;
+    socket.emit('connect');
+    const error = await reclaim;
+    await drainMicrotasks();
+
+    assert.deepEqual(sent, ['reclaim-host', 'host-stopped'], 'requests sent once the host had stopped');
+    assert.equal(error?.phase, 'cancelled');
+    assert.equal(socket.listenerCount('connect'), 0);
+    assert.equal(socket.listenerCount('connect_error'), 0);
+});
+
 test('shouldTeardownAfterStartFailure: a reclaimed room survives a failure before its capture is in use', async () => {
     const { START_PHASES, shouldTeardownAfterStartFailure } = await loadRecovery();
 

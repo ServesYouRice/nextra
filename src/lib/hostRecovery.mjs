@@ -192,6 +192,28 @@ export async function reclaimWithRetry({
 }
 
 /**
+ * The reclaim-host a sharing host's page sends when its socket has connected
+ * again (HostView's onReconnect). It relies on socketRequest's own retry:
+ * reclaim-host gets two attempts, so after a first one the connection cut off,
+ * the second waits for the socket to come back. If the host stops sharing or
+ * leaves meanwhile, the teardown's host-stopped is buffered and reaches the
+ * server first, from a socket that does not host the room yet, so it does
+ * nothing; a reclaim sent after it would hand the room to a page that has
+ * stopped. Whatever ends the session or the view aborts `signal`, and an
+ * attempt not yet sent is then never sent (it rejects with the 'cancelled'
+ * phase).
+ *
+ * @param {object} options
+ * @param {(event: string, data: object, options: { signal?: AbortSignal }) => Promise<any>} options.request socketRequest on the host's socket.
+ * @param {string} options.code
+ * @param {string} options.hostToken
+ * @param {AbortSignal} [options.signal]
+ */
+export function reclaimAfterReconnect({ request, code, hostToken, signal }) {
+    return request('reclaim-host', { code, hostToken }, signal ? { signal } : {});
+}
+
+/**
  * The steps of a Start (or Resume) Sharing, in order. A failure is attributed
  * to the step it happened in.
  * - preflight: the TURN form and the preflight blockers

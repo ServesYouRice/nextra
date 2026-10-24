@@ -21,6 +21,7 @@ import {
     START_PHASES,
     createCancellableWait,
     isIngestModeMismatch,
+    reclaimAfterReconnect,
     reclaimWithRetry,
     recoveredRoomIngestMode,
     shouldStopObsAfterFailedReclaim,
@@ -528,6 +529,8 @@ export default function HostView() {
     const reloadRecoveryEnabledRef = useRef(false);
     const ingestModeRef = useRef('browser');
     const resumeRoomRef = useRef(null);
+    // The AbortController of onReconnect's reclaim for the room being shared.
+    const reconnectReclaimRef = useRef(null);
     const pageHidingRef = useRef(false);
     const isSharingRef = useRef(false);
     const releaseNavGuardRef = useRef(null);
@@ -1039,9 +1042,12 @@ export default function HostView() {
 
     // Every teardown ends the start operation that owns the session, so a
     // continuation still pending inside handleStartSharing only releases what
-    // it acquired itself.
+    // it acquired itself. It also cancels onReconnect's reclaim in the same
+    // task as the host-stopped it follows: the effect cleanup that does so
+    // too can run later.
     const cleanup = useCallback(() => {
         startGuardRef.current.invalidate('cleanup');
+        reconnectReclaimRef.current?.abort();
         releaseHostSession();
     }, [releaseHostSession]);
 
@@ -1154,17 +1160,27 @@ export default function HostView() {
     }, [socket, cleanup, stopObsIngest]);
 
     useEffect(() => {
+        // Lasts while this room is shared. Aborted by this cleanup (Stop
+        // Sharing and every other teardown change isSharing; leaving the host
+        // view unmounts) and at once by cleanup(), so a reclaim still waiting
+        // for the socket is never sent after the teardown's host-stopped.
+        const sharingRun = new AbortController();
+        reconnectReclaimRef.current = sharingRun;
         const onReconnect = async () => {
             if (!isSharing || !roomCode || !hostTokenRef.current) return;
+            const { signal } = sharingRun;
             try {
-                await socketRequest(socket, 'reclaim-host', {
+                await reclaimAfterReconnect({
+                    request: (event, data, options) => socketRequest(socket, event, data, options),
                     code: roomCode,
                     hostToken: hostTokenRef.current,
+                    signal,
                 });
                 socket.emit('request-server-config');
-                const { metrics } = await socketRequest(socket, 'get-room-metrics');
+                const { metrics } = await socketRequest(socket, 'get-room-metrics', {}, { signal });
                 setRoomMetrics(metrics || null);
             } catch (err) {
+                if (err?.phase === 'cancelled') return;
                 console.warn('[Nextra] Failed to reclaim host room after reconnect:', err.message);
                 if (err.terminal === true) {
                     terminateHostSession(err.reason || err.message);
@@ -1173,7 +1189,11 @@ export default function HostView() {
         };
 
         socket.on('connect', onReconnect);
-        return () => socket.off('connect', onReconnect);
+        return () => {
+            socket.off('connect', onReconnect);
+            sharingRun.abort();
+            if (reconnectReclaimRef.current === sharingRun) reconnectReclaimRef.current = null;
+        };
     }, [socket, isSharing, roomCode, terminateHostSession]);
 
     // After a reload, reclaim the room kept in sessionStorage. A transient

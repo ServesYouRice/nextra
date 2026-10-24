@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { io as connectSocket } from 'socket.io-client';
 import { clientBuildDir } from './clientBuild.mjs';
 
 const require = createRequire(import.meta.url);
@@ -455,4 +456,146 @@ test('while a reclaimed browser room waits for Resume Sharing, its ingest mode c
 
     await page.getByRole('button', { name: 'Stop Sharing' }).click();
     await expect.poll(activeRooms).toBe(0);
+});
+
+// Sits between a sharing host's Socket.IO connections and the server and
+// records the events the page sends on each. The test cuts the first one. On
+// the reconnection the page's reclaim-host (onReconnect's) is cut off right
+// after the emit, as a link that drops again would; on the connection after
+// that the server's messages are held until release(), so the page's socket
+// stays disconnected until then. The host token the server hands out is kept
+// for the clean-up.
+async function routeHostReconnects(page) {
+    const held = [];
+    let deliverHeld = () => {};
+    const route = {
+        connections: [],
+        hostToken: null,
+        reconnected: false,
+        released: false,
+        release() {
+            route.released = true;
+            deliverHeld();
+        },
+    };
+    await page.routeWebSocket(/\/socket\.io\//, (ws) => {
+        const upstream = ws.connectToServer();
+        const connection = {
+            events: [],
+            cut() {
+                ws.close({ code: 3001, reason: 'test: connection dropped' });
+                upstream.close({ code: 1000 });
+            },
+        };
+        route.connections.push(connection);
+        const index = route.connections.length;
+        const deliver = (message) => {
+            const text = String(message);
+            const token = /"hostToken":"([^"]+)"/.exec(text);
+            if (token) route.hostToken = token[1];
+            // Socket.IO's namespace connect: the page's socket is up again.
+            if (index === 3 && text.startsWith('40')) route.reconnected = true;
+            ws.send(message);
+        };
+        if (index === 3) deliverHeld = () => held.splice(0).forEach(deliver);
+        upstream.onMessage((message) => {
+            if (index === 3 && !route.released) held.push(message);
+            else deliver(message);
+        });
+        ws.onMessage((raw) => {
+            const event = typeof raw === 'string' ? /^4(?:2|5\d+-)\d*\["([^"]+)"/.exec(raw)?.[1] : undefined;
+            if (event) connection.events.push(event);
+            if (index === 2 && event === 'reclaim-host') {
+                connection.cut();
+                return;
+            }
+            upstream.send(raw);
+        });
+    });
+    return route;
+}
+
+// Shares, cuts the connection, and returns once the reclaim-host onReconnect
+// sent on the reconnection was cut off and the page has opened the connection
+// after it, which the route holds: socketRequest's second attempt of that
+// reclaim now waits for the socket. Only the socket's link is cut here, so the
+// media path stays up; with reload recovery on, the server keeps the room when
+// the stopping page closes its media transport, as it does when that close
+// never arrives because the whole link is down.
+async function shareAndHoldReconnectReclaim(page) {
+    await installSteerableDisplayCapture(page);
+    const route = await routeHostReconnects(page);
+    await page.goto(`${server.baseUrl}/#host`);
+    await page.getByLabel('Allow recovery after reload').check();
+    await page.getByRole('button', { name: 'Start Sharing' }).click();
+    await expect(page.getByText(/Streaming \(/)).toBeVisible();
+    const code = await readRoomCode(page);
+    expect(route.hostToken, 'the host token create-room returned').toBeTruthy();
+
+    route.connections[0].cut();
+    // Socket.IO reconnects 0.5 to 1.5 s after a drop, twice here.
+    await expect.poll(() => route.connections.length, { message: 'connections the page opened', timeout: 10_000 }).toBe(3);
+    expect(route.connections[1].events, 'events sent on the first reconnection').toContain('reclaim-host');
+    return { route, code };
+}
+
+// Lets the held connection through and checks that the page, which has
+// stopped sharing, sends only its teardown's host-stopped there: buffered
+// while the socket was down, it goes first, from a socket that does not host
+// the room, so a reclaim-host after it would take the room over again.
+async function expectNoReclaimOnceBack(page, route) {
+    route.release();
+    await expect.poll(() => route.reconnected, { message: 'the page\'s socket connected again' }).toBe(true);
+    const back = route.connections[2];
+    await expect.poll(() => back.events, { message: 'events sent once the socket was back' }).toContain('host-stopped');
+    // An attempt left waiting would have been sent as the socket connected.
+    await page.waitForTimeout(1_000);
+    expect(back.events, 'reclaim-host requests sent after the host stopped').not.toContain('reclaim-host');
+}
+
+// The page's host-stopped reached the server from a socket that was not the
+// room's host, so the server holds the room for its reconnect window. End it
+// the way its host would, so that it does not outlive the test.
+async function endRoomAsHost(code, hostToken) {
+    const client = connectSocket(server.baseUrl, {
+        path: '/socket.io',
+        transports: ['websocket'],
+        forceNew: true,
+        reconnection: false,
+    });
+    try {
+        await new Promise((resolve, reject) => {
+            client.once('connect', resolve);
+            client.once('connect_error', reject);
+        });
+        const reply = await client.timeout(5_000).emitWithAck('reclaim-host', { code, hostToken });
+        expect(reply, 'the clean-up reclaimed the room').toMatchObject({ success: true });
+        client.emit('host-stopped');
+        await expect.poll(activeRooms).toBe(0);
+    } finally {
+        client.close();
+    }
+}
+
+test('a sharing host who leaves while the reclaim after a reconnect waits for the connection sends no reclaim once it is back', async ({ page }) => {
+    const { route, code } = await shareAndHoldReconnectReclaim(page);
+
+    await page.evaluate(() => { window.location.hash = '#privacy'; });
+    await page.getByRole('button', { name: 'Leave and Stop' }).click();
+    await expect(page.getByRole('heading', { name: /Privacy/i })).toBeVisible();
+    // The unmount teardown runs one task after the view is removed.
+    await page.waitForTimeout(250);
+
+    await expectNoReclaimOnceBack(page, route);
+    await endRoomAsHost(code, route.hostToken);
+});
+
+test('a sharing host who stops sharing while the reclaim after a reconnect waits for the connection sends no reclaim once it is back', async ({ page }) => {
+    const { route, code } = await shareAndHoldReconnectReclaim(page);
+
+    await page.getByRole('button', { name: 'Stop Sharing' }).click();
+    await expect(page.getByRole('button', { name: 'Start Sharing' })).toBeVisible();
+
+    await expectNoReclaimOnceBack(page, route);
+    await endRoomAsHost(code, route.hostToken);
 });
