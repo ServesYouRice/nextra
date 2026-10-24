@@ -50,7 +50,7 @@ test('the probe reports the rate the link carried once it had ramped up', async 
 test('a download that is over before the ramp-up means the link needs no limit', async () => {
     const clock = { now: 0 };
     const probe = createRelayCapacityProbe({
-        fetchImpl: fakeFetch(Array.from({ length: 10 }, () => [50, 1_000_000]), { clock }),
+        fetchImpl: fakeFetch(Array.from({ length: 10 }, () => [50, 1_048_576]), { clock }),
         now: () => clock.now,
         logger: silent,
     });
@@ -203,4 +203,39 @@ test('a token of the same character length but more UTF-8 bytes gets a 404 witho
     assert.equal(outcome.wrongStatus, 404);
     assert.equal(outcome.rightStatus, 200);
     assert.equal(outcome.replayStatus, 404);
+});
+
+test('an empty 200 body is reported as failed, not as a fast link', async () => {
+    const clock = { now: 0 };
+    const probe = createRelayCapacityProbe({
+        fetchImpl: fakeFetch([], { clock }),
+        now: () => clock.now,
+        logger: silent,
+    });
+    const result = await probe.measure('https://example.test', '/p');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.kbps, null);
+    assert.equal(result.reason, 'short response');
+});
+
+test('a small 200 body is reported as failed, not as a fast link', async () => {
+    const clock = { now: 0 };
+    const probe = createRelayCapacityProbe({
+        fetchImpl: fakeFetch([[10, 1024]], { clock }),
+        now: () => clock.now,
+        logger: silent,
+    });
+    const result = await probe.measure('https://example.test', '/p');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.reason, 'short response');
+});
+
+test('a full PROBE_BYTES body delivered inside the ramp-up window is fast', async () => {
+    const clock = { now: 0 };
+    const probe = createRelayCapacityProbe({
+        fetchImpl: fakeFetch([[10, PROBE_BYTES]], { clock }),
+        now: () => clock.now,
+        logger: silent,
+    });
+    assert.deepEqual(await probe.measure('https://example.test', '/p'), { status: 'fast', kbps: null });
 });
