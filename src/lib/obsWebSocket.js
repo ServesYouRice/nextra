@@ -967,6 +967,9 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         try {
         const applied = [];
         const warnings = [];
+        // Set when OBS must restart before a new output mode or encoder applies;
+        // the auto-start is then skipped (section-84098610a3c7f7be0c63f39f/Q-003).
+        let restartRequired = false;
 
         // Always stop first, auto-start or not. Everything below rewrites the
         // stream service, video, and encoder settings the running output is
@@ -1132,6 +1135,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             await setAndVerifyProfile(sendRequest, 'AdvOut', 'ApplyServiceSettings', 'true');
             if (String(previousMode || '').toLowerCase() !== 'advanced'
                 || (previousEncoderId && previousEncoderId !== selectedEncoderId)) {
+                restartRequired = true;
                 warnings.push(`OBS switches to ${encoderLabel} in Advanced output mode only after it restarts: restart OBS once, then start sharing again`);
             }
 
@@ -1228,7 +1232,8 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             applied.push('color: 709/Full');
         }
 
-        if (autoStart) {
+        // OBS would start with the old mode or encoder, so the start waits for the restart.
+        if (autoStart && !restartRequired) {
             // Let OBS finish resetting its video pipeline before starting the output.
             // SetVideoSettings + ColorSpace/ColorRange above reinitialize the video
             // output; starting the encoder while that is in flight can crash OBS in
@@ -1258,7 +1263,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         }
 
         const msg = `OBS configured: ${applied.join(', ')}${warnings.length ? '. Warnings: ' + warnings.join(', ') : ''}${!autoStart ? '. Click "Start Streaming" in OBS.' : ''}`;
-        await finish({ success: true, message: msg });
+        await finish({ success: true, message: msg, restartRequired });
         } catch (error) {
             await finish({
                 success: false,
