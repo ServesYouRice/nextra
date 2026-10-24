@@ -160,3 +160,47 @@ test('the probe endpoint serves one armed download and nothing else', async () =
 test('the probe download is a fixed, bounded size', () => {
     assert.ok(PROBE_BYTES >= 4 * 1024 * 1024 && PROBE_BYTES <= 16 * 1024 * 1024);
 });
+
+test('a token of the same character length but more UTF-8 bytes gets a 404 without throwing', async () => {
+    const clock = { now: 0 };
+    const fakeRes = () => ({
+        statusCode: 0,
+        status(code) { this.statusCode = code; return this; },
+        set() { return this; },
+        write() { return true; },
+        end() { return this; },
+        once() {},
+        on() {},
+    });
+    const outcome = { wrongStatus: null, wrongError: null, rightStatus: null, replayStatus: null };
+    const probe = createRelayCapacityProbe({
+        logger: silent,
+        now: () => clock.now,
+        fetchImpl: async (url) => {
+            const token = url.split('/').pop();
+            // 'é' is one UTF-16 unit but two UTF-8 bytes: same character length, different byte length.
+            const wrong = 'é'.repeat(token.length);
+            const wrongRes = fakeRes();
+            try {
+                probe.handler({ params: { token: wrong } }, wrongRes);
+                outcome.wrongStatus = wrongRes.statusCode;
+            } catch (err) {
+                outcome.wrongError = err;
+            }
+            const rightRes = fakeRes();
+            probe.handler({ params: { token } }, rightRes);
+            outcome.rightStatus = rightRes.statusCode;
+            const replayRes = fakeRes();
+            probe.handler({ params: { token } }, replayRes);
+            outcome.replayStatus = replayRes.statusCode;
+            return { ok: false, status: 530 };
+        },
+    });
+
+    await probe.measure('https://example.test', '/probe');
+
+    assert.equal(outcome.wrongError, null);
+    assert.equal(outcome.wrongStatus, 404);
+    assert.equal(outcome.rightStatus, 200);
+    assert.equal(outcome.replayStatus, 404);
+});
