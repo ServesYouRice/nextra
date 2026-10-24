@@ -15,6 +15,7 @@ import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 import { evaluateHostPreflight } from './lib/hostPreflight.mjs';
 import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
 import { setNavigationGuard } from './lib/navigationGuard.mjs';
+import { RELOAD_PRESERVE, createStartAttempt, startOperationGuardFor } from './lib/startOperationGuard.mjs';
 import {
     RELAY_BITRATE_STEP_UP_AFTER_MS,
     RELAY_MP4_MIME_TYPE,
@@ -60,6 +61,11 @@ const OBS_WS_PASSWORD_STORAGE_KEY = 'nextra.obsWsPassword.v1';
 const BYOK_TURN_SESSION_STORAGE_KEY = 'nextra.byokTurnSession.v1';
 const HOST_RECOVERY_SESSION_STORAGE_KEY = 'nextra.hostRecovery.v1';
 const CAPTURE_PREFS_STORAGE_KEY = 'nextra.capturePrefs.v1';
+// The longest a start's room request can stay unsettled as socketRequest runs
+// it: leave-room (one 5 s attempt after up to 10 s waiting for the connection)
+// and create-room (two 15 s attempts, each after up to 10 s of connecting). A
+// newer start waits at most this long for an older one's request.
+const ROOM_REQUEST_SETTLE_TIMEOUT_MS = (10_000 + 5_000) + 2 * (10_000 + 15_000);
 const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, window.localStorage);
 
 function mediaDebugLog(...args) {
@@ -503,6 +509,11 @@ export default function HostView() {
     const relayGenerationRef = useRef(0);
     const obsPasswordRef = useRef('');
     const obsControlChannelRef = useRef(null);
+    // One per socket, so a start left pending by an unmounted host view still
+    // orders its room request and compensation before the next view's start.
+    const startGuardRef = useRef(startOperationGuardFor(socket, {
+        settleTimeoutMs: ROOM_REQUEST_SETTLE_TIMEOUT_MS,
+    }));
 
     const bitratePerViewer = viewerCount > 0 ? hostUploadMbps / viewerCount : hostUploadMbps;
     const bandwidthWarning = viewerCount >= 3 && bitratePerViewer < 7
@@ -615,6 +626,26 @@ export default function HostView() {
             return;
         }
         stopObsStream({ password: obsPasswordRef.current }).catch(() => {});
+    }, []);
+
+    // The one place a control channel is opened. A start operation that is no
+    // longer current opens none and leaves the ref alone, since a successor may
+    // own it. A channel whose connection fails is dropped from the ref so that
+    // stopObsIngest uses the stopObsStream fallback instead of a dead channel.
+    const establishObsControlChannel = useCallback((op) => {
+        if (!startGuardRef.current.isCurrent(op)) return null;
+        obsControlChannelRef.current?.close();
+        const control = openObsControlChannel({ password: obsPasswordRef.current });
+        obsControlChannelRef.current = control;
+        control.ready.then((state) => {
+            if (state.success) return;
+            console.warn('[Nextra-Host] OBS control channel unavailable:', state.message);
+            if (obsControlChannelRef.current === control) {
+                obsControlChannelRef.current = null;
+            }
+            control.close();
+        });
+        return control;
     }, []);
 
     useEffect(() => {
@@ -887,7 +918,7 @@ export default function HostView() {
         resetDevice();
     }, []);
 
-    const cleanup = useHostSessionController({
+    const releaseHostSession = useHostSessionController({
         stopRelayRecorder,
         videoProducerRef,
         audioProducerRef,
@@ -899,7 +930,16 @@ export default function HostView() {
         resetState: resetHostSessionState,
     });
 
+    // Every teardown ends the start operation that owns the session, so a
+    // continuation still pending inside handleStartSharing only releases what
+    // it acquired itself.
+    const cleanup = useCallback(() => {
+        startGuardRef.current.invalidate('cleanup');
+        releaseHostSession();
+    }, [releaseHostSession]);
+
     const terminateHostSession = useCallback((reason) => {
+        startGuardRef.current.invalidate('terminate');
         // Covers a graceful server shutdown: the room-ended broadcast is the
         // only warning OBS will ever get, since WHIP has no server-initiated
         // stop and OBS keeps pushing RTP at a closed transport otherwise.
@@ -937,9 +977,13 @@ export default function HostView() {
             clearTimeout(hostUnmountTimerRef.current);
             hostUnmountTimerRef.current = null;
         }
+        const startGuard = startGuardRef.current;
         const closeHostSession = () => {
             pageHidingRef.current = true;
             if (reloadRecoveryEnabledRef.current && roomCodeRef.current && hostTokenRef.current) {
+                // The room outlives this page for reload recovery, so a start
+                // still pending here must not compensate by stopping it.
+                startGuard.invalidate(RELOAD_PRESERVE);
                 persistHostRecoverySession({
                     code: roomCodeRef.current,
                     hostToken: hostTokenRef.current,
@@ -947,6 +991,7 @@ export default function HostView() {
                 });
                 return;
             }
+            startGuard.invalidate('pagehide');
             stopObsIngest();
             socket.emit('host-stopped');
             cleanup();
@@ -981,6 +1026,7 @@ export default function HostView() {
             hostUnmountTimerRef.current = setTimeout(() => {
                 hostUnmountTimerRef.current = null;
                 if (!pageHidingRef.current) {
+                    startGuard.invalidate('unmount');
                     stopObsIngest();
                     socket.emit('host-stopped');
                     cleanup();
@@ -1254,11 +1300,26 @@ export default function HostView() {
     ]);
 
     const handleStartSharing = useCallback(async () => {
+        // This start is an operation that a teardown (stop, terminate, unmount,
+        // pagehide, cleanup) or a newer start can overtake at any await below.
+        // After each one it checks it is still current; a stale one releases
+        // only what it acquired, sets no state, and compensates on the socket's
+        // room or OBS's output only when no other start owns the session.
+        const guard = startGuardRef.current;
+        const attempt = createStartAttempt(guard, {
+            emitHostStopped: () => socket.emit('host-stopped'),
+            stopObsOutput: () => {
+                stopObsStream({ password: obsPasswordRef.current }).catch(() => {});
+            },
+            escalate: (message) => console.error(`[Nextra-Host] ${message}`),
+        });
+        const { op } = attempt;
         setError('');
         setPreflightWarnings([]);
         setTerminalRoomEnded(false);
         setStatus('connecting');
         const resumedRoom = resumeRoomRef.current;
+        let stream = null;
 
         try {
             let roomTurnConfig = null;
@@ -1317,7 +1378,10 @@ export default function HostView() {
                     displayMediaOptions.systemAudio = 'include';
                 }
 
-                const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+                stream = attempt.ownStream(await navigator.mediaDevices.getDisplayMedia(displayMediaOptions));
+                // The picker can outlast the view or the session; a capture
+                // that arrives for a torn-down start is stopped, not installed.
+                if (attempt.abandonIfStale()) return;
                 streamRef.current = stream;
 
                 const videoTrack = stream.getVideoTracks()[0];
@@ -1328,6 +1392,9 @@ export default function HostView() {
                 }
 
                 videoTrack.addEventListener('ended', () => {
+                    // A capture left over from a stale start must not end the
+                    // session that replaced it; its start releases it.
+                    if (!guard.isCurrent(op)) return;
                     // Reload recovery deliberately keeps the server-side room
                     // alive across pagehide. Chromium ends display-capture tracks
                     // while unloading; treating that teardown as a user stop
@@ -1340,14 +1407,13 @@ export default function HostView() {
                 });
             }
 
-            let createdRoom = resumedRoom;
-            if (!createdRoom) {
+            // Room requests go out in start order: this one waits until an
+            // earlier start's request has settled and any host-stopped it owed
+            // is on the socket, so that host-stopped cannot end this room.
+            const roomStep = await attempt.requestRoom(resumedRoom ? {} : {
                 // Best effort cleanup for stale socket room state before creating a fresh room.
-                try {
-                    await socketRequest(socket, 'leave-room', {}, { timeoutMs: 5000, maxAttempts: 1 });
-                } catch { }
-
-                createdRoom = await socketRequest(socket, 'create-room', {
+                leave: () => socketRequest(socket, 'leave-room', {}, { timeoutMs: 5000, maxAttempts: 1 }),
+                create: () => socketRequest(socket, 'create-room', {
                     allowMediaControl,
                     ingestMode,
                     obsAv1Mode,
@@ -1361,8 +1427,10 @@ export default function HostView() {
                     relayVideoKbps: ingestMode === 'obs'
                         ? scaleObsBitrateKbps(getObsBitrateKbps(getQualityProfile(qualityProfile), frameRate), obsTuningProfile)
                         : Math.round(getProfileRelayBitsPerSecond(qualityProfile, frameRate) / 1000),
-                });
-            }
+                }),
+            });
+            if (roomStep.stale) return;
+            const createdRoom = resumedRoom || roomStep.room;
             const code = createdRoom.code;
             const hostToken = createdRoom.hostToken;
             const createdObsVideoCodec = createdRoom.obsVideoCodec;
@@ -1377,19 +1445,29 @@ export default function HostView() {
 
             if (ingestMode !== 'obs') {
                 const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
+                if (attempt.abandonIfStale()) return;
                 const device = await getDevice();
+                if (attempt.abandonIfStale()) return;
                 if (!device.loaded) {
                     await device.load({ routerRtpCapabilities: rtpCapabilities });
+                    if (attempt.abandonIfStale()) return;
                 }
 
                 const { params, iceServers } = await socketRequest(socket, 'create-send-transport');
-                const sendTransport = device.createSendTransport({
+                if (attempt.abandonIfStale()) return;
+                const sendTransport = attempt.own(device.createSendTransport({
                     ...params,
                     iceServers,
-                });
+                }));
                 sendTransportRef.current = sendTransport;
 
+                // These run inside produce(); a start that went stale meanwhile
+                // sends no connect-transport or produce request.
                 sendTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+                    if (!guard.isCurrent(op)) {
+                        errback(new Error('This start is no longer current.'));
+                        return;
+                    }
                     try {
                         await socketRequest(socket, 'connect-transport', {
                             transportId: sendTransport.id,
@@ -1402,6 +1480,10 @@ export default function HostView() {
                 });
 
                 sendTransport.on('produce', async ({ kind, rtpParameters, appData }, callback, errback) => {
+                    if (!guard.isCurrent(op)) {
+                        errback(new Error('This start is no longer current.'));
+                        return;
+                    }
                     try {
                         const { producerId } = await socketRequest(socket, 'produce', {
                             kind,
@@ -1414,24 +1496,28 @@ export default function HostView() {
                     }
                 });
 
-                const videoProducer = await sendTransport.produce({
-                    track: streamRef.current.getVideoTracks()[0],
+                const videoProducer = attempt.own(await sendTransport.produce({
+                    track: stream.getVideoTracks()[0],
                     encodings: getSimulcastEncodings(qualityProfile, frameRate),
                     codecOptions: VIDEO_CODEC_OPTIONS,
-                });
+                }));
+                if (attempt.abandonIfStale()) return;
                 videoProducerRef.current = videoProducer;
                 try {
                     await videoProducer.setMaxSpatialLayer(selectedProfile.maxSpatialLayer);
                 } catch (err) {
                     console.warn('[Nextra-Host] Could not apply initial profile layer:', err.message);
                 }
+                if (attempt.abandonIfStale()) return;
 
-                const audioTracks = streamRef.current.getAudioTracks();
+                const audioTracks = stream.getAudioTracks();
                 if (audioTracks.length > 0) {
-                    audioProducerRef.current = await sendTransport.produce({
+                    const audioProducer = attempt.own(await sendTransport.produce({
                         track: audioTracks[0],
                         codecOptions: AUDIO_CODEC_OPTIONS,
-                    });
+                    }));
+                    if (attempt.abandonIfStale()) return;
+                    audioProducerRef.current = audioProducer;
                 }
             }
 
@@ -1454,7 +1540,12 @@ export default function HostView() {
                 } else {
                     setObsAutoStatus('configuring');
                     setObsAutoMessage('Connecting to OBS...');
+                    attempt.obsConfigureStarted();
                     const result = await configureObsStream(buildObsAutoConfig(whipUrl, hostToken));
+                    // Stop is live during configuration. After a teardown the
+                    // result belongs to no session: no state, no channel, and
+                    // OBS is stopped only when no newer start owns it.
+                    if (attempt.abandonIfStale()) return;
                     setObsAutoStatus(result.success ? 'success' : 'error');
                     setObsAutoMessage(result.message);
                     if (obsAv1Mode && !result.success) {
@@ -1463,17 +1554,13 @@ export default function HostView() {
                     // Open regardless of the configure result: a failed run can
                     // still leave OBS streaming (rollback restarts it), and that
                     // is exactly the stream that must not outlive this page.
-                    obsControlChannelRef.current?.close();
-                    const control = openObsControlChannel({ password: obsPasswordRef.current });
-                    obsControlChannelRef.current = control;
-                    control.ready.then((state) => {
-                        if (!state.success) {
-                            console.warn('[Nextra-Host] OBS control channel unavailable:', state.message);
-                        }
-                    });
+                    establishObsControlChannel(op);
                 }
             }
         } catch (err) {
+            // A stale start's request failed (often because the teardown closed
+            // its transport): release its own resources and report nothing.
+            if (attempt.abandonIfStale()) return;
             console.error('Start sharing failed:', err);
             if (err?.name === 'NotAllowedError') {
                 setError('Screen sharing was cancelled.');
@@ -1485,6 +1572,10 @@ export default function HostView() {
             stopObsIngest();
             socket.emit('host-stopped');
             cleanup();
+        } finally {
+            // Every exit settles the room step, so a newer start never waits on
+            // this one; after a host-stopped above, never before it.
+            attempt.settleRoom();
         }
     }, [
         socket,
@@ -1494,6 +1585,7 @@ export default function HostView() {
         ingestMode,
         cleanup,
         stopObsIngest,
+        establishObsControlChannel,
         selectedProfile,
         qualityProfile,
         frameRate,
@@ -1692,6 +1784,7 @@ export default function HostView() {
             setShowStopConfirm(true);
             return;
         }
+        startGuardRef.current.invalidate('stop');
         stopObsIngest();
         // Drop the nav guard now rather than waiting for the isSharing effect, so
         // a navigation issued in this same task is not warned about a room that
