@@ -17,6 +17,15 @@ import { createLifecycleController } from './lib/lifecycleController.mjs';
 import { useViewerSessionController } from './hooks/useViewerSessionController';
 import UserErrorAlert from './components/UserErrorAlert';
 import { getLocalStorageSafely, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
+import {
+    assertAttemptCurrent,
+    beginPlaybackAttempt,
+    createRecoveryGuard,
+    isAttemptCurrent,
+    isSupersededAttemptError,
+    SupersededAttemptError,
+} from './lib/playbackAttempt.mjs';
+import { createSubscriptionLedger, emitClaimedStart, releaseSubscription } from './lib/subscriptionLedger.mjs';
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
@@ -62,6 +71,24 @@ function extractRoomCode(value) {
 
 function formatRoomCode(code) {
     return code.length > 3 ? `${code.slice(0, 3)}-${code.slice(3)}` : code;
+}
+
+// What a recovery resumes: the viewer's playback before the first recovery of a
+// chain reset it (see createRecoveryGuard).
+function readResumeIntent(watchingRef, playbackModeRef, fallbackModeRef) {
+    return {
+        wasWatching: watchingRef.current,
+        previousPlaybackMode: playbackModeRef.current,
+        wasFallbackMode: fallbackModeRef.current,
+    };
+}
+
+// The same failure an ack-based socketRequest gives for an unsuccessful answer.
+function ackFailure(event, response) {
+    if (!response) return new Error(`Request "${event}" failed (empty response)`);
+    const error = new Error(response.error || response.message || 'Unknown error');
+    Object.assign(error, response);
+    return error;
 }
 
 
@@ -110,6 +137,8 @@ export default function WatchView({ initialCode = '' }) {
     const userPausedRef = useRef(false);
     const relayCleanupRef = useRef(null);
     const relaySubscribedRef = useRef(false);
+    // The ledger claim of the relay-consume-start whose subscription cleanupPlayback releases.
+    const relayClaimRef = useRef(null);
     const relayUnsupportedWarnedRef = useRef(false);
     const mediaStreamRef = useRef(null);
     const fmp4PlayerRef = useRef(null);
@@ -120,7 +149,10 @@ export default function WatchView({ initialCode = '' }) {
     const watchingRef = useRef(false);
     const playbackModeRef = useRef('');
     const fallbackModeRef = useRef(false);
-    const reconnectingRef = useRef(false);
+    // Which subscription start this viewer sent last, per kind, with its socket.id.
+    const [subscriptionLedger] = useState(createSubscriptionLedger);
+    // transport-failed and reconnect recoveries run one at a time.
+    const [recoveryGuard] = useState(createRecoveryGuard);
     const joiningRef = useRef(false);
     const terminalRoomEndedRef = useRef(false);
     // Latches a rejected fallback-consume-start so the auto-enter effect stops
@@ -148,10 +180,12 @@ export default function WatchView({ initialCode = '' }) {
     const cleanupPlayback = useViewerSessionController({
         socket,
         setPlaybackMode,
+        subscriptionLedger,
         refs: {
             activePlaybackAttemptRef,
             fmp4PlayerRef,
             relaySubscribedRef,
+            relayClaimRef,
             relayCleanupRef,
             consumersRef,
             recvTransportRef,
@@ -174,7 +208,9 @@ export default function WatchView({ initialCode = '' }) {
         setIsMuted(muted);
     }, []);
 
-    const playVideoElement = useCallback(async (stream) => {
+    // isCurrent tells a superseded attempt's autoplay retry to leave the shared
+    // video element alone.
+    const playVideoElement = useCallback(async (stream, isCurrent = () => true) => {
         if (!videoRef.current) throw new Error('Video element not found');
 
         if (stream) {
@@ -190,7 +226,7 @@ export default function WatchView({ initialCode = '' }) {
         try {
             await videoRef.current.play();
         } catch (err) {
-            if (err?.name === 'NotAllowedError') {
+            if (err?.name === 'NotAllowedError' && isCurrent() && videoRef.current) {
                 syncMutedState(true);
                 try {
                     await videoRef.current.play();
@@ -201,28 +237,36 @@ export default function WatchView({ initialCode = '' }) {
         }
     }, [syncMutedState]);
 
+    // Each await is followed by an attempt check: a superseded attempt closes the
+    // consumer it made and throws SupersededAttemptError instead of writing
+    // consumersRef, mediaStreamRef or the video element.
     const consumeProducer = useCallback(async (producerId, attemptId) => {
         const device = deviceRef.current;
-        if (!device || !device.loaded || !recvTransportRef.current) return;
+        const recvTransport = recvTransportRef.current;
+        if (!device || !device.loaded || !recvTransport) return;
+        assertAttemptCurrent(attemptId, activePlaybackAttemptRef);
 
         console.log(`[Nextra] Consuming remote producer ${producerId}...`);
         const response = await socketRequest(socket, 'consume', {
-            transportId: recvTransportRef.current.id,
+            transportId: recvTransport.id,
             producerId,
             rtpCapabilities: device.rtpCapabilities,
         });
+        assertAttemptCurrent(attemptId, activePlaybackAttemptRef);
         const consumerParams = response.params || response;
 
-        if (activePlaybackAttemptRef.current !== attemptId) return;
-
-        const consumer = await recvTransportRef.current.consume({
+        const consumer = await recvTransport.consume({
             id: consumerParams.id,
             producerId: consumerParams.producerId,
             kind: consumerParams.kind,
             rtpParameters: consumerParams.rtpParameters,
         });
-
-        if (activePlaybackAttemptRef.current !== attemptId) return;
+        const closeIfSuperseded = () => {
+            if (isAttemptCurrent(attemptId, activePlaybackAttemptRef)) return;
+            try { consumer.close(); } catch { }
+            throw new SupersededAttemptError();
+        };
+        closeIfSuperseded();
 
         try {
             await socketRequest(socket, 'consumer-resume', { consumerId: consumer.id });
@@ -230,6 +274,7 @@ export default function WatchView({ initialCode = '' }) {
             try { consumer.close(); } catch { }
             throw err;
         }
+        closeIfSuperseded();
 
         // Replace the prior consumer/track of the same kind atomically. OBS may
         // reconnect with a new producer before the old close event arrives.
@@ -246,7 +291,8 @@ export default function WatchView({ initialCode = '' }) {
             : [];
         const newStream = new MediaStream([...existingTracks, consumer.track]);
         mediaStreamRef.current = newStream;
-        await playVideoElement(newStream);
+        await playVideoElement(newStream, () => isAttemptCurrent(attemptId, activePlaybackAttemptRef));
+        assertAttemptCurrent(attemptId, activePlaybackAttemptRef);
     }, [socket, playVideoElement]);
 
     const isTunnelOrigin = /\.trycloudflare\.com$/i.test(window.location.hostname)
@@ -322,99 +368,120 @@ export default function WatchView({ initialCode = '' }) {
             ? turnAvailableOverride
             : effectiveTurnAvailability;
 
-        const attemptId = ++activePlaybackAttemptRef.current;
+        const attempt = beginPlaybackAttempt(activePlaybackAttemptRef);
         const device = deviceRef.current;
         if (!device || !device.loaded) {
             throw new Error('Viewer is not ready yet. Rejoin room and try again.');
         }
 
-        const { params, iceServers } = await socketRequest(socket, 'create-recv-transport');
-        const recvTransport = device.createRecvTransport({
-            ...params,
-            iceServers,
-        });
-        recvTransportRef.current = recvTransport;
-
-        recvTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
-            try {
-                await socketRequest(socket, 'connect-transport', {
-                    transportId: recvTransport.id,
-                    dtlsParameters,
-                });
-                callback();
-            } catch (err) {
-                errback(err);
+        try {
+            const { params, iceServers } = await socketRequest(socket, 'create-recv-transport');
+            if (!attempt.isCurrent()) {
+                // The server made this transport for an attempt nobody owns now, and no
+                // ref holds it; close it by id (the server ignores an id it no longer has).
+                if (params?.id && socket.connected) socket.emit('close-viewer-transport', { transportId: params.id });
+                throw new SupersededAttemptError();
             }
-        });
-
-        const { producers = [] } = await socketRequest(socket, 'get-producers');
-        if (!producers.length) {
-            throw new Error('Host stream is not ready yet. Try again in a moment.');
-        }
-
-        if (activePlaybackAttemptRef.current !== attemptId) return;
-
-        for (const producer of producers) {
-            await consumeProducer(producer.producerId, attemptId);
-        }
-
-        // Wait for the ICE/DTLS connection to actually establish, with a timeout.
-        // Tunnel viewers get a very short timeout (2s) — mediasoup WebRTC cannot
-        // work through a Cloudflare tunnel (no UDP), so fail fast and fall back
-        // to relay playback instead of wasting time on unreachable candidates.
-        const shouldFailFastForTunnel = isTunnelOrigin && !turnAvailable && !forceProbe;
-        const iceTimeoutMs = shouldFailFastForTunnel ? 2000 : 8000;
-        const connectionState = recvTransport.connectionState;
-        if (connectionState !== 'connected') {
-            await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                    cleanup();
-                    reject(new Error(
-                        shouldFailFastForTunnel
-                            ? canUseRelay
-                                ? 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required, or use Relay mode instead.'
-                                : 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required for this room.'
-                            : 'WebRTC connection timed out (ICE could not connect). Try refreshing or check firewall settings.'
-                    ));
-                }, iceTimeoutMs);
-
-                const cleanup = () => {
-                    clearTimeout(timeout);
-                    recvTransport.off('connectionstatechange', onStateChange);
-                };
-
-                const onStateChange = (state) => {
-                    console.log(`[Nextra] ICE connection state: ${state}`);
-                    if (state === 'connected') {
-                        cleanup();
-                        resolve();
-                    } else if (state === 'failed' || state === 'closed') {
-                        cleanup();
-                        reject(new Error(`WebRTC connection ${state}.`));
-                    }
-                };
-
-                recvTransport.on('connectionstatechange', onStateChange);
+            const recvTransport = device.createRecvTransport({
+                ...params,
+                iceServers,
             });
+            attempt.own(() => recvTransport.close());
+            recvTransportRef.current = recvTransport;
+
+            recvTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+                try {
+                    await socketRequest(socket, 'connect-transport', {
+                        transportId: recvTransport.id,
+                        dtlsParameters,
+                    });
+                    callback();
+                } catch (err) {
+                    errback(err);
+                }
+            });
+
+            const { producers = [] } = await socketRequest(socket, 'get-producers');
+            attempt.assertCurrent();
+            if (!producers.length) {
+                throw new Error('Host stream is not ready yet. Try again in a moment.');
+            }
+
+            for (const producer of producers) {
+                await consumeProducer(producer.producerId, attempt.id);
+                attempt.assertCurrent();
+            }
+
+            // Wait for the ICE/DTLS connection to actually establish, with a timeout.
+            // Tunnel viewers get a very short timeout (2s) — mediasoup WebRTC cannot
+            // work through a Cloudflare tunnel (no UDP), so fail fast and fall back
+            // to relay playback instead of wasting time on unreachable candidates.
+            const shouldFailFastForTunnel = isTunnelOrigin && !turnAvailable && !forceProbe;
+            const iceTimeoutMs = shouldFailFastForTunnel ? 2000 : 8000;
+            const connectionState = recvTransport.connectionState;
+            if (connectionState !== 'connected') {
+                await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        cleanup();
+                        reject(new Error(
+                            shouldFailFastForTunnel
+                                ? canUseRelay
+                                    ? 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required, or use Relay mode instead.'
+                                    : 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required for this room.'
+                                : 'WebRTC connection timed out (ICE could not connect). Try refreshing or check firewall settings.'
+                        ));
+                    }, iceTimeoutMs);
+
+                    const cleanup = () => {
+                        clearTimeout(timeout);
+                        recvTransport.off('connectionstatechange', onStateChange);
+                    };
+
+                    const onStateChange = (state) => {
+                        console.log(`[Nextra] ICE connection state: ${state}`);
+                        if (state === 'connected') {
+                            cleanup();
+                            resolve();
+                        } else if (state === 'failed' || state === 'closed') {
+                            cleanup();
+                            reject(new Error(`WebRTC connection ${state}.`));
+                        }
+                    };
+
+                    recvTransport.on('connectionstatechange', onStateChange);
+                });
+            }
+
+            attempt.assertCurrent();
+
+            setPlaybackMode('mediasoup');
+            setWatching(true);
+            setHostDisconnected(false);
+            setHasProducer(true);
+        } catch (err) {
+            // A superseded attempt closes its own transport and reports only that it
+            // was superseded; the refs belong to whoever superseded it.
+            throw attempt.settleFailure(err);
         }
-
-        if (activePlaybackAttemptRef.current !== attemptId) return;
-
-        setPlaybackMode('mediasoup');
-        setWatching(true);
-        setHostDisconnected(false);
-        setHasProducer(true);
     }, [socket, consumeProducer, isTunnelOrigin, effectiveTurnAvailability, relayAllowed]);
 
+    // Every await below is followed by an attempt check before the next shared
+    // write. The attempt owns its relay claim from the emit of
+    // relay-consume-start until it commits the claim to relayClaimRef (after the
+    // acknowledgement, while still current); from then on cleanupPlayback's
+    // relay-subscription owner releases it. A superseded attempt revokes its own
+    // object URL, never touches the video element or the shared refs, and
+    // stops the subscription only if it still owns a claim the ledger lets it
+    // release.
     const startRelayPlayback = useCallback(async () => {
-        const attemptId = ++activePlaybackAttemptRef.current;
+        const attempt = beginPlaybackAttempt(activePlaybackAttemptRef);
         if (!videoRef.current) throw new Error('Video element not found');
 
         chunkQueueRef.current = [];
         queuedBytesRef.current = 0;
         let appendingLock = false;
         let mimeType = 'video/webm;codecs=vp8,opus';
-        let initResultData = null;
+        let initResultData;
         let liveInitPayload = null;
         let selectedGeneration = null;
         // This attempt's SourceBuffer, once made.
@@ -423,11 +490,28 @@ export default function WatchView({ initialCode = '' }) {
         let firstBufferedSettled = false;
         let resolveFirstBuffered = null;
         let rejectFirstBuffered = null;
+        // The relay claim while this attempt, not cleanupPlayback, answers for it.
+        let ownedClaim = null;
+        // The claim this attempt committed to relayClaimRef.
+        let committedClaim = null;
 
         const firstBufferedPromise = new Promise((resolve, reject) => {
             resolveFirstBuffered = resolve;
             rejectFirstBuffered = reject;
         });
+        // Cleanup can settle it before anything awaits it.
+        firstBufferedPromise.catch(() => { });
+
+        // Rejects the attempt's own waits (live media-init, sourceopen) as soon as
+        // the attempt is cleaned up, instead of leaving them to their timers.
+        let rejectCleanedUp = null;
+        const cleanedUp = new Promise((_, reject) => { rejectCleanedUp = reject; });
+        cleanedUp.catch(() => { });
+        const untilCleanedUp = (promise) => {
+            // Its own timer may still reject it after the race is over.
+            promise.catch(() => { });
+            return Promise.race([promise, cleanedUp]);
+        };
 
         const settleFirstBuffered = (err = null) => {
             if (firstBufferedSettled) return;
@@ -438,7 +522,12 @@ export default function WatchView({ initialCode = '' }) {
 
         let enqueueCount = 0;
         let failRelayGeneration = null;
+        let relayCleanupDone = false;
+        // The listeners below write the shared queue and video element; a cleaned-up
+        // or superseded attempt leaves them to the newer owner.
+        const ownsPlayback = () => !relayCleanupDone && attempt.isCurrent();
         const enqueueChunk = (buf) => {
+            if (!ownsPlayback()) return;
             const uint = toUint8ArraySync(buf);
             if (!uint?.byteLength) {
                 if (!relayUnsupportedWarnedRef.current) {
@@ -485,8 +574,13 @@ export default function WatchView({ initialCode = '' }) {
                 mediaDebugLog(`[Nextra] media-chunk #${chunkArrivalCount} arrived, type=${typeof data}, constructor=${data?.constructor?.name}, size=${data?.size ?? data?.byteLength ?? '?'}`);
             }
             if (data instanceof Blob) {
+                // Not reached with this client (binaryType is arraybuffer); if it ever
+                // is, a media-init that arrives meanwhile moves the generation on.
+                const chunkGeneration = payload.generation;
                 data.arrayBuffer()
-                    .then(enqueueChunk)
+                    .then((buffer) => {
+                        if (chunkGeneration === selectedGeneration) enqueueChunk(buffer);
+                    })
                     .catch((err) => {
                         console.warn('[Nextra] Failed to convert relay blob chunk:', err?.message || err);
                     });
@@ -498,6 +592,7 @@ export default function WatchView({ initialCode = '' }) {
         };
 
         const onMediaInit = (payload = {}) => {
+            if (!ownsPlayback()) return;
             if (!payload?.mimeType || !Number.isSafeInteger(payload.generation) || payload.generation <= 0) return;
             // A new recorder session started — discard any stale chunks from
             // the previous session so the fresh init segment is appended first.
@@ -526,6 +621,7 @@ export default function WatchView({ initialCode = '' }) {
         };
 
         const processQueue = () => {
+            if (!ownsPlayback()) return;
             if (appendingLock || !sourceBufferRef.current || sourceBufferRef.current.updating) return;
             if (!chunkQueueRef.current.length) return;
             if (mediaSourceRef.current?.readyState !== 'open') return;
@@ -550,7 +646,6 @@ export default function WatchView({ initialCode = '' }) {
         socket.on('media-chunk', onChunk);
 
         let safetyInterval = null;
-        let relayCleanupDone = false;
         const cleanupRelayAttempt = () => {
             if (relayCleanupDone) return;
             relayCleanupDone = true;
@@ -561,21 +656,51 @@ export default function WatchView({ initialCode = '' }) {
                 safetyInterval = null;
             }
             settleFirstBuffered(new Error('Relay playback was cleaned up before media buffered.'));
+            rejectCleanedUp(new Error('Relay playback was cleaned up.'));
+        };
+        // Stops this attempt's subscription, through the ledger, if this attempt
+        // still answers for it: the claim it owns, or the one it committed while
+        // relayClaimRef still holds it.
+        const releaseOwnRelayClaim = () => {
+            if (ownedClaim) {
+                releaseSubscription(subscriptionLedger, 'relay', ownedClaim, socket, 'relay-consume-stop');
+                ownedClaim = null;
+            } else if (committedClaim && relayClaimRef.current === committedClaim) {
+                relayClaimRef.current = null;
+                relaySubscribedRef.current = false;
+                releaseSubscription(subscriptionLedger, 'relay', committedClaim, socket, 'relay-consume-stop');
+            }
         };
         failRelayGeneration = (failure) => {
             cleanupRelayAttempt();
-            relaySubscribedRef.current = false;
-            socket.emit('relay-consume-stop');
-            setFallbackState('error');
-            setError(failure.message);
+            // A superseded attempt reports nothing; its claim is released in its catch.
+            if (attempt.isCurrent()) {
+                releaseOwnRelayClaim();
+                setFallbackState('error');
+                setError(failure.message);
+            }
             settleFirstBuffered(failure);
         };
         relayCleanupRef.current = cleanupRelayAttempt;
 
         try {
             console.log('[Nextra] relay-consume-start…');
-            const relayStart = await socketRequest(socket, 'relay-consume-start');
+            // The claim is recorded in the same synchronous block as the emit; a
+            // disconnected socket refuses (the start would go out on the next connection).
+            const relayRequest = emitClaimedStart(subscriptionLedger, 'relay', attempt.id, socket, 'relay-consume-start');
+            ownedClaim = relayRequest.claim;
+            const relayStart = await relayRequest.acknowledged;
+            if (!relayStart?.success) {
+                // The server refused: this start subscribed nothing, so there is nothing to stop.
+                subscriptionLedger.release('relay', ownedClaim);
+                ownedClaim = null;
+                throw ackFailure('relay-consume-start', relayStart);
+            }
+            attempt.assertCurrent();
             console.log('[Nextra] relay-consume-start OK');
+            committedClaim = ownedClaim;
+            ownedClaim = null;
+            relayClaimRef.current = committedClaim;
             relaySubscribedRef.current = true;
 
             if (relayStart.relayViewerCount > 1 && relayStart.bootstrapComplete === false) {
@@ -584,12 +709,17 @@ export default function WatchView({ initialCode = '' }) {
 
             try {
                 initResultData = await socketRequest(socket, 'get-media-init');
+            } catch {
+                initResultData = null;
+            }
+            attempt.assertCurrent();
+            if (initResultData) {
                 mediaDebugLog('[Nextra] get-media-init OK:', initResultData?.init?.mimeType || 'no mime');
                 if (initResultData.init?.mimeType) {
                     mimeType = initResultData.init.mimeType;
                     selectedGeneration = initResultData.init.generation;
                 }
-            } catch {
+            } else {
                 mediaDebugLog('[Nextra] get-media-init not cached yet, waiting for live media-init...');
             }
 
@@ -605,7 +735,7 @@ export default function WatchView({ initialCode = '' }) {
                 || (isTunnelOrigin && relayStart.relayViewerCount === 1);
 
             if (needsLiveInit) {
-                const liveInit = liveInitPayload || await new Promise((resolve, reject) => {
+                const liveInit = liveInitPayload || await untilCleanedUp(new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => {
                         cleanupWait();
                         reject(new Error('Relay stream is not ready yet. Try again in a moment.'));
@@ -620,7 +750,8 @@ export default function WatchView({ initialCode = '' }) {
                         cleanupWait();
                         resolve(payload);
                     };
-                });
+                }));
+                attempt.assertCurrent();
 
                 if (liveInit?.mimeType) {
                     mimeType = liveInit.mimeType;
@@ -634,16 +765,18 @@ export default function WatchView({ initialCode = '' }) {
             }
 
             const mediaSource = createRelayMediaSource(videoRef.current);
-            mediaSourceRef.current = mediaSource;
             const objectUrl = URL.createObjectURL(mediaSource);
+            attempt.own(() => URL.revokeObjectURL(objectUrl));
+            mediaSourceRef.current = mediaSource;
             objectUrlRef.current = objectUrl;
             videoRef.current.src = objectUrl;
             videoRef.current.srcObject = null;
 
-            await new Promise((resolve, reject) => {
+            await untilCleanedUp(new Promise((resolve, reject) => {
                 mediaSource.addEventListener('sourceopen', resolve, { once: true });
                 setTimeout(() => reject(new Error('MediaSource did not open')), 5000);
-            });
+            }));
+            attempt.assertCurrent();
 
             const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
             sourceBufferRef.current = sourceBuffer;
@@ -663,6 +796,9 @@ export default function WatchView({ initialCode = '' }) {
 
             sourceBuffer.addEventListener('updateend', () => {
                 appendingLock = false;
+                // After cleanup this SourceBuffer is detached and the video element
+                // belongs to the next attempt.
+                if (!ownsPlayback()) return;
 
                 if (videoRef.current && sourceBuffer.buffered.length > 0) {
                     settleFirstBuffered();
@@ -708,15 +844,14 @@ export default function WatchView({ initialCode = '' }) {
             processQueue();
             // Do not await here: with MSE the play() promise can stay pending
             // until enough media is buffered, which races the outer watch timeout.
-            void playVideoElement(null);
+            void playVideoElement(null, attempt.isCurrent).catch(() => { });
             await Promise.race([
                 firstBufferedPromise,
                 new Promise((_, reject) => {
                     setTimeout(() => reject(new Error('Relay connected but no playable media buffered.')), 18000);
                 }),
             ]);
-
-            if (activePlaybackAttemptRef.current !== attemptId) return;
+            attempt.assertCurrent();
 
             setPlaybackMode('relay');
             setWatching(true);
@@ -726,9 +861,16 @@ export default function WatchView({ initialCode = '' }) {
             if (relayCleanupRef.current === cleanupRelayAttempt) {
                 relayCleanupRef.current = null;
             }
-            throw err;
+            // A claim this attempt still owns was never committed: stop it now if the
+            // ledger allows (no newer start, same connected socket.id). A committed
+            // claim is cleanupPlayback's to release.
+            if (ownedClaim) {
+                releaseSubscription(subscriptionLedger, 'relay', ownedClaim, socket, 'relay-consume-stop');
+                ownedClaim = null;
+            }
+            throw attempt.settleFailure(err);
         }
-    }, [socket, playVideoElement, isTunnelOrigin]);
+    }, [socket, playVideoElement, isTunnelOrigin, subscriptionLedger]);
 
     useEffect(() => {
         if (!joined) return undefined;
@@ -739,7 +881,8 @@ export default function WatchView({ initialCode = '' }) {
     useEffect(() => {
         const onRoomEnded = ({ reason } = {}) => {
             terminalRoomEndedRef.current = true;
-            reconnectingRef.current = false;
+            // No queued recovery may resume a room that has ended.
+            recoveryGuard.clearFollowUp();
             setHostReconnectingReason('');
             cleanupPlayback();
             setWatching(false);
@@ -773,16 +916,19 @@ export default function WatchView({ initialCode = '' }) {
 
             if (!watching || playbackMode !== 'mediasoup') return;
 
+            // The playback that is current now; a newer one after an await is not ours to feed.
+            const attemptId = activePlaybackAttemptRef.current;
             try {
                 if (producerId) {
-                    await consumeProducer(producerId, activePlaybackAttemptRef.current);
+                    await consumeProducer(producerId, attemptId);
                 } else {
                     const { producers = [] } = await socketRequest(socket, 'get-producers');
                     for (const producer of producers) {
-                        await consumeProducer(producer.producerId, activePlaybackAttemptRef.current);
+                        await consumeProducer(producer.producerId, attemptId);
                     }
                 }
             } catch (err) {
+                if (isSupersededAttemptError(err)) return;
                 console.warn('[Nextra] Failed to consume new producer:', err.message);
             }
         };
@@ -824,57 +970,65 @@ export default function WatchView({ initialCode = '' }) {
             socket.off('room-ended', onRoomEnded);
             socket.off('server-restarting', onRoomEnded);
         };
-    }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback]);
+    }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback, recoveryGuard]);
 
     useEffect(() => {
-        const onTransportFailed = async ({ reason, recoverable } = {}) => {
-            if (recoverable && joinedRef.current) {
-                const wasWatching = watchingRef.current;
-                const previousPlaybackMode = playbackModeRef.current;
+        const recoverTransport = async (reason, { wasWatching, previousPlaybackMode }) => {
+            cleanupPlayback();
+            setWatching(false);
+            setHostDisconnected(false);
+            setHostReconnectingReason('');
+            setPlaybackMode('');
+            setFallbackMode(false);
+            setFallbackState(null);
+            setError(reason || 'Stream connection interrupted. Reconnecting...');
 
+            if (!wasWatching) return;
+
+            setWatchLoading(true);
+            try {
+                if (previousPlaybackMode === 'relay') {
+                    await startRelayPlayback();
+                } else {
+                    try {
+                        await startMediasoupPlayback({
+                            relayAllowedOverride: relayAllowed,
+                            turnAvailableOverride: roomHasTurnServer || hasTurnServer,
+                        });
+                    } catch (err) {
+                        if (isSupersededAttemptError(err) || relayAllowed === false) throw err;
+                        console.warn('[Nextra] Recovered WebRTC transport failed; trying relay:', err.message);
+                        cleanupPlayback();
+                        await startRelayPlayback();
+                    }
+                }
+                setError('');
+            } catch (err) {
+                // Whoever superseded the attempt owns the session now.
+                if (isSupersededAttemptError(err)) return;
+                console.warn('[Nextra] Failed to recover viewer transport:', err.message);
                 cleanupPlayback();
                 setWatching(false);
-                setHostDisconnected(false);
-                setHostReconnectingReason('');
                 setPlaybackMode('');
                 setFallbackMode(false);
                 setFallbackState(null);
-                setError(reason || 'Stream connection interrupted. Reconnecting...');
+                setError(err.message || 'Stream connection was interrupted. Click Watch Stream to reconnect.');
+            } finally {
+                setWatchLoading(false);
+            }
+        };
 
-                if (!wasWatching) return;
-
-                setWatchLoading(true);
-                try {
-                    if (previousPlaybackMode === 'relay') {
-                        await startRelayPlayback();
-                    } else {
-                        try {
-                            await startMediasoupPlayback({
-                                relayAllowedOverride: relayAllowed,
-                                turnAvailableOverride: roomHasTurnServer || hasTurnServer,
-                            });
-                        } catch (err) {
-                            if (relayAllowed === false) throw err;
-                            console.warn('[Nextra] Recovered WebRTC transport failed; trying relay:', err.message);
-                            cleanupPlayback();
-                            await startRelayPlayback();
-                        }
-                    }
-                    setError('');
-                } catch (err) {
-                    console.warn('[Nextra] Failed to recover viewer transport:', err.message);
-                    cleanupPlayback();
-                    setWatching(false);
-                    setPlaybackMode('');
-                    setFallbackMode(false);
-                    setFallbackState(null);
-                    setError(err.message || 'Stream connection was interrupted. Click Watch Stream to reconnect.');
-                } finally {
-                    setWatchLoading(false);
-                }
+        const onTransportFailed = ({ reason, recoverable } = {}) => {
+            if (recoverable && joinedRef.current) {
+                // A transport failure reported while a recovery runs is dropped: that
+                // recovery replaces the transport anyway.
+                void recoveryGuard.run('transport-failed', (intent) => recoverTransport(reason, intent), {
+                    captureIntent: () => readResumeIntent(watchingRef, playbackModeRef, fallbackModeRef),
+                });
                 return;
             }
 
+            recoveryGuard.clearFollowUp();
             cleanupPlayback();
             resetDevice();
             joinedRoomCodeRef.current = '';
@@ -904,6 +1058,7 @@ export default function WatchView({ initialCode = '' }) {
         socket,
         cleanupPlayback,
         hasTurnServer,
+        recoveryGuard,
         relayAllowed,
         roomHasTurnServer,
         startMediasoupPlayback,
@@ -1081,6 +1236,8 @@ export default function WatchView({ initialCode = '' }) {
         try {
             await startMediasoupPlayback({ forceProbe: true });
         } catch (err) {
+            // Superseded by a cleanup or a newer start, which own the session now.
+            if (isSupersededAttemptError(err)) return;
             console.warn('[Nextra] Mediasoup override failed:', err.message);
             setError(err.message || 'WebRTC connection failed.');
             cleanupPlayback();
@@ -1117,7 +1274,8 @@ export default function WatchView({ initialCode = '' }) {
                 if (watchTimedOut) return;
                 console.log('[Nextra] Relay playback connected.');
             } catch (primaryErr) {
-                if (watchTimedOut) return;
+                // A superseded attempt leaves the session to whoever superseded it.
+                if (watchTimedOut || isSupersededAttemptError(primaryErr)) return;
                 console.warn('[Nextra] Relay-first playback failed; trying WebRTC fallback:', primaryErr.message);
                 if (isRelayPlaybackUnsupported(primaryErr)) relayUnsupportedError = primaryErr;
                 cleanupPlayback();
@@ -1128,7 +1286,7 @@ export default function WatchView({ initialCode = '' }) {
                     if (watchTimedOut) return;
                     console.log('[Nextra] Mediasoup fallback connected.');
                 } catch (fallbackErr) {
-                    if (watchTimedOut) return;
+                    if (watchTimedOut || isSupersededAttemptError(fallbackErr)) return;
                     cleanupPlayback();
                     setWatching(false);
                     console.error('[Nextra] Secondary playback attempt failed:', fallbackErr.message);
@@ -1149,7 +1307,7 @@ export default function WatchView({ initialCode = '' }) {
             if (watchTimedOut) return;
             console.log('[Nextra] Mediasoup playback connected.');
         } catch (primaryErr) {
-            if (watchTimedOut) return;
+            if (watchTimedOut || isSupersededAttemptError(primaryErr)) return;
             if (!relayAllowed) {
                 cleanupPlayback();
                 setWatching(false);
@@ -1165,7 +1323,7 @@ export default function WatchView({ initialCode = '' }) {
                 if (watchTimedOut) return;
                 console.log('[Nextra] Relay playback connected.');
             } catch (fallbackErr) {
-                if (watchTimedOut) return;
+                if (watchTimedOut || isSupersededAttemptError(fallbackErr)) return;
                 cleanupPlayback();
                 setWatching(false);
                 console.error('[Nextra] Relay fallback also failed:', fallbackErr.message);
@@ -1222,15 +1380,11 @@ export default function WatchView({ initialCode = '' }) {
     }, [cleanupPlayback, socket]);
 
     useEffect(() => {
-        const onReconnect = async () => {
-            if (!joinedRef.current || reconnectingRef.current || terminalRoomEndedRef.current) return;
+        const rejoinAfterReconnect = async ({ wasWatching, previousPlaybackMode, wasFallbackMode }) => {
+            if (!joinedRef.current || terminalRoomEndedRef.current) return;
             const roomCode = joinedRoomCodeRef.current || normalizeRoomCode(codeInput);
             if (!roomCode) return;
 
-            const wasWatching = watchingRef.current;
-            const previousPlaybackMode = playbackModeRef.current;
-            const wasFallbackMode = fallbackModeRef.current;
-            reconnectingRef.current = true;
             console.warn('[Nextra] Socket reconnected while in a room - rejoining viewer session.');
 
             cleanupPlayback();
@@ -1264,13 +1418,15 @@ export default function WatchView({ initialCode = '' }) {
                                     turnAvailableOverride: !!response.hasRoomTurnServer || hasTurnServer,
                                 });
                             } catch (err) {
-                                if (response.relayAllowed === false) throw err;
+                                if (isSupersededAttemptError(err) || response.relayAllowed === false) throw err;
                                 console.warn('[Nextra] Reconnected WebRTC playback failed; trying relay:', err.message);
                                 cleanupPlayback();
                                 await startRelayPlayback();
                             }
                         }
                     } catch (err) {
+                        // Whoever superseded the attempt owns the session now.
+                        if (isSupersededAttemptError(err)) return;
                         console.warn('[Nextra] Rejoined room but could not resume playback:', err.message);
                         cleanupPlayback();
                         setWatching(false);
@@ -1304,9 +1460,17 @@ export default function WatchView({ initialCode = '' }) {
                 setWhipReconnecting(false);
                 setError('Connection was lost. Please rejoin the room.');
             } finally {
-                reconnectingRef.current = false;
                 setWatchLoading(false);
             }
+        };
+
+        const onReconnect = () => {
+            // A reconnect during a recovery is not dropped: the new socket.id must
+            // rejoin the room. It runs once, after the recovery in progress.
+            void recoveryGuard.run('reconnect', rejoinAfterReconnect, {
+                followUp: true,
+                captureIntent: () => readResumeIntent(watchingRef, playbackModeRef, fallbackModeRef),
+            });
         };
 
         socket.on('connect', onReconnect);
@@ -1318,6 +1482,7 @@ export default function WatchView({ initialCode = '' }) {
         enterFallbackMode,
         hasTurnServer,
         joinRoomAndLoadDevice,
+        recoveryGuard,
         startMediasoupPlayback,
         startRelayPlayback,
     ]);
