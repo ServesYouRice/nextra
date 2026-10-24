@@ -357,6 +357,59 @@ describe('createViewerAnswer', () => {
         );
     });
 
+    // The "(id uri)" pairs of the a=extmap lines in each m-section of an answer, in section order.
+    function extmapPairsBySection(answer) {
+        const sections = [];
+        for (const line of answer.split('\r\n')) {
+            if (line.startsWith('m=')) sections.push([]);
+            else if (sections.length > 0) sections[sections.length - 1].push(line);
+        }
+        return sections.map((lines) => lines
+            .map((line) => line.match(/^a=extmap:(\d+)\s+(\S+)$/))
+            .filter(Boolean)
+            .map((match) => `${match[1]} ${match[2]}`));
+    }
+
+    // RFC 8829 section 5.3.1: an answer lists only extensions its offer section lists, under the offered id.
+    function assertExtmapsAreOffered(answer, parsed) {
+        const answered = extmapPairsBySection(answer);
+        assert.equal(answered.length, parsed._mediaSections.length, 'one answer section per offer section');
+        answered.forEach((pairs, i) => {
+            const offered = parsed._mediaSections[i].extmap.map((ext) => `${ext.id} ${ext.uri}`);
+            for (const pair of pairs) {
+                assert.ok(
+                    offered.includes(pair),
+                    `${parsed._mediaSections[i].kind} section answers extmap ${pair}, offered: ${offered.join(', ') || 'none'}`
+                );
+            }
+        });
+        return answered;
+    }
+
+    it('answers only extmaps that its offer section lists, with the offered id', () => {
+        // mockVideoConsumer carries transport-wide-cc under id 4, which the offer's video section does not list.
+        // mockAudioConsumer carries ssrc-audio-level under id 5, where the offer's audio section lists id 4.
+        const parsed = parseViewerOffer(SAMPLE_OFFER);
+        const answer = createViewerAnswer(parsed, [mockVideoConsumer, mockAudioConsumer], mockTransportParams);
+        const [video] = assertExtmapsAreOffered(answer, parsed);
+        assert.ok(video.includes('1 urn:ietf:params:rtp-hdrext:sdes:mid'), 'the offered sdes:mid stays in the video section');
+    });
+
+    it('answers the offered extension in its own section when the consumer carries the offered id', () => {
+        const withExtensions = (consumer, headerExtensions) => ({
+            ...consumer,
+            rtpParameters: { ...consumer.rtpParameters, headerExtensions },
+        });
+        const video = withExtensions(mockVideoConsumer, [{ id: 1, uri: 'urn:ietf:params:rtp-hdrext:sdes:mid' }]);
+        const audio = withExtensions(mockAudioConsumer, [{ id: 4, uri: 'urn:ietf:params:rtp-hdrext:ssrc-audio-level' }]);
+        const parsed = parseViewerOffer(SAMPLE_OFFER);
+        const answer = createViewerAnswer(parsed, [video, audio], mockTransportParams);
+        assert.deepEqual(assertExtmapsAreOffered(answer, parsed), [
+            ['1 urn:ietf:params:rtp-hdrext:sdes:mid'],
+            ['4 urn:ietf:params:rtp-hdrext:ssrc-audio-level'],
+        ]);
+    });
+
     it('includes SSRC lines from consumer encodings', () => {
         const answer = buildAnswer([mockVideoConsumer]);
         assert.ok(answer.includes('a=ssrc:12345678 cname:whep'), 'should include SSRC line');
