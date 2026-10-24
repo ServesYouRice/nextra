@@ -50,7 +50,7 @@ test('the probe reports the rate the link carried once it had ramped up', async 
 test('a download that is over before the ramp-up means the link needs no limit', async () => {
     const clock = { now: 0 };
     const probe = createRelayCapacityProbe({
-        fetchImpl: fakeFetch(Array.from({ length: 10 }, () => [50, 1_000_000]), { clock }),
+        fetchImpl: fakeFetch(Array.from({ length: 10 }, () => [50, 1_048_576]), { clock }),
         now: () => clock.now,
         logger: silent,
     });
@@ -133,10 +133,18 @@ test('the probe endpoint serves one armed download and nothing else', async () =
     try {
         let armedUrl = '';
         let secondStatus = 0;
+        const wrongWhileArmed = {};
         probe = createRelayCapacityProbe({
             logger: silent,
             fetchImpl: async (url, options) => {
                 armedUrl = url;
+                const token = url.split('/').pop();
+                const prefix = url.slice(0, -token.length);
+                // While armed, a token that differs in one hex character, and one of another length, get 404.
+                const flipped = (token[0] === '0' ? '1' : '0') + token.slice(1);
+                wrongWhileArmed.sameLength = (await fetch(`${prefix}${flipped}`)).status;
+                wrongWhileArmed.otherLength = (await fetch(`${prefix}${token.slice(1)}`)).status;
+                // The wrong attempts did not spend the token: the armed download still succeeds below.
                 const response = await fetch(url, options);
                 // The token is spent by the first request.
                 secondStatus = (await fetch(url)).status;
@@ -149,6 +157,7 @@ test('the probe endpoint serves one armed download and nothing else', async () =
 
         const result = await probe.measure(base, '/probe');
         // Loopback finishes inside the ramp-up window.
+        assert.deepEqual(wrongWhileArmed, { sameLength: 404, otherLength: 404 });
         assert.equal(result.status, 'fast');
         assert.equal(secondStatus, 404);
         assert.equal((await fetch(armedUrl)).status, 404);
@@ -203,4 +212,39 @@ test('a token of the same character length but more UTF-8 bytes gets a 404 witho
     assert.equal(outcome.wrongStatus, 404);
     assert.equal(outcome.rightStatus, 200);
     assert.equal(outcome.replayStatus, 404);
+});
+
+test('an empty 200 body is reported as failed, not as a fast link', async () => {
+    const clock = { now: 0 };
+    const probe = createRelayCapacityProbe({
+        fetchImpl: fakeFetch([], { clock }),
+        now: () => clock.now,
+        logger: silent,
+    });
+    const result = await probe.measure('https://example.test', '/p');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.kbps, null);
+    assert.equal(result.reason, 'short response');
+});
+
+test('a small 200 body is reported as failed, not as a fast link', async () => {
+    const clock = { now: 0 };
+    const probe = createRelayCapacityProbe({
+        fetchImpl: fakeFetch([[10, 1024]], { clock }),
+        now: () => clock.now,
+        logger: silent,
+    });
+    const result = await probe.measure('https://example.test', '/p');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.reason, 'short response');
+});
+
+test('a full PROBE_BYTES body delivered inside the ramp-up window is fast', async () => {
+    const clock = { now: 0 };
+    const probe = createRelayCapacityProbe({
+        fetchImpl: fakeFetch([[10, PROBE_BYTES]], { clock }),
+        now: () => clock.now,
+        logger: silent,
+    });
+    assert.deepEqual(await probe.measure('https://example.test', '/p'), { status: 'fast', kbps: null });
 });
