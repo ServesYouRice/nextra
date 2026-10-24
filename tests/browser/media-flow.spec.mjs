@@ -122,6 +122,33 @@ async function installViewerSocketControl(page) {
     });
 }
 
+// Lets a test make a viewer's WebRTC start stall the way an unreachable
+// connection does, from the moment it switches the flags on: ICE finds no usable
+// candidate (the peer connection may only use relay candidates, and the test
+// server offers no TURN server) and video.play() on a MediaStream never settles
+// (it stays pending until media arrives). The relay path attaches no
+// srcObject, so its play() calls are untouched.
+async function installWebRtcStall(page) {
+    await page.addInitScript(() => {
+        const stall = { blockIce: false, hangPlay: false, hungPlays: 0 };
+        window.__nextraStall = stall;
+        const NativePeerConnection = window.RTCPeerConnection;
+        window.RTCPeerConnection = class StalledPeerConnection extends NativePeerConnection {
+            constructor(configuration = {}, ...rest) {
+                super(stall.blockIce ? { ...configuration, iceTransportPolicy: 'relay' } : configuration, ...rest);
+            }
+        };
+        const nativePlay = HTMLMediaElement.prototype.play;
+        HTMLMediaElement.prototype.play = function play(...args) {
+            if (stall.hangPlay && this.srcObject) {
+                stall.hungPlays += 1;
+                return new Promise(() => { });
+            }
+            return nativePlay.apply(this, args);
+        };
+    });
+}
+
 // The server's port, read from the baseURL playwright.config.mjs sets from
 // NEXTRA_E2E_PORT, so a run on another port needs no change here.
 function serverPort(testInfo) {
@@ -683,6 +710,80 @@ test('a relay start superseded by a socket reconnect leaves no stale playback, e
             totalRelayViewers: 0,
             totalMediasoupConsumers: 0,
         },
+    });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// With ICE blocked, the 8 s ICE wait ends the WebRTC start and the viewer falls
+// back to the relay. The start used to await video.play() first; that promise
+// never settles without media, so the ICE wait was never reached and only
+// handleWatch's 40 s safety timer ended the attempt, with no fallback.
+test('a WebRTC start whose video.play() never settles still times out in its ICE window and falls back to the relay', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installWebRtcStall(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
+    await expect(watchButton).toBeEnabled();
+    await viewerPage.evaluate(() => Object.assign(window.__nextraStall, { blockIce: true, hangPlay: true }));
+
+    const clickedAt = Date.now();
+    await watchButton.click();
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible({ timeout: 25_000 });
+    expect(Date.now() - clickedAt, 'the ICE window, not the 40 s safety timer, ended the WebRTC start')
+        .toBeLessThan(25_000);
+    expect(await viewerPage.evaluate(() => window.__nextraStall.hungPlays),
+        'the WebRTC start reached video.play()').toBeGreaterThan(0);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    expect(await getOnlyRoom(request)).toMatchObject({ viewerCount: 1, relayViewerCount: 1, mediasoupConsumerCount: 0 });
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json()).toMatchObject({
+        rooms: { active: 0, totalRelayViewers: 0, totalMediasoupConsumers: 0 },
+    });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The automatic recovery after a reconnect has no safety timer of its own: a
+// WebRTC restart that stalls in video.play() used to leave the viewer on
+// "Connecting..." for good.
+test('a viewer whose WebRTC recovery after a reconnect stalls in video.play() falls back to the relay', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerSocketControl(viewerPage);
+    await installWebRtcStall(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+
+    await viewerPage.evaluate(() => Object.assign(window.__nextraStall, { blockIce: true, hangPlay: true }));
+    const droppedAt = Date.now();
+    await viewerPage.evaluate(() => window.__nextraSocketControl.sockets.at(-1).close());
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible({ timeout: 30_000 });
+    expect(Date.now() - droppedAt, "the ICE window ended the recovery's WebRTC start").toBeLessThan(30_000);
+    expect(await viewerPage.evaluate(() => window.__nextraStall.hungPlays),
+        'the recovery reached video.play()').toBeGreaterThan(0);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    expect(await getOnlyRoom(request)).toMatchObject({ viewerCount: 1, relayViewerCount: 1, mediasoupConsumerCount: 0 });
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json()).toMatchObject({
+        rooms: { active: 0, totalRelayViewers: 0, totalMediasoupConsumers: 0 },
     });
 
     await viewerContext.close();

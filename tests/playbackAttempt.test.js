@@ -7,6 +7,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { EventEmitter } = require('node:events');
 
 const loadModule = () => import('../src/lib/playbackAttempt.mjs');
 
@@ -204,4 +207,199 @@ test('a trigger from inside a running recovery is queued or dropped, never run c
         runs.push('outer-end');
     });
     assert.deepEqual(runs, ['outer-start', 'outer-end', 'nested-follow-up']);
+});
+
+test('supersede gives up the attempt only while it is the current one', async () => {
+    const { beginPlaybackAttempt } = await loadModule();
+    const attemptRef = { current: 0 };
+
+    const first = beginPlaybackAttempt(attemptRef);
+    first.supersede();
+    assert.equal(first.isCurrent(), false);
+    assert.equal(attemptRef.current, 2);
+
+    const second = beginPlaybackAttempt(attemptRef);
+    const counter = attemptRef.current;
+    first.supersede();
+    assert.equal(attemptRef.current, counter, 'a stale attempt leaves the counter alone');
+    assert.equal(second.isCurrent(), true, 'a stale supersede must not take the newer attempt down');
+});
+
+test('withDeadline passes the start outcome through and stops its timer', async () => {
+    const { withDeadline, isSupersededAttemptError } = await loadModule();
+    const attemptRef = { current: 0 };
+    let seen = null;
+
+    const value = await withDeadline(attemptRef, async (attempt) => {
+        seen = attempt;
+        return 'started';
+    }, { ms: 20 });
+    assert.equal(value, 'started');
+    assert.equal(seen.id, 1, 'the start runs as the attempt withDeadline began');
+    assert.equal(seen.isCurrent(), true, 'a start that finished in time stays current');
+
+    const failure = new Error('Host stream is not ready yet.');
+    await assert.rejects(withDeadline(attemptRef, async () => { throw failure; }, { ms: 20 }), (err) => err === failure);
+    await assert.rejects(withDeadline(attemptRef, () => { throw failure; }, { ms: 20 }), (err) => err === failure,
+        'a start that throws before returning a promise');
+
+    // The timers were cleared: waiting past the deadline changes nothing.
+    const counter = attemptRef.current;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(attemptRef.current, counter);
+
+    const superseded = await withDeadline(attemptRef, async (attempt) => {
+        attemptRef.current += 1;
+        throw attempt.settleFailure(new Error('late'));
+    }, { ms: 20 }).catch((err) => err);
+    assert.equal(isSupersededAttemptError(superseded), true, "the start's own superseded error passes through");
+});
+
+test('withDeadline gives up a start that never settles: supersedes it, frees its resources, reports a timeout', async () => {
+    const { withDeadline, PlaybackDeadlineError, isSupersededAttemptError, PLAYBACK_DEADLINE_MS } = await loadModule();
+    assert.equal(PLAYBACK_DEADLINE_MS, 40000);
+    const attemptRef = { current: 0 };
+    const released = [];
+    const hung = deferred();
+    let startedAttempt = null;
+
+    const startedAt = Date.now();
+    const result = withDeadline(attemptRef, (attempt) => {
+        startedAttempt = attempt;
+        attempt.own(() => released.push('transport'));
+        return hung.promise;
+    }, { ms: 30, message: 'Connection timed out.' });
+
+    const error = await result.catch((err) => err);
+    assert.ok(error instanceof PlaybackDeadlineError);
+    assert.equal(isSupersededAttemptError(error), false, 'a timeout is a failure to report, not a silent supersede');
+    assert.equal(error.message, 'Connection timed out.');
+    assert.ok(Date.now() - startedAt < 1000);
+    assert.equal(startedAttempt.isCurrent(), false, 'the attempt was superseded');
+    assert.deepEqual(released, ['transport'], 'its own resources were released');
+
+    // The hung start finally settling changes nothing and raises nothing unhandled.
+    hung.reject(new Error('late failure'));
+    await drainMicrotasks();
+    assert.deepEqual(released, ['transport']);
+});
+
+test('withDeadline leaves a newer owner alone when the attempt it guards was replaced', async () => {
+    const { withDeadline, beginPlaybackAttempt, isSupersededAttemptError } = await loadModule();
+    const attemptRef = { current: 0 };
+    const released = [];
+    let guarded = null;
+
+    const result = withDeadline(attemptRef, (attempt) => {
+        guarded = attempt;
+        attempt.own(() => released.push('guarded-transport'));
+        return new Promise(() => { });
+    }, { ms: 30 });
+    // A Leave or a newer Watch takes the session over while the start hangs.
+    const newer = beginPlaybackAttempt(attemptRef);
+    newer.own(() => released.push('newer-transport'));
+
+    const error = await result.catch((err) => err);
+    assert.equal(isSupersededAttemptError(error), true, 'the caller leaves the session to the newer owner');
+    assert.equal(newer.isCurrent(), true, 'the deadline did not supersede the newer attempt');
+    assert.equal(guarded.isCurrent(), false);
+    assert.deepEqual(released, ['guarded-transport']);
+});
+
+// A mediasoup-client transport as far as the ICE wait uses it.
+function fakeTransport(connectionState = 'new') {
+    const emitter = new EventEmitter();
+    const observer = new EventEmitter();
+    return {
+        connectionState,
+        on: (event, listener) => emitter.on(event, listener),
+        off: (event, listener) => emitter.off(event, listener),
+        observer: {
+            on: (event, listener) => observer.on(event, listener),
+            off: (event, listener) => observer.off(event, listener),
+        },
+        emitState(state) {
+            this.connectionState = state;
+            emitter.emit('connectionstatechange', state);
+        },
+        // mediasoup-client's close(): the state changes, only the observer hears it.
+        close() {
+            this.connectionState = 'closed';
+            observer.emit('close');
+        },
+        listenerCount: () => emitter.listenerCount('connectionstatechange') + observer.listenerCount('close'),
+    };
+}
+
+test('the ICE wait times out in its own window while nothing else settles', async () => {
+    const { waitForTransportConnected } = await loadModule();
+    const transport = fakeTransport();
+    // What the old start path sat behind: a play() promise that never settles.
+    const neverPlays = new Promise(() => { });
+    void neverPlays;
+
+    const startedAt = Date.now();
+    const error = await waitForTransportConnected(transport, {
+        timeoutMs: 40,
+        timeoutMessage: 'WebRTC connection timed out (ICE could not connect).',
+    }).catch((err) => err);
+    assert.equal(error.message, 'WebRTC connection timed out (ICE could not connect).');
+    const elapsed = Date.now() - startedAt;
+    assert.ok(elapsed >= 30 && elapsed < 1000, `timed out after ${elapsed} ms`);
+    assert.equal(transport.listenerCount(), 0, 'its listeners are gone');
+});
+
+test('the ICE wait ends when the transport connects, fails or is already connected', async () => {
+    const { waitForTransportConnected } = await loadModule();
+    const states = [];
+    const options = { timeoutMs: 5000, timeoutMessage: 'timed out', onStateChange: (state) => states.push(state) };
+
+    assert.equal(await waitForTransportConnected(fakeTransport('connected'), options), undefined, 'already connected');
+
+    const connecting = fakeTransport('new');
+    const waiting = waitForTransportConnected(connecting, options);
+    connecting.emitState('connecting');
+    connecting.emitState('connected');
+    assert.equal(await waiting, undefined);
+    assert.equal(connecting.listenerCount(), 0);
+
+    const failing = fakeTransport('new');
+    const failed = waitForTransportConnected(failing, options);
+    failing.emitState('failed');
+    await assert.rejects(failed, /WebRTC connection failed\./);
+    assert.equal(failing.listenerCount(), 0);
+
+    await assert.rejects(waitForTransportConnected(fakeTransport('failed'), options), /WebRTC connection failed\./);
+    assert.deepEqual(states, ['connecting', 'connected', 'failed']);
+});
+
+test('the ICE wait of a transport that cleanup closed ends at once instead of waiting out its timer', async () => {
+    const { waitForTransportConnected } = await loadModule();
+    const transport = fakeTransport('new');
+
+    const startedAt = Date.now();
+    const waiting = waitForTransportConnected(transport, { timeoutMs: 5000, timeoutMessage: 'timed out' });
+    transport.close();
+    await assert.rejects(waiting, /WebRTC connection closed\./);
+    assert.ok(Date.now() - startedAt < 1000, 'did not wait for the 5 s timer');
+    assert.equal(transport.listenerCount(), 0);
+
+    await assert.rejects(waitForTransportConnected(transport, { timeoutMs: 5000, timeoutMessage: 'timed out' }),
+        /WebRTC connection closed\./, 'a transport that is already closed');
+});
+
+test('WatchView starts WebRTC playback without waiting on video.play() before the ICE wait', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'WatchView.jsx'), 'utf8');
+    assert.doesNotMatch(source, /await\s+playVideoElement\(/, 'play() promises are never awaited');
+    assert.match(source, /void playVideoElement\(newStream,/);
+    const consume = source.indexOf('const consumeProducer');
+    const iceWait = source.indexOf('await waitForTransportConnected(');
+    assert.ok(consume > 0 && iceWait > consume, 'the ICE wait is a timed wait of its own');
+    // handleWatch has its own 40 s timer; every other caller runs under withDeadline.
+    const calls = source.match(/startMediasoupPlayback\(\{[^}]*\}\)/g) ?? [];
+    assert.equal(calls.length, 3, 'Try WebRTC and the two recovery paths');
+    for (const call of calls) {
+        assert.match(call, /attempt/, `${call.replace(/\s+/g, ' ')} runs as the attempt withDeadline began`);
+    }
+    assert.equal((source.match(/withDeadline\(activePlaybackAttemptRef/g) ?? []).length, 3);
 });
