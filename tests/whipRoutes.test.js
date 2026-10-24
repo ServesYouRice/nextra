@@ -2,9 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
 const http = require('node:http');
+const { EventEmitter } = require('node:events');
 
-const { createWhipRouter } = require('../lib/whipRoutes');
+const { createWhipRouter, setIo, setMediaLifecycle } = require('../lib/whipRoutes');
 const { createRoom, destroyRoom } = require('../lib/rooms');
+const { sessionRegistry } = require('../lib/sessionRegistry');
 const config = require('../config');
 
 const VIDEO_OFFER = [
@@ -341,5 +343,436 @@ test('WHIP offers with a=ssrc for every produced section still reach the transpo
         config.PUBLIC_WHIP_RATE_LIMIT_MAX = previous.rateMax;
         config.PUBLIC_WHIP_MAX_PENDING_STARTS = previous.pendingMax;
         await new Promise((resolve) => server.close(resolve));
+    }
+});
+
+// ── Session generations: a stale startup or producer completion never touches a newer session ──
+
+// OBS's video + audio offer, with sprop-parameter-sets so going live does not start the stream capture.
+const LIVE_OFFER = obsOffer().replace(
+    'level-asymmetry-allowed=1',
+    'level-asymmetry-allowed=1;sprop-parameter-sets=Z0LgH9oBQBbsBEAAAAMAQAAADyPGDKA=,aM4G4g==',
+);
+
+const FAKE_TRANSPORT_PARAMS = {
+    iceParameters: { usernameFragment: 'srvufrag', password: 'srvpassword12345678901234' },
+    iceCandidates: [{ ip: '127.0.0.1', port: 40000, protocol: 'udp', type: 'host' }],
+    dtlsParameters: { role: 'auto', fingerprints: [{ algorithm: 'sha-256', value: 'AA:BB:CC:DD' }] },
+};
+
+function deferred() {
+    let resolve;
+    let reject;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+}
+
+// Lets pending promise continuations and socket I/O run (setImmediate is never mocked here).
+async function flush(rounds = 10) {
+    for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function waitFor(condition, what, timeoutMs = 2000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!condition()) {
+        if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
+        await new Promise((resolve) => setImmediate(resolve));
+    }
+}
+
+// A mediasoup WebRtcTransport stand-in. plan.connect and plan.produce[kind] are optional
+// functions whose promise connect() / produce() wait for (a rejection fails the call).
+// As in mediasoup 3.27, close() drops the DTLS state subscription without emitting
+// anything, and a connect() or produce() already pending still completes afterwards.
+function createFakeTransport(id, plan = {}) {
+    const transport = new EventEmitter();
+    transport.id = id;
+    transport.closed = false;
+    transport.producers = [];
+    transport.close = () => {
+        transport.closed = true;
+        transport.removeAllListeners('dtlsstatechange');
+    };
+    transport.connect = async () => {
+        if (plan.connect) await plan.connect();
+    };
+    transport.produce = async ({ kind, rtpParameters }) => {
+        if (plan.produce?.[kind]) await plan.produce[kind]();
+        const producer = {
+            id: `${id}-${kind}`,
+            kind,
+            rtpParameters,
+            closed: false,
+            close() { producer.closed = true; },
+        };
+        transport.producers.push(producer);
+        return producer;
+    };
+    return transport;
+}
+
+// A WHIP router on a real HTTP server with fake transports (one plan per POST, in order), a
+// fake Socket.IO server, spies for host metrics and relay prewarm, and a spy on the room's
+// media-pipeline ownWhip().
+async function startWhipHarness(hostId, transportPlans = []) {
+    const originalWhipEnabled = config.WHIP_ENABLED;
+    config.WHIP_ENABLED = true;
+    const room = await createRoom(hostId, { ingestMode: 'obs' });
+    const transports = [];
+    const emitted = [];
+    const hostMetrics = [];
+    const relayStarts = [];
+    const ownWhipCalls = [];
+
+    const pipeline = room._mediaPipeline;
+    const realOwnWhip = pipeline.ownWhip.bind(pipeline);
+    pipeline.ownWhip = (name, resource, close) => {
+        ownWhipCalls.push({ name, resource });
+        return realOwnWhip(name, resource, close);
+    };
+
+    setIo({ to: (target) => ({ emit: (event, data) => emitted.push({ target, event, data }) }) });
+    setMediaLifecycle({
+        emitHostMetrics: (_io, roomCode) => hostMetrics.push({
+            roomCode,
+            whipConnected: room.whipConnected,
+            whipReconnecting: room.whipReconnecting,
+            whipSessionId: room.whipSessionId,
+        }),
+        startFallbackRelay: async (relayRoom) => { relayStarts.push(relayRoom.code); },
+    });
+
+    const app = express();
+    app.use('/whip', createWhipRouter({}, {
+        createWebRtcTransport: async () => {
+            const transport = createFakeTransport(`transport-${transports.length + 1}`, transportPlans[transports.length]);
+            transports.push(transport);
+            return { transport, params: FAKE_TRANSPORT_PARAMS };
+        },
+    }));
+    const { server, baseUrl } = await listen(app);
+
+    return {
+        room,
+        transports,
+        emitted,
+        hostMetrics,
+        relayStarts,
+        ownWhipCalls,
+        post: (signal, body = LIVE_OFFER) => fetch(`${baseUrl}/whip/broadcast/${room.code}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/sdp', Authorization: `Bearer ${room.hostToken}` },
+            body,
+            signal,
+        }),
+        resourceIdOf: (response) => response.headers.get('location').split('/').pop(),
+        resourcesForRoom: () => [...sessionRegistry.whipResources]
+            .filter(([, roomCode]) => roomCode === room.code)
+            .map(([resourceId]) => resourceId),
+        newProducerEvents: () => emitted
+            .filter(({ event }) => event === 'new-producer')
+            .map(({ target, data }) => ({ target, ...data })),
+        async close() {
+            destroyRoom(room.code);
+            setIo(null);
+            setMediaLifecycle({ emitHostMetrics: () => {}, startFallbackRelay: async () => {} });
+            config.WHIP_ENABLED = originalWhipEnabled;
+            // After an aborted fetch the client opens a fresh idle connection; do not wait
+            // for its keep-alive timeout.
+            const closed = new Promise((resolve) => server.close(resolve));
+            server.closeAllConnections();
+            await closed;
+        },
+    };
+}
+
+// The generation is gone: transport closed, nothing registered, no producers, host told last.
+function assertSessionTornDown(h, transport, resourceId) {
+    assert.equal(transport.closed, true, 'the transport is closed');
+    assert.equal(h.room.whipTransport, null);
+    assert.equal(h.room.whipProducer, null);
+    assert.equal(h.room.whipAudioProducer, null);
+    assert.equal(h.room.whipSessionId, null);
+    assert.equal(h.room.whipResourceId, null);
+    assert.equal(sessionRegistry.roomCodeForWhipResource(resourceId), null, 'the WHIP resource is unregistered');
+    assert.equal(h.room.whipConnected, false);
+    assert.equal(h.room.whipReconnecting, false);
+    assert.equal(h.room.fallbackAvailable, false);
+    assert.equal(h.room.whipGraceTimer, null);
+    for (const name of ['transport', 'video-producer', 'audio-producer']) {
+        assert.equal(h.room._mediaPipeline.releaseWhip(name), false, `the media pipeline no longer owns the WHIP ${name}`);
+    }
+    for (const producer of transport.producers) assert.equal(producer.closed, true, `${producer.kind} producer is closed`);
+    assert.deepEqual(h.hostMetrics.at(-1), {
+        roomCode: h.room.code, whipConnected: false, whipReconnecting: false, whipSessionId: null,
+    }, 'host metrics are emitted after the teardown');
+}
+
+test('WHIP happy path: 201, then DTLS connected creates both producers and goes live', { concurrency: false }, async () => {
+    const h = await startWhipHarness('whip-happy-path', [{}]);
+    try {
+        const response = await h.post();
+        assert.equal(response.status, 201);
+        assert.match(response.headers.get('content-type'), /^application\/sdp\b/);
+        const resourceId = h.resourceIdOf(response);
+        assert.equal(sessionRegistry.roomCodeForWhipResource(resourceId), h.room.code);
+        const [transport] = h.transports;
+        assert.equal(h.room.whipTransport, transport);
+        assert.equal(h.room.whipResourceId, resourceId);
+        assert.equal(h.room.whipStarting, false);
+        assert.equal(h.room.whipConnected, false);
+
+        transport.emit('dtlsstatechange', 'connected');
+        await flush();
+
+        const [video, audio] = transport.producers;
+        assert.equal(h.room.whipProducer, video);
+        assert.equal(h.room.whipAudioProducer, audio);
+        assert.equal(h.room.whipConnected, true);
+        assert.deepEqual(h.ownWhipCalls.map(({ name, resource }) => [name, resource]), [
+            ['transport', transport], ['video-producer', video], ['audio-producer', audio],
+        ]);
+        assert.deepEqual(h.newProducerEvents(), [
+            { target: h.room.code, producerId: video.id, kind: 'video' },
+            { target: h.room.code, producerId: audio.id, kind: 'audio' },
+        ]);
+        assert.equal(h.hostMetrics.at(-1).whipConnected, true);
+        assert.deepEqual(h.relayStarts, [h.room.code]);
+        assert.equal(transport.closed, false);
+    } finally {
+        await h.close();
+    }
+});
+
+// POSTs with a connect() that waits for the returned gate, aborts the request once connect()
+// is pending, and waits until the server has cancelled the start.
+async function abortStartDuringConnect(hostId, extraPlans = []) {
+    const connectGate = deferred();
+    const connectEntered = deferred();
+    const h = await startWhipHarness(hostId, [
+        { connect: () => { connectEntered.resolve(); return connectGate.promise; } },
+        ...extraPlans,
+    ]);
+    try {
+        const controller = new AbortController();
+        const request = h.post(controller.signal).catch((err) => err);
+        await connectEntered.promise;
+        const [transport] = h.transports;
+        assert.equal(h.room.whipTransport, transport);
+        controller.abort();
+        assert.equal((await request).name, 'AbortError');
+        await waitFor(() => h.room.whipStarting === false, 'the aborted start to release the room');
+        return { h, transport, connectGate };
+    } catch (err) {
+        connectGate.resolve();
+        await h.close();
+        throw err;
+    }
+}
+
+test('a WHIP start aborted while transport.connect() is pending gives its transport up at once', { concurrency: false }, async () => {
+    const { h, transport, connectGate } = await abortStartDuringConnect('whip-aborted-connect-release');
+    try {
+        assert.equal(transport.closed, true);
+        assert.equal(h.room.whipTransport, null, 'the room no longer points at the cancelled transport');
+        assert.equal(h.room._mediaPipeline.releaseWhip('transport'), false, 'the media pipeline no longer owns it');
+        assert.equal(h.room.whipGeneration, null);
+    } finally {
+        connectGate.resolve();
+        await h.close();
+    }
+});
+
+test('a WHIP start aborted while transport.connect() is pending publishes no session when connect() completes', { concurrency: false }, async () => {
+    const { h, connectGate } = await abortStartDuringConnect('whip-aborted-connect-publish');
+    try {
+        connectGate.resolve();
+        await flush();
+
+        assert.equal(h.room.whipSessionId, null);
+        assert.equal(h.room.whipResourceId, null);
+        assert.deepEqual(h.resourcesForRoom(), [], 'no WHIP resource is registered for the room');
+        assert.equal(h.room.whipTransport, null);
+        assert.equal(h.room.whipStarting, false);
+    } finally {
+        connectGate.resolve();
+        await h.close();
+    }
+});
+
+test('a WHIP offer without a DTLS fingerprint gets 400 and leaves no transport on the room or in its media pipeline', { concurrency: false }, async () => {
+    const h = await startWhipHarness('whip-no-fingerprint', [{}]);
+    try {
+        const offer = LIVE_OFFER.split('\r\n').filter((line) => !line.startsWith('a=fingerprint:')).join('\r\n');
+        const response = await h.post(undefined, offer);
+        assert.equal(response.status, 400);
+        assert.match((await response.json()).error, /DTLS fingerprint/);
+        const [transport] = h.transports;
+        assert.equal(transport.closed, true);
+        assert.equal(h.room.whipTransport, null);
+        assert.equal(h.room._mediaPipeline.releaseWhip('transport'), false);
+        assert.equal(h.room.whipStarting, false);
+        assert.deepEqual(h.resourcesForRoom(), []);
+    } finally {
+        await h.close();
+    }
+});
+
+test('a stale transport.connect() completion after a replacement WHIP start leaves the replacement session as it is', { concurrency: false }, async () => {
+    const { h, transport: staleTransport, connectGate: staleConnect } = await abortStartDuringConnect('whip-stale-connect', [{}]);
+    try {
+        // OBS retries: the replacement start completes first
+        const replacement = await h.post();
+        assert.equal(replacement.status, 201);
+        const replacementResource = h.resourceIdOf(replacement);
+        const replacementTransport = h.transports[1];
+        const replacementSession = h.room.whipSessionId;
+        assert.equal(h.room.whipTransport, replacementTransport);
+
+        // ... then the aborted start's connect() resolves
+        staleConnect.resolve();
+        await flush();
+
+        assert.equal(h.room.whipTransport, replacementTransport);
+        assert.equal(h.room.whipSessionId, replacementSession);
+        assert.equal(h.room.whipResourceId, replacementResource);
+        assert.deepEqual(h.resourcesForRoom(), [replacementResource], 'only the replacement resource is registered');
+        assert.equal(staleTransport.closed, true);
+        assert.equal(replacementTransport.closed, false);
+
+        // and the replacement still goes live
+        replacementTransport.emit('dtlsstatechange', 'connected');
+        await flush();
+        assert.equal(h.room.whipConnected, true);
+        assert.equal(h.room.whipProducer, replacementTransport.producers[0]);
+    } finally {
+        staleConnect.resolve();
+        await h.close();
+    }
+});
+
+for (const kind of ['video', 'audio']) {
+    test(`a stale ${kind} produce() completion closes only its own producer and never touches the replacement session`, { concurrency: false }, async () => {
+        const staleProduce = deferred();
+        const h = await startWhipHarness(`whip-stale-${kind}-produce`, [
+            { produce: { [kind]: () => staleProduce.promise } },
+            {},
+        ]);
+        try {
+            assert.equal((await h.post()).status, 201);
+            const [staleTransport] = h.transports;
+            staleTransport.emit('dtlsstatechange', 'connected');
+            await flush();
+
+            // OBS reconnects: a new POST replaces the session while the old produce() is pending
+            const replacement = await h.post();
+            assert.equal(replacement.status, 201);
+            assert.equal(staleTransport.closed, true);
+            const liveTransport = h.transports[1];
+            liveTransport.emit('dtlsstatechange', 'connected');
+            await flush();
+            const [liveVideo, liveAudio] = liveTransport.producers;
+            assert.equal(h.room.whipConnected, true);
+            const ownWhipCallsBefore = h.ownWhipCalls.length;
+            const eventsBefore = h.emitted.length;
+            const metricsBefore = h.hostMetrics.length;
+
+            staleProduce.resolve();
+            await flush();
+
+            const staleProducer = staleTransport.producers.find((producer) => producer.kind === kind);
+            assert.ok(staleProducer, `the stale ${kind} producer was created`);
+            assert.equal(staleProducer.closed, true, 'the stale producer is closed');
+            assert.deepEqual(h.ownWhipCalls.slice(ownWhipCallsBefore), [], 'ownWhip is not called for the stale producer');
+            assert.equal(h.room.whipProducer, liveVideo);
+            assert.equal(h.room.whipAudioProducer, liveAudio);
+            assert.equal(liveVideo.closed, false);
+            assert.equal(liveAudio.closed, false);
+            assert.equal(h.room.whipTransport, liveTransport);
+            assert.equal(h.room.whipConnected, true);
+            assert.equal(h.emitted.length, eventsBefore, 'no events for the stale producer');
+            assert.equal(h.hostMetrics.length, metricsBefore);
+        } finally {
+            staleProduce.resolve();
+            await h.close();
+        }
+    });
+}
+
+test('a rejected video produce() tears the WHIP session down instead of leaving it half started', { concurrency: false }, async () => {
+    const h = await startWhipHarness('whip-video-produce-rejects', [
+        { produce: { video: () => Promise.reject(new Error('router rejected the video rtpParameters')) } },
+    ]);
+    try {
+        const response = await h.post();
+        assert.equal(response.status, 201);
+        const resourceId = h.resourceIdOf(response);
+        const [transport] = h.transports;
+
+        transport.emit('dtlsstatechange', 'connected');
+        await flush();
+
+        assert.deepEqual(transport.producers, []);
+        assertSessionTornDown(h, transport, resourceId);
+        assert.deepEqual(h.newProducerEvents(), []);
+        assert.deepEqual(h.relayStarts, []);
+    } finally {
+        await h.close();
+    }
+});
+
+test('a rejected audio produce() after the video producer tears the whole WHIP session down, video producer included', { concurrency: false }, async () => {
+    const h = await startWhipHarness('whip-audio-produce-rejects', [
+        { produce: { audio: () => Promise.reject(new Error('router rejected the audio rtpParameters')) } },
+    ]);
+    try {
+        const response = await h.post();
+        assert.equal(response.status, 201);
+        const resourceId = h.resourceIdOf(response);
+        const [transport] = h.transports;
+
+        transport.emit('dtlsstatechange', 'connected');
+        await flush();
+
+        assert.deepEqual(transport.producers.map((producer) => producer.kind), ['video']);
+        assertSessionTornDown(h, transport, resourceId);
+        assert.deepEqual(h.newProducerEvents(), []);
+        assert.deepEqual(h.relayStarts, []);
+    } finally {
+        await h.close();
+    }
+});
+
+test('DTLS failing while produce() is pending leaves the session disconnected, and the grace timer then closes it', { concurrency: false }, async (t) => {
+    const pendingVideo = deferred();
+    const h = await startWhipHarness('whip-dtls-fails-mid-produce', [
+        { produce: { video: () => pendingVideo.promise } },
+    ]);
+    try {
+        const response = await h.post();
+        assert.equal(response.status, 201);
+        const resourceId = h.resourceIdOf(response);
+        const [transport] = h.transports;
+        transport.emit('dtlsstatechange', 'connected');
+        await flush();
+
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        transport.emit('dtlsstatechange', 'failed');
+        assert.equal(h.room.whipConnected, false);
+        assert.equal(h.room.whipReconnecting, true);
+        assert.notEqual(h.room.whipGraceTimer, null);
+
+        pendingVideo.resolve();
+        await flush();
+        assert.equal(h.room.whipConnected, false, 'a produce() that completes after DTLS failed does not mark the session connected');
+        assert.deepEqual(h.newProducerEvents(), []);
+        assert.deepEqual(h.relayStarts, []);
+
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS + 1);
+        assertSessionTornDown(h, transport, resourceId);
+    } finally {
+        t.mock.timers.reset();
+        pendingVideo.resolve();
+        await h.close();
     }
 });
