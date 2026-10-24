@@ -91,8 +91,8 @@ test.afterAll(async () => {
 
 // A stand-in for OBS's obs-websocket server on its default port. `mode` decides
 // what the next connections meet: 'down' refuses them like a closed OBS, 'up'
-// answers them, and 'hold' answers them but keeps the stream-service write
-// pending until release() so a test can act while a configure is in flight.
+// answers them, and 'hold' answers them but keeps the first stream-service
+// write pending until release() so a test can act while a configure is in flight.
 async function installObsStub(page) {
     const obs = {
         mode: 'down',
@@ -141,7 +141,11 @@ async function installObsStub(page) {
                     },
                 }));
             };
-            if (connection.mode === 'hold' && requestType === 'SetStreamServiceSettings') {
+            // Only a held connection's first stream-service write waits; its
+            // later ones (the room, after the encoder-reset probe) are answered,
+            // so a configure that was released runs to its end.
+            if (connection.mode === 'hold' && requestType === 'SetStreamServiceSettings' && !connection.heldServiceWrite) {
+                connection.heldServiceWrite = true;
                 obs.held.push(reply);
             } else {
                 reply();

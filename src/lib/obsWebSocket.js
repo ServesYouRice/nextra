@@ -362,6 +362,27 @@ async function stopActiveStream(sendRequest) {
 }
 
 /**
+ * The address of the server's encoder-reset probe for a room's WHIP URL: the
+ * same URL with `/probe` added to its path. The server (lib/whipRoutes.js)
+ * answers a stream sent there as it answers a WHIP start, so OBS sees it run,
+ * but makes nothing of it: no producer, no relay, nothing a viewer or the host
+ * page receives. null when the URL cannot be read.
+ *
+ * @param {string} whipUrl
+ * @returns {string | null}
+ */
+export function whipProbeUrl(whipUrl) {
+    let url;
+    try {
+        url = new URL(whipUrl);
+    } catch {
+        return null;
+    }
+    url.pathname = `${url.pathname.replace(/\/+$/, '')}/probe`;
+    return url.toString();
+}
+
+/**
  * Make OBS let go of an encoder it set up for a stream that never connected.
  *
  * Each time OBS retries a target that is gone (the room ended, the server was
@@ -371,7 +392,8 @@ async function stopActiveStream(sendRequest) {
  * from a video pipeline that no longer exists, which is a green picture. OBS
  * does not say whether it holds one, so unless a running stream was just stopped
  * it has to be assumed. Only a stream that actually ran and was stopped releases
- * it — so run one, briefly, at the target that is about to be used anyway.
+ * it — so run one, briefly. The caller points OBS at the server's probe first
+ * (whipProbeUrl), so that whatever OBS is showing reaches no one.
  *
  * Every run's stream is stopped however the run ends, a request that fails
  * included, and counts as stopped only once OBS reports the output idle.
@@ -990,50 +1012,84 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             applied.push('previous stream stopped');
         }
 
-        const setResult = await sendRequest('SetStreamServiceSettings', {
+        const whipService = (server) => ({
             streamServiceType: 'whip_custom',
             streamServiceSettings: {
-                server: whipUrl,
+                server,
                 bearer_token: bearerToken,
             },
         });
-
-        if (setResult.requestStatus?.result !== true) {
-            await finish({ success: false, message: `Failed to set OBS stream settings: ${setResult.requestStatus?.comment || 'unknown error'}` });
-            return;
-        }
-        applied.push('WHIP URL + token');
+        const failedServiceWrite = (response) => finish({
+            success: false,
+            message: `Failed to set OBS stream settings: ${response?.requestStatus?.comment || 'unknown error'}`,
+        });
+        const resetNotRunWarning = 'OBS could not run the short test stream that clears the encoder settings of an earlier stream; if the picture or the delay is wrong, restart OBS';
+        // Set once the service OBS had before the setup is journaled, by the
+        // write that points OBS at the probe.
+        let previousServiceJournaled = false;
 
         if (!stopResult.wasLive) {
             // The reset runs whether or not autoStart is set; only the final
-            // start below depends on the flag. Decided in open question
-            // section-84098610a3c7f7be0c63f39f/Q-001: skipping it brings back the
-            // stale encoder and its green picture, and it is kept on the
-            // condition that the test stream carries nothing to viewers.
-            //
-            // Uses the raw channel: this start/stop is housekeeping, not a step
-            // a failed setup should roll back. Only while a test stream may be
-            // running is a stop held in the journal: a rollback that begins
-            // meanwhile (at the deadline, when housekeeping is refused) stops
-            // it and sees it idle before it restores anything, and so does the
-            // rollback after a stop that could not be confirmed.
-            const reset = await releaseStaleEncoder(housekeepingRequest, {
-                ...encoderResetOptions,
-                holdStop: () => transaction.hold({ requestType: 'StopStream' }),
-            });
-            if (!reset.stopped) {
-                await finish({
-                    success: false,
-                    message: `OBS could not confirm that the short test stream which clears the encoder of an earlier stream stopped (${reset.message}), so setup ended before changing the video or encoder settings.`,
-                });
-                return;
-            }
-            if (reset.released) {
-                applied.push('encoder reset');
+            // start below depends on the flag. Decided in open questions
+            // section-84098610a3c7f7be0c63f39f/Q-001 and
+            // section-49e0545c60d121dd3e784d86/Q-002: skipping it brings back
+            // the stale encoder and its green picture, so it is kept, and its
+            // test stream goes to the server's probe, never to the room. The
+            // probe answers like the room's WHIP endpoint but forwards nothing,
+            // so whatever OBS is compositing (a whole desktop, say) reaches no
+            // viewer before the host chose to go live. OBS is pointed at the
+            // room only after the test stream is confirmed stopped.
+            const probeUrl = whipProbeUrl(whipUrl);
+            if (!probeUrl) {
+                warnings.push(resetNotRunWarning);
             } else {
-                warnings.push('OBS could not run the short test stream that clears the encoder settings of an earlier stream; if the picture or the delay is wrong, restart OBS');
+                const probeResult = await sendRequest('SetStreamServiceSettings', whipService(probeUrl));
+                if (!successfulResponse(probeResult)) {
+                    await failedServiceWrite(probeResult);
+                    return;
+                }
+                previousServiceJournaled = true;
+
+                // Uses the raw channel: this start/stop is housekeeping, not a
+                // step a failed setup should roll back. Only while a test stream
+                // may be running is a stop held in the journal: a rollback that
+                // begins meanwhile (at the deadline, when housekeeping is
+                // refused) stops it and sees it idle before it restores
+                // anything, and so does the rollback after a stop that could not
+                // be confirmed.
+                const reset = await releaseStaleEncoder(housekeepingRequest, {
+                    ...encoderResetOptions,
+                    holdStop: () => transaction.hold({ requestType: 'StopStream' }),
+                });
+                if (!reset.stopped) {
+                    await finish({
+                        success: false,
+                        message: `OBS could not confirm that the short test stream which clears the encoder of an earlier stream stopped (${reset.message}), so setup ended before changing the video or encoder settings.`,
+                    });
+                    return;
+                }
+                if (reset.released) {
+                    applied.push('encoder reset');
+                } else {
+                    warnings.push(resetNotRunWarning);
+                }
             }
         }
+
+        // After the probe write the journal already holds the service OBS had
+        // before the setup, which is what a rollback puts back, so this write
+        // is not journaled again (its undo would put back the probe). Like the
+        // housekeeping requests it is refused once the deadline has passed.
+        const setResult = await (previousServiceJournaled ? housekeepingRequest : sendRequest)(
+            'SetStreamServiceSettings',
+            whipService(whipUrl),
+        );
+
+        if (!successfulResponse(setResult)) {
+            await failedServiceWrite(setResult);
+            return;
+        }
+        applied.push('WHIP URL + token');
 
         if (videoSettings) {
             const videoResult = await sendRequest('SetVideoSettings', videoSettings);
