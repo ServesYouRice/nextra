@@ -8,6 +8,11 @@ const {
     validateBenchmarkDefinition,
     buildThresholdHeadroom,
     evaluateTopology,
+    sumCpuComponents,
+    cpuPercent,
+    growthPercent,
+    maxOrNull,
+    evaluateResourceThresholds,
 } = require('./runtime-benchmark-model');
 
 function numberArg(name, fallback) {
@@ -88,11 +93,6 @@ function measureAck(socket) {
     });
 }
 
-function cpuPercent(first, last, elapsedMs, scale) {
-    if (!Number.isFinite(first) || !Number.isFinite(last) || elapsedMs <= 0) return null;
-    return ((last - first) / scale / elapsedMs) * 100;
-}
-
 function relayBytesForwarded(metrics) {
     return (metrics.sockets?.rooms || []).reduce((sum, room) => sum + (room.relay?.bytesForwarded || 0), 0);
 }
@@ -137,27 +137,25 @@ async function main() {
     const last = samples[samples.length - 1];
     if (!first || !last) throw new Error('No metric samples collected');
     const elapsedMs = Math.max(1, last.at - first.at);
-    const firstWorker = first.metrics.mediaWorker?.resourceUsage;
-    const lastWorker = last.metrics.mediaWorker?.resourceUsage;
+    // A metric the server did not report stays null (unavailable) and fails the
+    // run below; it is never counted as 0.
+    const workerCpuFields = ['ru_utime', 'ru_stime'];
+    const processCpuFields = ['user', 'system'];
     const workerCpu = cpuPercent(
-        (firstWorker?.ru_utime || 0) + (firstWorker?.ru_stime || 0),
-        (lastWorker?.ru_utime || 0) + (lastWorker?.ru_stime || 0),
+        sumCpuComponents(first.metrics.mediaWorker?.resourceUsage, workerCpuFields),
+        sumCpuComponents(last.metrics.mediaWorker?.resourceUsage, workerCpuFields),
         elapsedMs,
         1,
     );
-    const firstProcess = first.metrics.process?.cpuUsageMicroseconds;
-    const lastProcess = last.metrics.process?.cpuUsageMicroseconds;
     const processCpu = cpuPercent(
-        (firstProcess?.user || 0) + (firstProcess?.system || 0),
-        (lastProcess?.user || 0) + (lastProcess?.system || 0),
+        sumCpuComponents(first.metrics.process?.cpuUsageMicroseconds, processCpuFields),
+        sumCpuComponents(last.metrics.process?.cpuUsageMicroseconds, processCpuFields),
         elapsedMs,
         1_000,
     );
-    const firstRss = first.metrics.process?.memory?.rss || 0;
-    const lastRss = last.metrics.process?.memory?.rss || 0;
-    const memoryGrowth = firstRss > 0 ? ((lastRss - firstRss) / firstRss) * 100 : 0;
-    const eventLoopP95 = Math.max(...samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.p95 || 0));
-    const eventLoopMax = Math.max(...samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.max || 0));
+    const memoryGrowth = growthPercent(first.metrics.process?.memory?.rss, last.metrics.process?.memory?.rss);
+    const eventLoopP95 = maxOrNull(samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.p95));
+    const eventLoopMax = maxOrNull(samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.max));
     const firstRelayBytes = relayBytesForwarded(first.metrics);
     const lastRelayBytes = relayBytesForwarded(last.metrics);
     const observedTopology = {
@@ -208,11 +206,7 @@ async function main() {
     const failures = evaluateTopology(observedTopology, requirements);
     if (errors.length > 0) failures.push(`${errors.length} signalling acknowledgements failed`);
     if (summary.observed.ackP95Ms > thresholds.ackP95Ms) failures.push('ack p95 exceeded');
-    if (eventLoopP95 > thresholds.eventLoopP95Ms) failures.push('event-loop p95 exceeded');
-    if (eventLoopMax > thresholds.eventLoopMaxMs) failures.push('event-loop max exceeded');
-    if (workerCpu !== null && workerCpu > thresholds.workerCpuPercent) failures.push('media-worker CPU exceeded');
-    if (processCpu !== null && processCpu > thresholds.processCpuPercent) failures.push('Node process CPU exceeded');
-    if (memoryGrowth > thresholds.memoryGrowthPercent) failures.push('RSS growth exceeded');
+    failures.push(...evaluateResourceThresholds(observed, thresholds));
     summary.pass = failures.length === 0;
     summary.failures = failures;
     process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
