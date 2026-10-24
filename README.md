@@ -260,7 +260,7 @@ For source/dev:
 
 - Set `AUTO_PUBLIC_TUNNEL=true` if you want the app to create a Cloudflare tunnel automatically.
 - Ensure the `cloudflared` binary is in the project root or on PATH. Download it from [Cloudflare](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
-- For a stable named tunnel, set both `CLOUDFLARED_TUNNEL_TOKEN` and `SHARE_BASE_URL`; configure the tunnel's public hostname to forward to Nextra. The token is passed to `cloudflared` through its environment, not its command line.
+- For a stable named tunnel, set both `CLOUDFLARED_TUNNEL_TOKEN` and `SHARE_BASE_URL`; configure the tunnel's public hostname to forward to Nextra. The token is passed to `cloudflared` through its environment, not its command line. Nextra reports the named tunnel as active only once `cloudflared` logs a registered tunnel connection; if that does not happen within `PUBLIC_TUNNEL_TIMEOUT_MS`, `cloudflared` is stopped, the tunnel shows an error and Nextra retries.
 - Or set `SHARE_BASE_URL` if you already have your own reverse proxy or public domain.
 - Without either, the app stays local/LAN only.
 
