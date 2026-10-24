@@ -456,7 +456,7 @@ function loadRelayWithFakeSpawn() {
     delete require.cache[modulePath];
     try {
         const mod = require(modulePath);
-        return { FFmpegRelay: mod.FFmpegRelay, relays, probes };
+        return { FFmpegRelay: mod.FFmpegRelay, getNvencProbeStatus: mod.getNvencProbeStatus, relays, probes };
     } finally {
         childProcess.spawn = realSpawn;
         if (previous) require.cache[modulePath] = previous;
@@ -480,8 +480,9 @@ const flush = async (rounds = 3) => {
 
 function quietLogs(t) {
     t.mock.method(console, 'log', () => {});
-    t.mock.method(console, 'warn', () => {});
     t.mock.method(console, 'error', () => {});
+    // Returned so a test can read what the relay warned about.
+    return { warn: t.mock.method(console, 'warn', () => {}) };
 }
 
 test('an owner stop() during the restart backoff keeps FFmpeg stopped (VAL-011)', async (t) => {
@@ -703,6 +704,273 @@ test('stop() and a new start() clear an unfinished burst allowance (VAL-013)', a
     fake.relays[1].stdin.writableLength = 5 * 1024 * 1024;
     assert.equal(relay.writeVideoFrame(Buffer.alloc(512), 0), false, 'the normal cap applies to the new process');
     assert.equal(relay.totalStdinDroppedBytes, 512);
+    relay.stop();
+    await flush();
+});
+
+// --- NVENC fallback (VAL-014) ----------------------------------------------
+
+// The parser's 'init' event, as the first fragment of a working process raises
+// it: from then on the process has produced output.
+function emitInit(relay) {
+    relay._parser.emit('init', { initSegment: Buffer.from('0000000866726565', 'hex') });
+}
+
+const NVENC_ONLY_FLAGS = ['-rc', '-forced-idr', '-strict_gop', '-delay', '-zerolatency', '-qmin', '-qmax', '-bf'];
+
+function usesNvenc(args) {
+    return args[args.indexOf('-c:v') + 1] === 'h264_nvenc' && args.includes('-forced-idr');
+}
+
+function usesLibx264(args) {
+    return args[args.indexOf('-c:v') + 1] === 'libx264'
+        && !args.includes('h264_nvenc')
+        && NVENC_ONLY_FLAGS.every((flag) => !args.includes(flag));
+}
+
+// A relay that already chose NVENC, as after a probe that passed.
+function createNvencRelay(fake, opts = {}) {
+    const relay = createLifecycleRelay(fake);
+    Object.assign(relay, opts);
+    relay._videoEncoder = 'h264_nvenc';
+    return relay;
+}
+
+test('the NVENC probe encodes with the options the relay runs NVENC with (VAL-014)', async (t) => {
+    quietLogs(t);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const fake = loadRelayWithFakeSpawn();
+    const relay = createLifecycleRelay(fake, { probed: false });
+    const starting = relay.start();
+    assert.equal(fake.probes.length, 1, 'the NVENC probe is running');
+    const probeArgs = fake.probes[0].args;
+    const hasPair = (args, flag, value) => args.some((arg, i) => arg === flag && args[i + 1] === value);
+
+    assert.ok(hasPair(probeArgs, '-c:v', 'h264_nvenc'));
+    assert.ok(hasPair(probeArgs, '-f', 'null'));
+    // The options the audit named, as the probe must pass them.
+    for (const [flag, value] of [
+        ['-preset', 'p5'], ['-tune', 'll'], ['-rc', 'cbr'], ['-zerolatency', '1'], ['-bf', '0'],
+        ['-forced-idr', '1'], ['-strict_gop', '1'], ['-delay', '0'],
+    ]) {
+        assert.ok(hasPair(probeArgs, flag, value), `the probe passes ${flag} ${value}`);
+    }
+
+    // And whatever else the runtime command passes to the encoder: a flag added
+    // there without the probe knowing is the defect this guards against.
+    const runtime = createLifecycleRelay(fake);
+    runtime._videoEncoder = 'h264_nvenc';
+    const runtimeArgs = runtime._buildArgs();
+    const encoderArgs = runtimeArgs.slice(runtimeArgs.indexOf('-c:v'), runtimeArgs.indexOf('-an'));
+    assert.equal(encoderArgs[1], 'h264_nvenc');
+    const rateValues = new Set(['-b:v', '-maxrate', '-bufsize']);
+    for (let i = 0; i < encoderArgs.length; i += 2) {
+        const flag = encoderArgs[i];
+        if (rateValues.has(flag)) assert.ok(probeArgs.includes(flag), `the probe sets ${flag}`);
+        else assert.ok(hasPair(probeArgs, flag, encoderArgs[i + 1]), `the probe passes ${flag} ${encoderArgs[i + 1]}`);
+    }
+
+    // Let the start finish: the probe passes, so this relay runs NVENC.
+    for (let i = 0; i < 3; i += 1) {
+        for (const probe of fake.probes) probe.exit(0, null);
+        await flush();
+    }
+    await starting;
+    assert.ok(usesNvenc(fake.relays[0].args));
+    relay.stop();
+    await flush();
+});
+
+test('an NVENC process that exits before any output is replaced by libx264 and the switch is free (VAL-014)', async (t) => {
+    const { warn } = quietLogs(t);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const fake = loadRelayWithFakeSpawn();
+    const relay = createLifecycleRelay(fake, { probed: false });
+
+    // The probe passes, so the relay picks NVENC; the real run then fails (a
+    // session limit, a driver reset, an option this build rejects).
+    const starting = relay.start();
+    fake.probes[0].exit(0, null);
+    await flush();
+    fake.probes[1].exit(1, null);
+    await flush();
+    await starting;
+    assert.equal(fake.relays.length, 1);
+    assert.ok(usesNvenc(fake.relays[0].args), 'the first process runs NVENC');
+
+    fake.relays[0].exit(1, null);
+    assert.equal(relay.restartCount, 0, 'the one switch to libx264 is not charged to the restart budget');
+    t.mock.timers.tick(1000);
+    await flush();
+
+    assert.equal(fake.relays.length, 2, 'the relay restarts');
+    assert.ok(usesLibx264(fake.relays[1].args), 'the restart runs libx264 with no NVENC options');
+    assert.equal(relay.running, true);
+    assert.ok(
+        warn.mock.calls.some((call) => /LIFE01/.test(String(call.arguments[0])) && /libx264/.test(String(call.arguments[0]))),
+        'a warning names the switch',
+    );
+    // The process-wide probe is left alone: no probe runs again.
+    assert.equal(fake.probes.length, 2);
+    assert.equal(fake.getNvencProbeStatus().state, 'available');
+    relay.stop();
+    await flush();
+});
+
+test('failures after the switch to libx264 use the restart budget and stop at the cap (VAL-014)', async (t) => {
+    quietLogs(t);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const fake = loadRelayWithFakeSpawn();
+    const relay = createNvencRelay(fake);
+    const errors = [];
+    relay.on('error', (err) => errors.push(err));
+    const originalCap = config.FALLBACK_RESTART_CAP;
+    config.FALLBACK_RESTART_CAP = 1;
+    try {
+        await relay.start();
+        assert.ok(usesNvenc(fake.relays[0].args));
+        fake.relays[0].exit(1, null);
+        t.mock.timers.tick(1000);
+        await flush();
+        assert.equal(fake.relays.length, 2);
+        assert.ok(usesLibx264(fake.relays[1].args));
+        assert.equal(relay.restartCount, 0);
+
+        // libx264 fails: an ordinary restart, charged to the budget.
+        fake.relays[1].exit(1, null);
+        assert.equal(relay.restartCount, 1);
+        t.mock.timers.tick(1000);
+        await flush();
+        assert.equal(fake.relays.length, 3);
+        assert.ok(usesLibx264(fake.relays[2].args), 'libx264 stays; there is no way back to NVENC');
+
+        fake.relays[2].exit(1, null);
+        t.mock.timers.tick(1000);
+        await flush();
+    } finally {
+        config.FALLBACK_RESTART_CAP = originalCap;
+    }
+
+    assert.equal(fake.relays.length, 3, 'no spawn past the cap');
+    assert.equal(relay.restartCount, 2);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /restart cap \(1\) reached/);
+    assert.equal(relay.running, false);
+});
+
+test('a libx264 failure, a clean exit and a pass-through relay keep the existing restart behaviour (VAL-014)', async (t) => {
+    quietLogs(t);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const fake = loadRelayWithFakeSpawn();
+
+    // libx264 failing before output: restarted on the budget, still libx264.
+    let relay = createLifecycleRelay(fake);
+    await relay.start();
+    fake.relays[0].exit(1, null);
+    assert.equal(relay.restartCount, 1);
+    t.mock.timers.tick(1000);
+    await flush();
+    assert.equal(fake.relays.length, 2);
+    assert.ok(usesLibx264(fake.relays[1].args));
+    relay.stop();
+    await flush();
+
+    // A clean exit of an NVENC process is not an encoder failure.
+    relay = createNvencRelay(fake);
+    await relay.start();
+    fake.relays[2].exit(0, null);
+    assert.equal(relay.restartCount, 1);
+    t.mock.timers.tick(1000);
+    await flush();
+    assert.equal(fake.relays.length, 4);
+    assert.ok(usesNvenc(fake.relays[3].args), 'a code-0 exit keeps NVENC');
+    relay.stop();
+    await flush();
+
+    // A relay that passes the source through does not encode, so a failure
+    // says nothing about NVENC: it restarts as before and keeps its encoder.
+    relay = createNvencRelay(fake, { videoCopy: true });
+    await relay.start();
+    assert.equal(fake.relays[4].args[fake.relays[4].args.indexOf('-c:v') + 1], 'copy');
+    fake.relays[4].exit(1, null);
+    assert.equal(relay.restartCount, 1);
+    t.mock.timers.tick(1000);
+    await flush();
+    assert.equal(fake.relays.length, 6);
+    assert.equal(fake.relays[5].args[fake.relays[5].args.indexOf('-c:v') + 1], 'copy');
+    assert.equal(relay._videoEncoder, 'h264_nvenc');
+    relay.stop();
+    await flush();
+});
+
+test('an owner stop() during the encoder switch keeps FFmpeg stopped (VAL-014, VAL-011)', async (t) => {
+    quietLogs(t);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const fake = loadRelayWithFakeSpawn();
+    const relay = createNvencRelay(fake);
+
+    await relay.start();
+    fake.relays[0].exit(1, null);
+    t.mock.timers.tick(500);
+    relay.stop();
+    t.mock.timers.tick(5000);
+    await flush();
+    assert.equal(fake.relays.length, 1, 'no FFmpeg may be spawned after the owner stopped the relay');
+    assert.equal(relay.running, false);
+
+    // The owner's stop() from an exit listener cancels the switch as well.
+    const second = createNvencRelay(fake);
+    second.on('exit', () => second.stop());
+    await second.start();
+    fake.relays[1].exit(1, null);
+    t.mock.timers.tick(5000);
+    await flush();
+    assert.equal(fake.relays.length, 2);
+    assert.equal(second.running, false);
+});
+
+test('two NVENC failures in a row after output switch the relay to libx264; a healthy run in between resets the count (VAL-014)', async (t) => {
+    quietLogs(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+    const fake = loadRelayWithFakeSpawn();
+
+    // The process worked (it produced its init segment) and then died, twice.
+    let relay = createNvencRelay(fake);
+    await relay.start();
+    emitInit(relay);
+    fake.relays[0].exit(1, null);
+    assert.equal(relay.restartCount, 1);
+    t.mock.timers.tick(1000);
+    await flush();
+    assert.equal(fake.relays.length, 2);
+    assert.ok(usesNvenc(fake.relays[1].args), 'one failure after output retries NVENC');
+
+    emitInit(relay);
+    fake.relays[1].exit(null, 'SIGSEGV');
+    assert.equal(relay.restartCount, 2, 'this restart is an ordinary one');
+    t.mock.timers.tick(1000);
+    await flush();
+    assert.equal(fake.relays.length, 3);
+    assert.ok(usesLibx264(fake.relays[2].args), 'the second failure in a row switches to libx264');
+    relay.stop();
+    await flush();
+
+    // With a healthy minute between the two failures they are not in a row.
+    relay = createNvencRelay(fake);
+    await relay.start();
+    emitInit(relay);
+    fake.relays[3].exit(1, null);
+    t.mock.timers.tick(1000);
+    await flush();
+    assert.equal(fake.relays.length, 5);
+    assert.ok(usesNvenc(fake.relays[4].args));
+    emitInit(relay);
+    t.mock.timers.tick(60_000);
+    fake.relays[4].exit(1, null);
+    t.mock.timers.tick(1000);
+    await flush();
+    assert.equal(fake.relays.length, 6);
+    assert.ok(usesNvenc(fake.relays[5].args), 'a failure after a healthy run starts the count again');
     relay.stop();
     await flush();
 });
