@@ -98,6 +98,68 @@ async function joinAndWatchRelay(viewerPage, code) {
     ))).toBe(true);
 }
 
+// Keeps every MediaRecorder the host page makes, so a test can read the relay
+// format and stand in for a recorder failure. Without MP4 the host records VP8,
+// as a browser without MP4 recording does.
+async function trackHostRecorders(page, { recordMp4 = true } = {}) {
+    await page.addInitScript((allowMp4) => {
+        const NativeMediaRecorder = window.MediaRecorder;
+        window.__nextraRecorders = [];
+        window.MediaRecorder = class TrackedMediaRecorder extends NativeMediaRecorder {
+            static isTypeSupported(type) {
+                if (!allowMp4 && String(type).startsWith('video/mp4')) return false;
+                return NativeMediaRecorder.isTypeSupported(type);
+            }
+
+            constructor(...args) {
+                super(...args);
+                window.__nextraRecorders.push(this);
+            }
+        };
+    }, recordMp4);
+}
+
+// Holds what the viewer's WebSocket receives and hands it over in one task, as
+// a connection that stalls and then catches up does.
+async function installHeldWebSocket(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const held = [];
+        let holding = false;
+        window.__nextraHoldSocket = () => { holding = true; };
+        window.__nextraReleaseSocket = () => {
+            holding = false;
+            const batch = held.splice(0);
+            for (const deliver of batch) deliver();
+            return batch.length;
+        };
+        window.WebSocket = class HeldWebSocket extends NativeWebSocket {
+            get onmessage() {
+                return super.onmessage;
+            }
+
+            set onmessage(handler) {
+                super.onmessage = handler && ((event) => {
+                    if (holding) {
+                        held.push(() => handler.call(this, event));
+                        return;
+                    }
+                    handler.call(this, event);
+                });
+            }
+        };
+    });
+}
+
+async function getRoomByCode(request, code) {
+    const metrics = await (await request.get('/api/metrics')).json();
+    return metrics.rooms.list.find((room) => room.code === code) || null;
+}
+
+async function videoTime(page) {
+    return page.locator('video').evaluate((video) => video.currentTime);
+}
+
 // Stop Sharing only asks for confirmation while viewers are still connected.
 async function confirmStopIfPrompted(hostPage) {
     const confirmStopButton = hostPage.getByRole('dialog').getByRole('button', { name: 'Stop Sharing' });
@@ -433,6 +495,80 @@ test('delayed relay-first viewers select one fresh recorder generation and clean
 
     await secondViewerContext.close();
     await firstViewerContext.close();
+    await hostContext.close();
+});
+
+// A new recorder generation reaches relay viewers that are already playing.
+// The host falls back from MP4 to VP8 when the server cannot frame its MP4
+// (relay-mp4-failed) or the MP4 recorder fails; the viewer's SourceBuffer was
+// made for MP4.
+test('a playing relay viewer follows the host recorder from MP4 to VP8', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await trackHostRecorders(hostPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(viewerPage, code);
+    const relayMimeType = () => hostPage.evaluate(() => window.__nextraRecorders.at(-1)?.mimeType || '');
+    test.skip(!(await relayMimeType()).startsWith('video/mp4'), 'the host browser does not record MP4');
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
+    const mp4Generation = (await getRoomByCode(request, code)).mediaGeneration;
+
+    // HostView's recorder.onerror for MP4: setRelayMp4Failed(true), and the
+    // recorder restarts on VP8.
+    await hostPage.evaluate(() => window.__nextraRecorders.at(-1).dispatchEvent(new Event('error')));
+    await expect.poll(async () => (await getRoomByCode(request, code))?.mediaGeneration || 0).toBeGreaterThan(mp4Generation);
+    expect(await relayMimeType()).toMatch(/^video\/webm/);
+
+    const atSwitch = await videoTime(viewerPage);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atSwitch + 3);
+    expect(await viewerPage.locator('video').evaluate((video) => video.error?.code ?? null)).toBeNull();
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// MediaRecorder timeslices end inside a WebM element, so the chunk after one
+// finishes it. A viewer that is behind still holds old-generation chunks when
+// the new generation's init arrives, and drops them.
+test('a relay viewer that is behind keeps playing across a VP8 recorder restart', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await trackHostRecorders(hostPage, { recordMp4: false });
+    await installHeldWebSocket(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(viewerPage, code);
+    expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1)?.mimeType || '')).toMatch(/^video\/webm/);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
+    const firstGeneration = (await getRoomByCode(request, code)).mediaGeneration;
+
+    await viewerPage.evaluate(() => window.__nextraHoldSocket());
+    await hostPage.waitForTimeout(1_200);
+    // A frame-rate change restarts the recorder: a new generation.
+    const frameRate = hostPage.getByRole('group', { name: 'Frame rate' });
+    await frameRate.locator('button[aria-pressed="false"]').first().click();
+    await expect.poll(async () => (await getRoomByCode(request, code))?.mediaGeneration || 0).toBeGreaterThan(firstGeneration);
+    await hostPage.waitForTimeout(1_000);
+    expect(await viewerPage.evaluate(() => window.__nextraReleaseSocket())).toBeGreaterThan(4);
+
+    const atRelease = await videoTime(viewerPage);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atRelease + 3);
+    expect(await viewerPage.locator('video').evaluate((video) => video.error?.code ?? null)).toBeNull();
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
     await hostContext.close();
 });
 

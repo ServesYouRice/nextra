@@ -10,6 +10,7 @@ import {
     canPlayRelayFormat,
     createRelayMediaSource,
     isRelayPlaybackUnsupported,
+    prepareSourceBufferForGeneration,
 } from './lib/watchPlaybackMode.mjs';
 import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
 import { createLifecycleController } from './lib/lifecycleController.mjs';
@@ -416,6 +417,8 @@ export default function WatchView({ initialCode = '' }) {
         let initResultData = null;
         let liveInitPayload = null;
         let selectedGeneration = null;
+        // This attempt's SourceBuffer, once made.
+        let relaySourceBuffer = null;
         let resolveLiveInit = null;
         let firstBufferedSettled = false;
         let resolveFirstBuffered = null;
@@ -502,6 +505,16 @@ export default function WatchView({ initialCode = '' }) {
                 mediaDebugLog(`[Nextra] media-init received, flushing ${chunkQueueRef.current.length} stale chunks`);
                 chunkQueueRef.current.length = 0;
                 queuedBytesRef.current = 0;
+            }
+            // Playing already: the SourceBuffer must start over at the new init.
+            if (relaySourceBuffer && !prepareSourceBufferForGeneration(relaySourceBuffer, mediaSourceRef.current, {
+                fromMimeType: mimeType,
+                toMimeType: payload.mimeType,
+            })) {
+                failRelayGeneration?.(new Error(canPlayRelayFormat(payload.mimeType)
+                    ? 'Relay playback could not follow the new stream and must be restarted.'
+                    : RELAY_PLAYBACK_UNSUPPORTED_MESSAGE));
+                return;
             }
             selectedGeneration = payload.generation;
             liveInitPayload = payload;
@@ -634,6 +647,7 @@ export default function WatchView({ initialCode = '' }) {
 
             const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
             sourceBufferRef.current = sourceBuffer;
+            relaySourceBuffer = sourceBuffer;
             try {
                 if (sourceBuffer.mode === 'segments') {
                     sourceBuffer.mode = 'sequence';
