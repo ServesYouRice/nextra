@@ -377,6 +377,158 @@ test('OBS rollback reports a rejected restore and continues remaining steps', as
     assert.deepEqual(failures, ['SetProfileParameter: restore denied']);
 });
 
+test('a mutation whose response times out after dispatch is still rolled back', async () => {
+    const received = [];
+    let videoWrites = 0;
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        received.push({ requestType: request.requestType, requestData: request.requestData });
+        if (request.requestType === 'GetVideoSettings') {
+            queueMicrotask(() => ws.respond(request, { outputWidth: 1920, outputHeight: 1080 }));
+            return;
+        }
+        if (request.requestType === 'SetVideoSettings') {
+            videoWrites += 1;
+            // The first write is applied by OBS but its answer never arrives in
+            // time; the restore that follows is answered normally.
+            if (videoWrites === 1) return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    });
+    const { withObsConnection, createObsConfigurationTransaction } = await obsWebSocketModule;
+    let dispatchError = null;
+    let failures = null;
+
+    const result = await withObsConnection('', async (sendRequest, done) => {
+        const transaction = createObsConfigurationTransaction(sendRequest);
+        try {
+            await transaction.request('SetVideoSettings', { outputWidth: 1280, outputHeight: 720 });
+        } catch (error) {
+            dispatchError = error;
+        }
+        failures = await transaction.rollback();
+        done({ success: true, message: 'checked' });
+    }, connectionOptions(WebSocketImpl, { requestTimeoutMs: 20 }));
+
+    assert.equal(result.success, true);
+    assert.match(dispatchError?.message ?? '', /SetVideoSettings timed out after 20ms/);
+    assert.deepEqual(failures, []);
+    assert.deepEqual(received.filter((r) => r.requestType === 'SetVideoSettings'), [
+        { requestType: 'SetVideoSettings', requestData: { outputWidth: 1280, outputHeight: 720 } },
+        { requestType: 'SetVideoSettings', requestData: { outputWidth: 1920, outputHeight: 1080 } },
+    ]);
+});
+
+test('a mutation that throws after dispatch is journaled once', async () => {
+    const calls = [];
+    const sendRequest = async (requestType, requestData) => {
+        calls.push({ requestType, requestData });
+        if (requestType === 'GetStreamServiceSettings') {
+            return {
+                requestStatus: { result: true },
+                responseData: { streamServiceType: 'rtmp_custom', streamServiceSettings: { server: 'rtmp://previous/live' } },
+            };
+        }
+        if (requestType === 'SetStreamServiceSettings' && calls.filter((c) => c.requestType === requestType).length === 1) {
+            throw new Error('OBS request SetStreamServiceSettings timed out after 5000ms.');
+        }
+        return { requestStatus: { result: true } };
+    };
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(sendRequest);
+
+    await assert.rejects(
+        transaction.request('SetStreamServiceSettings', { streamServiceType: 'whip_custom' }),
+        /timed out after 5000ms/,
+    );
+    assert.deepEqual(await transaction.rollback(), []);
+
+    const writes = calls.filter((c) => c.requestType === 'SetStreamServiceSettings');
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes[1].requestData, {
+        streamServiceType: 'rtmp_custom',
+        streamServiceSettings: { server: 'rtmp://previous/live' },
+    });
+});
+
+test('a mutation OBS explicitly rejects is not journaled', async () => {
+    const calls = [];
+    const sendRequest = async (requestType, requestData) => {
+        calls.push({ requestType, requestData });
+        if (requestType === 'GetVideoSettings') {
+            return { requestStatus: { result: true }, responseData: { outputWidth: 1920, outputHeight: 1080 } };
+        }
+        if (requestType === 'SetVideoSettings') {
+            return { requestStatus: { result: false, comment: 'denied' } };
+        }
+        return { requestStatus: { result: true } };
+    };
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(sendRequest);
+
+    const response = await transaction.request('SetVideoSettings', { outputWidth: 1280, outputHeight: 720 });
+    assert.equal(response.requestStatus.result, false);
+    assert.deepEqual(await transaction.rollback(), []);
+    assert.equal(calls.filter((c) => c.requestType === 'SetVideoSettings').length, 1);
+});
+
+test('a mutation that was never dispatched because its snapshot failed is not journaled', async () => {
+    const calls = [];
+    const sendRequest = async (requestType, requestData) => {
+        calls.push({ requestType, requestData });
+        if (requestType === 'GetVideoSettings') throw new Error('OBS request GetVideoSettings timed out after 5000ms.');
+        return { requestStatus: { result: true } };
+    };
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(sendRequest);
+
+    await assert.rejects(transaction.request('SetVideoSettings', { outputWidth: 1280 }), /GetVideoSettings timed out/);
+    assert.deepEqual(await transaction.rollback(), []);
+    assert.deepEqual(calls.map((c) => c.requestType), ['GetVideoSettings']);
+});
+
+test('rolling back an unset profile parameter sends null so OBS deletes it', async () => {
+    const received = [];
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        received.push({ requestType: request.requestType, requestData: request.requestData });
+        if (request.requestType === 'GetProfileParameter') {
+            const { parameterName } = request.requestData;
+            // OBS answers null for a parameter with no user value, and a string for one that has.
+            const parameterValue = parameterName === 'Encoder' ? null : 'Full';
+            queueMicrotask(() => ws.respond(request, { parameterValue, defaultParameterValue: 'default' }));
+            return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    });
+    const { withObsConnection, createObsConfigurationTransaction } = await obsWebSocketModule;
+    let failures = null;
+
+    const result = await withObsConnection('', async (sendRequest, done) => {
+        const transaction = createObsConfigurationTransaction(sendRequest);
+        await transaction.request('SetProfileParameter', {
+            parameterCategory: 'AdvOut', parameterName: 'Encoder', parameterValue: 'obs_x264',
+        });
+        await transaction.request('SetProfileParameter', {
+            parameterCategory: 'Video', parameterName: 'ColorRange', parameterValue: 'Partial',
+        });
+        failures = await transaction.rollback();
+        done({ success: true, message: 'checked' });
+    }, connectionOptions(WebSocketImpl));
+
+    assert.equal(result.success, true);
+    assert.deepEqual(failures, []);
+    const restores = received.filter((r) => r.requestType === 'SetProfileParameter').slice(2);
+    assert.deepEqual(restores, [
+        {
+            requestType: 'SetProfileParameter',
+            requestData: { parameterCategory: 'Video', parameterName: 'ColorRange', parameterValue: 'Full' },
+        },
+        {
+            requestType: 'SetProfileParameter',
+            requestData: { parameterCategory: 'AdvOut', parameterName: 'Encoder', parameterValue: null },
+        },
+    ]);
+});
+
 test('configureObsStream restores the previous service after a later validation failure', async () => {
     const serviceWrites = [];
     const WebSocketImpl = fakeObsWebSocket(withStream((ws, request) => {

@@ -406,8 +406,9 @@ function successfulResponse(response) {
 
 /**
  * Wrap mutating OBS requests with a snapshot of the value they replace. The
- * resulting rollback runs successful mutations in reverse order and deliberately
- * uses the raw request function so rollback operations are not recorded again.
+ * resulting rollback runs successful mutations, and ones whose answer never
+ * arrived, in reverse order and deliberately uses the raw request function so
+ * rollback operations are not recorded again.
  */
 export function createObsConfigurationTransaction(sendRequest) {
     const rollbackSteps = [];
@@ -442,11 +443,15 @@ export function createObsConfigurationTransaction(sendRequest) {
             };
             const previous = await sendRequest('GetProfileParameter', identity);
             if (!successfulResponse(previous)) return null;
+            // OBS answers null for a parameter the user never set, and reads its
+            // default instead. Sending null back deletes the parameter again;
+            // an empty string would turn the default into an explicit empty value.
+            const previousValue = previous.responseData?.parameterValue;
             return {
                 requestType: 'SetProfileParameter',
                 requestData: {
                     ...identity,
-                    parameterValue: String(previous.responseData?.parameterValue ?? ''),
+                    parameterValue: normalizeProfileValue(previousValue),
                 },
             };
         }
@@ -482,7 +487,18 @@ export function createObsConfigurationTransaction(sendRequest) {
             };
         }
 
-        const response = await sendRequest(requestType, requestData);
+        let response;
+        try {
+            response = await sendRequest(requestType, requestData);
+        } catch (error) {
+            // A request that timed out may still be applied by OBS after the
+            // deadline, so the state captured before it was sent is journaled
+            // and a rollback restores it. Restoring a value that never changed
+            // is harmless; leaving an applied change in place is not.
+            if (inverse) rollbackSteps.push(inverse);
+            throw error;
+        }
+        // OBS answered that it refused the request: nothing changed.
         if (!successfulResponse(response)) return response;
 
         if (inverse) {
