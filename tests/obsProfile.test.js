@@ -8,6 +8,7 @@ const {
     findProfileDir,
     listObsVideoEncoders,
     obsConfigRoots,
+    restoreStreamEncoderSettings,
     sanitizeEncoderSettings,
     writeStreamEncoderSettings,
 } = require('../lib/obsProfile');
@@ -45,7 +46,8 @@ test('encoder settings are written where OBS reads them, keeping what else is th
 
     const result = writeStreamEncoderSettings({ profileName: 'Untitled', settings: nvenc }, options);
 
-    assert.deepEqual(result, { ok: true, path: file });
+    // `previous` (how to put the file back) is covered by the restore tests below.
+    assert.deepEqual(result, { ok: true, path: file, previous: result.previous });
     assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { ...nvenc, device: 1 });
     assert.deepEqual(fs.readdirSync(path.join(root, 'Untitled')).sort(), ['basic.ini', 'streamEncoder.json']);
 });
@@ -70,6 +72,127 @@ test('nothing is written when OBS is not on this machine or the settings are not
     assert.deepEqual(writeStreamEncoderSettings({ profileName: 'Untitled', settings: nvenc }, { env: {}, platform: 'win32' }), { ok: false, reason: 'profile-not-found' });
     assert.deepEqual(writeStreamEncoderSettings({ profileName: 'Untitled', settings: { bitrate: 'lots' } }, options), { ok: false, reason: 'invalid-settings' });
     assert.equal(fs.existsSync(file), false);
+});
+
+// A write reports how to put the file back (`previous`); the restore replaces the
+// file with the bytes it held, which a merge of old values could not do.
+const restoreOf = (profileName, previous, options) => restoreStreamEncoderSettings({ profileName, previous }, options);
+
+test('a restore puts the settings file back byte for byte, dropping the keys the write added', (t) => {
+    const { options, root } = fakeObsConfig(t, { Untitled: 'Untitled' });
+    const dir = path.join(root, 'Untitled');
+    const file = path.join(dir, 'streamEncoder.json');
+    // OBS's own layout: CRLF, indentation, keys this app never sets.
+    const original = '{\r\n  "rate_control": "VBR",\r\n  "device": 1,\r\n  "lookahead": true,\r\n  "custom": { "a": [1, 2] }\r\n}\r\n';
+    fs.writeFileSync(file, original);
+
+    const written = writeStreamEncoderSettings({ profileName: 'Untitled', settings: nvenc }, options);
+    assert.equal(written.ok, true);
+    assert.ok(written.previous, 'the write reports how to put the file back');
+    assert.equal(written.previous.existed, true);
+    assert.ok(!JSON.stringify(written.previous).includes(dir), 'where the file is stays on the server');
+    assert.notEqual(fs.readFileSync(file, 'utf8'), original);
+
+    assert.deepEqual(restoreOf('Untitled', written.previous, options), { ok: true, path: file });
+    assert.equal(fs.readFileSync(file, 'utf8'), original);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['basic.ini', 'streamEncoder.json']);
+});
+
+test('a restore removes a settings file that did not exist before the write', (t) => {
+    const { options, root } = fakeObsConfig(t, { Untitled: 'Untitled' });
+    const dir = path.join(root, 'Untitled');
+
+    const written = writeStreamEncoderSettings({ profileName: 'Untitled', settings: nvenc }, options);
+    assert.equal(written.ok, true);
+    assert.equal(written.previous?.existed, false);
+    assert.ok(fs.existsSync(path.join(dir, 'streamEncoder.json')));
+
+    assert.equal(restoreOf('Untitled', written.previous, options).ok, true);
+    assert.deepEqual(fs.readdirSync(dir), ['basic.ini']);
+});
+
+test('a restore also brings back a settings file that was not valid JSON or text', (t) => {
+    const { options, root } = fakeObsConfig(t, { Untitled: 'Untitled' });
+    const file = path.join(root, 'Untitled', 'streamEncoder.json');
+    for (const original of [Buffer.from('{not json'), Buffer.from([0xff, 0xfe, 0x7b, 0x00, 0x80]), Buffer.from('[1, 2, 3]'), Buffer.alloc(0)]) {
+        fs.writeFileSync(file, original);
+        const written = writeStreamEncoderSettings({ profileName: 'Untitled', settings: nvenc }, options);
+        assert.equal(written.ok, true);
+        assert.ok(written.previous, `previous for ${JSON.stringify(original.toString('latin1'))}`);
+
+        assert.equal(restoreOf('Untitled', written.previous, options).ok, true);
+        assert.ok(fs.readFileSync(file).equals(original), `${JSON.stringify(original.toString('latin1'))} is back`);
+    }
+});
+
+test('two writes in a row are taken back newest first to the file as it was', (t) => {
+    const { options, root } = fakeObsConfig(t, { Untitled: 'Untitled' });
+    const file = path.join(root, 'Untitled', 'streamEncoder.json');
+    fs.writeFileSync(file, '{"device":1}');
+
+    const first = writeStreamEncoderSettings({ profileName: 'Untitled', settings: { bitrate: 6000 } }, options);
+    const afterFirst = fs.readFileSync(file, 'utf8');
+    const second = writeStreamEncoderSettings({ profileName: 'Untitled', settings: { bitrate: 9000, bf: 0 } }, options);
+    assert.ok(first.previous && second.previous);
+
+    assert.equal(restoreOf('Untitled', second.previous, options).ok, true);
+    assert.equal(fs.readFileSync(file, 'utf8'), afterFirst);
+    assert.equal(restoreOf('Untitled', first.previous, options).ok, true);
+    assert.equal(fs.readFileSync(file, 'utf8'), '{"device":1}');
+});
+
+test('a restore works once, for the profile that was written, and never for contents the page sends', (t) => {
+    const { options, root } = fakeObsConfig(t, { Untitled: 'Untitled', Other: 'Other' });
+    const file = path.join(root, 'Untitled', 'streamEncoder.json');
+    const otherFile = path.join(root, 'Other', 'streamEncoder.json');
+    fs.writeFileSync(otherFile, '{"device":2}');
+    fs.writeFileSync(file, '{"device":1}');
+    const written = writeStreamEncoderSettings({ profileName: 'Untitled', settings: nvenc }, options);
+    assert.ok(written.previous);
+    const afterWrite = fs.readFileSync(file, 'utf8');
+
+    // Another profile, one that is not there, and a made-up or reshaped request change nothing.
+    assert.deepEqual(restoreOf('Other', written.previous, options), { ok: false, reason: 'restore-unavailable' });
+    assert.deepEqual(restoreOf('Elsewhere', written.previous, options), { ok: false, reason: 'profile-not-found' });
+    assert.deepEqual(restoreOf('Untitled', { ...written.previous, restoreId: 'f'.repeat(32) }, options), { ok: false, reason: 'restore-unavailable' });
+    for (const previous of [undefined, null, 'abc', 7, [], {}, { restoreId: 5 }, { restoreId: '../../x' }, { restoreId: 'F'.repeat(32) },
+        { existed: false, contents: { ffmpeg_opts: '-f lavfi' } }, { existed: true, bytes: '{"x":1}' }]) {
+        assert.deepEqual(restoreOf('Untitled', previous, options), { ok: false, reason: 'invalid-restore' }, JSON.stringify(previous));
+    }
+    assert.equal(fs.readFileSync(file, 'utf8'), afterWrite);
+    assert.equal(fs.readFileSync(otherFile, 'utf8'), '{"device":2}');
+
+    assert.equal(restoreOf('Untitled', written.previous, options).ok, true);
+    assert.equal(fs.readFileSync(file, 'utf8'), '{"device":1}');
+    // It is spent: the file is not rewound a second time over what OBS or the user did since.
+    fs.writeFileSync(file, '{"device":3}');
+    assert.deepEqual(restoreOf('Untitled', written.previous, options), { ok: false, reason: 'restore-unavailable' });
+    assert.equal(fs.readFileSync(file, 'utf8'), '{"device":3}');
+});
+
+test('a restore is only kept for a while', (t) => {
+    const { options, root } = fakeObsConfig(t, { Untitled: 'Untitled' });
+    const file = path.join(root, 'Untitled', 'streamEncoder.json');
+    fs.writeFileSync(file, '{"device":1}');
+    let clock = 1_000_000;
+    const timed = { ...options, now: () => clock };
+
+    const written = writeStreamEncoderSettings({ profileName: 'Untitled', settings: nvenc }, timed);
+    clock += 60 * 60 * 1000;
+
+    assert.deepEqual(restoreOf('Untitled', written.previous, timed), { ok: false, reason: 'restore-unavailable' });
+    assert.notEqual(fs.readFileSync(file, 'utf8'), '{"device":1}');
+});
+
+test('a settings file too large to keep is written, and reported as not restorable', (t) => {
+    const { options, root } = fakeObsConfig(t, { Untitled: 'Untitled' });
+    const file = path.join(root, 'Untitled', 'streamEncoder.json');
+    fs.writeFileSync(file, JSON.stringify({ padding: 'x'.repeat(400 * 1024) }));
+
+    const written = writeStreamEncoderSettings({ profileName: 'Untitled', settings: nvenc }, options);
+
+    assert.equal(written.ok, true);
+    assert.equal(written.previous, null);
 });
 
 test('only known settings with sane values are accepted', () => {

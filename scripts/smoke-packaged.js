@@ -4,8 +4,9 @@
 // set against a packaged executable on both Windows and macOS: readiness, the
 // static shell, the Socket.IO handshake, compliance artifacts, the
 // mediasoup-worker-kill recovery path, the decoded-frame Playwright flow,
-// graceful shutdown, and leftover-process cleanup compared to a pre-launch
-// baseline so unrelated pre-existing processes never fail the run.
+// graceful shutdown (the launched executable exits with code 0 and leaves no
+// process behind), and a cleanup that kills only the processes this run owns:
+// never one that ran before the launch, nor another instance started meanwhile.
 //
 // Invoked by .github/workflows/ci.yml (windows-package) and
 // .github/workflows/release.yml (package-smoke).
@@ -36,16 +37,21 @@ const childEnv = {
     LOCAL_HTTPS: 'false',
     BIND_HOST: '127.0.0.1',
     WORKER_RECOVERY_MIN_UPTIME_SECONDS: '0',
+    // The recovery and shutdown stages test Nextra's own recovery, whose replacement runs as a
+    // child of the original server, inside the tree this run owns. A runner environment that
+    // declares a supervisor would make the worker kill end the server with code 1 instead.
+    EXTERNAL_SUPERVISOR: 'false',
 };
 
-// caxa unpacks a packaged executable under a "caxa/applications/nextra-<id>"
-// cache directory and runs it from there on both platforms.
-const CAXA_PATTERN = /[\\/]caxa[\\/]applications[\\/]nextra-/;
-// The extraction itself, <tmp>/caxa/applications/nextra-<id>/<attempt>. The server the caxa
-// stub starts and the replacement that server spawns from process.execPath both run from it.
+// caxa unpacks a packaged executable under a "caxa/applications/nextra-<id>/<attempt>" cache
+// directory and runs it from there on both platforms. The server the caxa stub starts and the
+// replacement that server spawns from process.execPath both run from it.
 const CAXA_APPLICATION_DIRECTORY_PATTERN = /[\\/]caxa[\\/]applications[\\/](nextra-[^\\/\s"']+)(?:[\\/](\d+))?/i;
 const CLOUDFLARED_PATTERN = /(^|[\\/])cloudflared(\.exe)?(\s|$)/i;
-const PROCESS_LIST_MAX_BUFFER = 8 * 1024 * 1024;
+// A list cut off at this size is an error (ENOBUFS), never a shorter list.
+const PROCESS_LIST_MAX_BUFFER = 64 * 1024 * 1024;
+// How long cleanup waits for the launched child to exit after SIGKILL.
+const CHILD_KILL_TIMEOUT_MS = 5000;
 
 // One HTTP call, bounded by timeoutMs from the request to the end of the body. fetch() resolves
 // as soon as the response headers arrive, so the body is read (read = 'json' | 'text') or
@@ -77,12 +83,29 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 5000, read = 'non
     }
 }
 
-function isConnectionRefused(err) {
+// Whether a failed fetch failed only for one of these socket error codes. undici puts the
+// socket error in `cause`, and a connection tried on several addresses in `cause.errors`.
+function causedOnlyBy(err, codes) {
     const cause = err?.cause ?? err;
-    if (Array.isArray(cause?.errors) && cause.errors.length > 0) {
-        return cause.errors.every((inner) => inner?.code === 'ECONNREFUSED');
-    }
-    return cause?.code === 'ECONNREFUSED';
+    const errors = Array.isArray(cause?.errors) && cause.errors.length > 0 ? cause.errors : [cause];
+    return errors.every((inner) => codes.includes(inner?.code));
+}
+
+function isConnectionRefused(err) {
+    return causedOnlyBy(err, ['ECONNREFUSED']);
+}
+
+// A server may close the connection of the shutdown request as it exits: with a reset, or by
+// closing it without an answer ("other side closed").
+function isClosedByServer(err) {
+    return causedOnlyBy(err, ['ECONNRESET', 'UND_ERR_SOCKET']);
+}
+
+// What a failed /healthz probe after the shutdown request says: 'down' only for a refused or
+// reset connection. Anything else, a timeout above all, is no proof that the server stopped:
+// a server that is alive but does not answer would otherwise count as stopped.
+function classifyShutdownProbeError(err) {
+    return causedOnlyBy(err, ['ECONNREFUSED']) || causedOnlyBy(err, ['ECONNRESET']) ? 'down' : 'unknown';
 }
 
 function describeError(err) {
@@ -136,35 +159,53 @@ function parsePsProcessList(stdout) {
         .filter(Boolean);
 }
 
-function listProcesses() {
-    if (process.platform === 'win32') {
+// The records in a process query's spawnSync result. Anything that shows the query did not run
+// to the end throws: an empty list would let every leftover-process check pass without checking
+// anything, and an empty baseline would protect nothing.
+function readProcessList(result, query, parse) {
+    if (result.error) {
+        throw new Error(`Process enumeration failed: ${query} did not run to the end `
+            + `(${result.error.code || result.error.message}).`, { cause: result.error });
+    }
+    if (result.status !== 0) {
+        const how = result.status === null || result.status === undefined
+            ? `was ended by ${result.signal || 'a signal'}`
+            : `exited with status ${result.status}`;
+        const stderr = String(result.stderr || '').trim();
+        throw new Error(`Process enumeration failed: ${query} ${how}${stderr ? `: ${stderr.slice(0, 500)}` : ''}.`);
+    }
+    if (!String(result.stdout || '').trim()) {
+        throw new Error(`Process enumeration failed: ${query} printed no output.`);
+    }
+    let records;
+    try {
+        records = parse(result.stdout);
+    } catch (err) {
+        throw new Error(`Process enumeration failed: the output of ${query} could not be parsed (${err.message}).`, { cause: err });
+    }
+    // The query runs while it lists, so a list that was read in full is never empty.
+    if (records.length === 0) {
+        throw new Error(`Process enumeration failed: the output of ${query} held no process records.`);
+    }
+    return records;
+}
+
+// Every process on the machine, or an error; never an empty list in place of one.
+function listProcesses({ platform = process.platform, spawnSyncImpl = spawnSync } = {}) {
+    if (platform === 'win32') {
         // Same Win32_Process query the PowerShell smoke used. CommandLine,
         // ExecutablePath, and Name are folded into one searchable string per
         // record so the platform-agnostic matchers below need only `command`.
-        const result = spawnSync('powershell.exe', [
+        const result = spawnSyncImpl('powershell.exe', [
             '-NoProfile', '-NonInteractive', '-Command',
             'Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | '
             + 'Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine | ConvertTo-Json -Compress',
         ], { encoding: 'utf8', windowsHide: true, maxBuffer: PROCESS_LIST_MAX_BUFFER });
-        if (result.status !== 0 || !result.stdout) return [];
-        try {
-            return parseWindowsProcessList(result.stdout);
-        } catch {
-            return [];
-        }
+        return readProcessList(result, 'powershell.exe (Get-CimInstance Win32_Process)', parseWindowsProcessList);
     }
 
-    const result = spawnSync('ps', ['-Ao', 'pid=,ppid=,args='], { encoding: 'utf8', maxBuffer: PROCESS_LIST_MAX_BUFFER });
-    if (result.status !== 0 || !result.stdout) return [];
-    return parsePsProcessList(result.stdout);
-}
-
-function isSmokeExecutable(record) {
-    const command = record.command || '';
-    if (CAXA_PATTERN.test(command)) return true;
-    return process.platform === 'win32'
-        ? command.toLowerCase().includes(executablePath.toLowerCase())
-        : command.includes(executablePath);
+    const result = spawnSyncImpl('ps', ['-Ao', 'pid=,ppid=,args='], { encoding: 'utf8', maxBuffer: PROCESS_LIST_MAX_BUFFER });
+    return readProcessList(result, 'ps -Ao pid=,ppid=,args=', parsePsProcessList);
 }
 
 function isCloudflared(record) {
@@ -245,6 +286,72 @@ function decideReplacementAdoption({
         return { verdict: 'unowned', reason: `PID ${pid} runs from ${where}, not the launched build's ${ownedCaxaDirectory}` };
     }
     return { verdict: 'adopt', reason: `PID ${pid} runs from the launched build's caxa extraction ${ownedCaxaDirectory}` };
+}
+
+// ---------------------------------------------------------------------------
+// The run's process tree -- the shutdown check and cleanup look only at processes this run
+// owns, never at what a process looks like: another instance of the same build runs from the
+// same caxa extraction.
+// ---------------------------------------------------------------------------
+
+// The records that belong to the run: the owned PIDs (the launched child, the server verified
+// at readiness, an adopted replacement), every process seen in the run's tree before
+// (knownProcesses, PID -> command line), and the current descendants of both. A PID stands for
+// the same process only while it runs the command line it had, so these are never the run's:
+// - a process that was running before the launch (same PID and command line as in the
+//   baseline). The baseline protects processes, not numbers, so an owned process that got the
+//   PID of a baseline process that has ended is still the run's;
+// - a known PID that now runs another command line (the PID was reused);
+// - a process holding the PID of the launched child after its exit was observed (exitedPids).
+// Their PIDs link nothing either: by parent PID, their children may belong to the new holder.
+// A PID nobody holds any more still links its children, because on Windows a process keeps
+// the PID of a parent that has exited (on POSIX it is reparented, and only knownProcesses keeps it).
+function selectCleanupTargets({
+    records = [], ownedPids = new Set(), knownProcesses = new Map(), baseline = new Map(), exitedPids = [],
+} = {}) {
+    const exited = new Set(exitedPids);
+    const isForeign = (record) => baseline.get(record.pid) === record.command
+        || (knownProcesses.has(record.pid) && knownProcesses.get(record.pid) !== record.command)
+        || exited.has(record.pid);
+    const blocked = new Set(records.filter(isForeign).map((record) => record.pid));
+    const children = new Map();
+    for (const record of records) {
+        if (blocked.has(record.pid)) continue;
+        if (!children.has(record.ppid)) children.set(record.ppid, []);
+        children.get(record.ppid).push(record.pid);
+    }
+    const tree = new Set();
+    const queue = [...ownedPids, ...knownProcesses.keys()].filter((pid) => Number.isInteger(pid) && !blocked.has(pid));
+    while (queue.length > 0) {
+        const pid = queue.shift();
+        if (tree.has(pid)) continue;
+        tree.add(pid);
+        queue.push(...(children.get(pid) || []));
+    }
+    return records.filter((record) => tree.has(record.pid) && !blocked.has(record.pid));
+}
+
+// The run's live tree in these records, each process remembered with its command line so that
+// it stays known once it is reparented or its parent's PID is reused.
+function ownedProcessTree(run, records) {
+    const tree = selectCleanupTargets({
+        records,
+        ownedPids: run.ownedPids,
+        knownProcesses: run.knownProcesses,
+        baseline: run.baseline,
+        exitedPids: run.monitor.record && Number.isInteger(run.child.pid) ? [run.child.pid] : [],
+    }).filter((record) => record.pid !== process.pid);
+    for (const record of tree) run.knownProcesses.set(record.pid, record.command);
+    return tree;
+}
+
+function describeProcesses(records) {
+    return records
+        .map((record) => {
+            const command = String(record.command || '');
+            return `${record.pid} (${command.length > 160 ? `${command.slice(0, 157)}...` : command})`;
+        })
+        .join(', ');
 }
 
 // ---------------------------------------------------------------------------
@@ -339,16 +446,23 @@ function createChildExitMonitor(child) {
 }
 
 // Everything the stages share about one launch: the child and its exit monitor, the PIDs the
-// run owns (seeded with the child's), and what ownership has been observed on the port.
+// run owns (seeded with the child's), the processes seen in its tree, what ownership has been
+// observed on the port, and the pre-launch baseline (PID -> command line).
 function createRunContext({
     child,
     baseUrl: runBaseUrl = baseUrl,
     listProcesses: listRunProcesses = listProcesses,
+    killProcess: killRunProcess = killProcess,
     runPlaywright = runPackagedPlaywright,
+    baseline = new Map(),
     readyAttempts = 60,
     readyIntervalMs = 500,
     pollIntervalMs = 250,
     recoveryTimeoutMs = 60_000,
+    // Covers the server's own 5 s forced exit, the exit of the processes around it, and the
+    // process listings that check them.
+    shutdownTimeoutMs = 15_000,
+    cleanupGraceMs = 500,
 } = {}) {
     const monitor = createChildExitMonitor(child);
     const controller = new AbortController();
@@ -359,14 +473,22 @@ function createRunContext({
         child,
         monitor,
         ownedPids: new Set(Number.isInteger(child.pid) ? [child.pid] : []),
+        knownProcesses: new Map(),
+        baseline,
         servingPid: null,
         ownership: { caxaDirectory: null, portObservedUnowned: false },
+        // Set once the shutdown stage sends its request: from then on, anything of the run
+        // still alive in cleanup survived the graceful shutdown.
+        shutdownRequested: false,
         listProcesses: listRunProcesses,
+        killProcess: killRunProcess,
         runPlaywright,
         readyAttempts,
         readyIntervalMs,
         pollIntervalMs,
         recoveryTimeoutMs,
+        shutdownTimeoutMs,
+        cleanupGraceMs,
         signal: controller.signal,
         stop: () => controller.abort(),
     };
@@ -435,6 +557,7 @@ async function verifyLaunchedServer(run) {
     run.ownedPids.add(pid);
     run.servingPid = pid;
     run.ownership.caxaDirectory = caxaApplicationDirectory(records.find((record) => record.pid === pid)?.command);
+    ownedProcessTree(run, records);
     return pid;
 }
 
@@ -490,10 +613,11 @@ async function checkMediaWorkerReplacement(run) {
         }
         const servingPid = metrics?.process?.pid;
         if (!ownedPids.has(servingPid)) {
+            const records = Number.isInteger(servingPid) ? run.listProcesses() : [];
             const decision = decideReplacementAdoption({
                 pid: servingPid,
                 ownedPids,
-                records: Number.isInteger(servingPid) ? run.listProcesses() : [],
+                records,
                 childPid: run.child.pid,
                 childExited: monitor.record !== null,
                 ownedCaxaDirectory: run.ownership.caxaDirectory,
@@ -505,6 +629,7 @@ async function checkMediaWorkerReplacement(run) {
                     + `Launched child: ${describeChildExit(monitor.record)}.`);
             }
             ownedPids.add(servingPid);
+            ownedProcessTree(run, records);
             adoptedPid = servingPid;
             console.log(`Adopted replacement server PID ${servingPid}: ${decision.reason}.`);
         }
@@ -547,22 +672,136 @@ function runPackagedPlaywright(run) {
     }
 }
 
+// The verdict on a graceful shutdown, from what the shutdown stage observed:
+// - postResult: { status } of the shutdown request, or { error } when it failed. Only a 2xx
+//   answer is accepted, or a connection the server closed as it exited, and that one only
+//   when the exit of the run's processes was then observed (the deadline did not expire).
+// - childExit: the exit monitor's record. Code 0 without a signal in the 'shutdown' phase
+//   passes, any other code or a signal fails. An exit recorded earlier, in 'recovery' or
+//   'post-recovery', is a handover: the replacement that served since is not the harness's
+//   child, so its exit code cannot be observed, and only the owned processes count.
+// - survivingOwnedPids: processes of the run still alive at the end. Any one fails.
+// - deadlineExpired: the wait ended at the deadline instead of on success.
+// - portDown: false when the smoke port never refused connections (or reset them).
+// Returns { passed, failures, notes }.
+function evaluateShutdown({
+    childExit = null, survivingOwnedPids = [], postResult = {}, deadlineExpired = false, portDown = null,
+} = {}) {
+    const failures = [];
+    const notes = [];
+    if (postResult.error) {
+        if (!isClosedByServer(postResult.error)) {
+            failures.push(`the shutdown request failed: ${describeError(postResult.error)}`);
+        } else if (deadlineExpired || survivingOwnedPids.length > 0 || !childExit) {
+            failures.push('the connection of the shutdown request was reset or closed without an answer, '
+                + 'and no exit of the processes this run owns followed it');
+        } else {
+            notes.push('the server reset or closed the connection of the shutdown request as it exited');
+        }
+    } else if (!Number.isInteger(postResult.status) || postResult.status < 200 || postResult.status > 299) {
+        failures.push(`the shutdown request was answered with HTTP ${postResult.status ?? 'none'}, not 2xx`);
+    }
+
+    if (!childExit) {
+        failures.push('the launched executable did not exit');
+    } else if (childExit.error) {
+        failures.push(`the launched executable failed: ${childExit.error}`);
+    } else if (childExit.phase === 'shutdown' || childExit.phase === 'cleanup') {
+        const exitStatus = `launched executable exited (${formatExitStatus(childExit)}) in phase '${childExit.phase}'`;
+        if (childExit.code === 0 && !childExit.signal) notes.push(exitStatus);
+        else failures.push(`the ${exitStatus}`);
+    } else if (childExit.phase === 'recovery' || childExit.phase === 'post-recovery') {
+        notes.push(`the launched executable already exited (${formatExitStatus(childExit)}) in phase '${childExit.phase}', `
+            + 'a handover during recovery; replacement exit code not observable');
+    } else {
+        failures.push(`the launched executable exited (${formatExitStatus(childExit)}) in phase '${childExit.phase}', before the shutdown`);
+    }
+
+    if (survivingOwnedPids.length > 0) {
+        failures.push(`processes survived graceful shutdown: ${survivingOwnedPids.join(', ')}`);
+    }
+    if (portDown === false) failures.push('the smoke port did not refuse connections by the deadline');
+    if (deadlineExpired && failures.length === 0) failures.push('the shutdown did not complete within the deadline');
+    return { passed: failures.length === 0, failures, notes };
+}
+
+// Settles with the promise, or after ms, whichever comes first, and leaves no timer behind.
+function waitAtMost(promise, ms) {
+    let timer;
+    const timeout = new Promise((resolve) => { timer = setTimeout(resolve, Math.max(0, ms)); });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function probeSmokePort(run) {
+    try {
+        await fetchWithTimeout(`${run.baseUrl}/healthz`, {}, 1000, 'none');
+        return 'up';
+    } catch (err) {
+        return classifyShutdownProbeError(err);
+    }
+}
+
+// Waits, within one deadline, until the launched child has exited (unless it already did during
+// recovery), the port is down, and no process of the run is alive. Plain timers, not the run's
+// abort signal: nothing in this wait can end as a stop by accident.
+async function waitForShutdown(run, awaitChildExit) {
+    const deadline = Date.now() + run.shutdownTimeoutMs;
+    for (;;) {
+        const childDone = !awaitChildExit || run.monitor.record !== null;
+        let portDown = childDone ? (await probeSmokePort(run)) === 'down' : null;
+        const expired = Date.now() >= deadline;
+        if ((childDone && portDown) || expired) {
+            if (portDown === null) portDown = (await probeSmokePort(run)) === 'down';
+            const survivors = ownedProcessTree(run, run.listProcesses());
+            if (childDone && portDown && survivors.length === 0) return { deadlineExpired: false, portDown, survivors };
+            if (expired) return { deadlineExpired: true, portDown, survivors };
+        }
+        const wait = Math.min(run.pollIntervalMs, Math.max(0, deadline - Date.now()));
+        if (childDone) await sleep(wait);
+        else await waitAtMost(run.monitor.exited, wait);
+    }
+}
+
+// The requested exit is this stage's success condition. The phase is 'shutdown' before the
+// request goes out, so the monitor counts the exit as expected, and the stage is never raced
+// against the monitor's unexpected-exit promise.
 async function checkGracefulShutdown(run) {
+    const { monitor } = run;
     const { body: metrics } = await fetchWithTimeout(`${run.baseUrl}/api/metrics`, { signal: run.signal }, 5000, 'json');
     assertServingPidOwned(run, metrics?.process?.pid, 'the shutdown request');
+    // The run's tree right before the shutdown, so a process that is reparented while it lingers
+    // is still recognised. A process list that cannot be read stops the stage here.
+    ownedProcessTree(run, run.listProcesses());
 
-    await fetchWithTimeout(`${run.baseUrl}/api/test/shutdown`, { method: 'POST' }, 5000, 'none');
-    let stopped = false;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-        await sleep(500);
-        try {
-            await fetchWithTimeout(`${run.baseUrl}/healthz`, {}, 1000, 'none');
-        } catch {
-            stopped = true;
-            break;
-        }
+    // A launched child that handed over during recovery has no exit left to wait for.
+    const awaitChildExit = monitor.record === null;
+    monitor.setPhase('shutdown');
+    run.shutdownRequested = true;
+    let postResult;
+    try {
+        const { status } = await fetchWithTimeout(`${run.baseUrl}/api/test/shutdown`, { method: 'POST' }, 5000, 'none');
+        postResult = { status };
+    } catch (err) {
+        postResult = { error: err };
     }
-    if (!stopped) throw new Error('Packaged executable did not shut down gracefully.');
+    const accepted = postResult.error
+        ? isClosedByServer(postResult.error)
+        : postResult.status >= 200 && postResult.status <= 299;
+    const observed = accepted
+        ? await waitForShutdown(run, awaitChildExit)
+        : { deadlineExpired: false, portDown: null, survivors: [] };
+
+    const evaluation = evaluateShutdown({
+        childExit: monitor.record,
+        survivingOwnedPids: observed.survivors.map((record) => record.pid),
+        postResult,
+        deadlineExpired: observed.deadlineExpired,
+        portDown: observed.portDown,
+    });
+    for (const note of evaluation.notes) console.log(`Graceful shutdown: ${note}.`);
+    if (!evaluation.passed) {
+        throw new Error(`Packaged executable did not shut down gracefully: ${evaluation.failures.join('; ')}.`);
+    }
 }
 
 async function runStages(run) {
@@ -582,6 +821,7 @@ async function runStages(run) {
     run.runPlaywright(run);
     console.log('Packaged decoded-frame flow passed.');
 
+    // Not raced against the monitor: the exit this stage requests is its success condition.
     await checkGracefulShutdown(run);
     console.log('Packaged graceful shutdown passed.');
 }
@@ -600,8 +840,15 @@ async function requestCleanupShutdown(run) {
     } catch {
         return false; // nothing answers as Nextra: nothing to ask
     }
-    const owned = Number.isInteger(pid)
-        && (run.ownedPids.has(pid) || isDescendant(pid, run.child.pid, run.listProcesses()));
+    let owned = Number.isInteger(pid) && run.ownedPids.has(pid);
+    if (!owned && Number.isInteger(pid)) {
+        try {
+            owned = isDescendant(pid, run.child.pid, run.listProcesses());
+        } catch (err) {
+            console.log(`Skipping the cleanup shutdown request: PID ${pid} cannot be tied to this run. ${err.message}`);
+            return false;
+        }
+    }
     if (!owned) {
         console.log(`Skipping the cleanup shutdown request: the server on ${run.baseUrl} reports PID ${pid ?? 'none'}, which this run does not own.`);
         return false;
@@ -614,47 +861,113 @@ async function requestCleanupShutdown(run) {
     }
 }
 
-async function cleanup(baselineSmokePids, baselineCloudflaredPids, run) {
-    await requestCleanupShutdown(run);
-    await sleep(500);
+// Kills what is left of the run, and only that: the launched child through its handle, and the
+// other processes of its tree (selectCleanupTargets) by PID. Returns an Error naming every
+// problem, or null. Once the shutdown stage has sent its request, anything of the run still
+// alive here survived the graceful shutdown: that is recorded as a failure before it is killed.
+// A process list that cannot be read is a failure too, and the child is killed all the same,
+// so the smoke can end.
+async function cleanup(run) {
+    const { child, monitor } = run;
+    monitor.setPhase('cleanup');
+    const failures = [];
+    if (await requestCleanupShutdown(run)) await sleep(run.cleanupGraceMs);
 
-    listProcesses()
-        .filter((record) => isSmokeExecutable(record) && !baselineSmokePids.has(record.pid))
-        .forEach((record) => killProcess(record.pid));
-    await sleep(500);
-
-    const stale = listProcesses()
-        .filter((record) => isSmokeExecutable(record) && !baselineSmokePids.has(record.pid));
-    if (stale.length > 0) {
-        return new Error(`Packaged smoke left stale extraction processes: ${stale.map((record) => record.pid).join(', ')}.`);
+    let targets = [];
+    let listed = false;
+    try {
+        const records = run.listProcesses();
+        listed = true;
+        targets = ownedProcessTree(run, records);
+        // The run's own cloudflared, and any other that was not running before the launch.
+        const lingeringCloudflared = records
+            .filter((record) => isCloudflared(record) && run.baseline.get(record.pid) !== record.command);
+        if (lingeringCloudflared.length > 0) {
+            failures.push(`Child cloudflared process remained after shutdown (PID ${lingeringCloudflared.map((record) => record.pid).join(', ')}).`);
+        }
+    } catch (err) {
+        failures.push(`${err.message} The processes of this run could not be checked or killed.`);
     }
 
-    const lingeringCloudflared = listProcesses()
-        .filter((record) => isCloudflared(record) && !baselineCloudflaredPids.has(record.pid));
-    if (lingeringCloudflared.length > 0) {
-        return new Error(`Child cloudflared process remained after shutdown (PID ${lingeringCloudflared[0].pid}).`);
+    if (targets.length > 0) {
+        if (run.shutdownRequested) {
+            failures.push(`Cleanup found processes that survived graceful shutdown: ${describeProcesses(targets)}. They were killed.`);
+        } else {
+            console.log(`Killing the processes of this run: ${describeProcesses(targets)}.`);
+        }
     }
 
-    return null;
+    const childRunning = monitor.record === null && Number.isInteger(child.pid);
+    if (childRunning) {
+        try {
+            child.kill('SIGKILL');
+        } catch (err) {
+            failures.push(`The launched executable (PID ${child.pid}) could not be killed: ${err.message}`);
+        }
+    }
+    for (const record of targets) {
+        if (record.pid !== child.pid) run.killProcess(record.pid);
+    }
+    if (childRunning) {
+        await waitAtMost(monitor.exited, CHILD_KILL_TIMEOUT_MS);
+        if (monitor.record === null) {
+            failures.push(`The launched executable (PID ${child.pid}) did not exit after SIGKILL.`);
+            // Its handle would keep the smoke from ever ending.
+            child.unref?.();
+        }
+    }
+
+    if (listed && targets.length > 0) {
+        await sleep(run.cleanupGraceMs);
+        try {
+            const stale = ownedProcessTree(run, run.listProcesses());
+            if (stale.length > 0) {
+                failures.push(`Packaged smoke left stale processes after the forced kill: ${describeProcesses(stale)}.`);
+            }
+        } catch (err) {
+            failures.push(`${err.message} Whether the forced kill worked could not be checked.`);
+        }
+    }
+
+    return failures.length > 0 ? new Error(failures.join('\n')) : null;
 }
 
-async function main() {
-    if (!fs.existsSync(executablePath)) {
-        throw new Error(`Packaged executable not found: ${executablePath}`);
+// The processes running before the launch, as PID -> command line. Cleanup never kills one of
+// them, and a cloudflared among them is not reported. Without a baseline nothing is launched.
+function takeProcessBaseline(listRunProcesses = listProcesses) {
+    let records;
+    try {
+        records = listRunProcesses();
+    } catch (err) {
+        throw new Error(`Could not take the pre-launch process baseline, so the packaged executable was not launched. ${err.message}`, { cause: err });
     }
-    await assertSmokePortFree(baseUrl);
+    return new Map(records.map((record) => [record.pid, record.command]));
+}
 
-    const baseline = listProcesses();
-    const baselineSmokePids = new Set(baseline.filter(isSmokeExecutable).map((record) => record.pid));
-    const baselineCloudflaredPids = new Set(baseline.filter(isCloudflared).map((record) => record.pid));
-
-    console.log(`Starting packaged executable on port ${port}...`);
-    const child = spawn(executablePath, [], {
+function launchPackagedExecutable(executable) {
+    return spawn(executable, [], {
         cwd: projectRoot,
         env: childEnv,
         stdio: ['ignore', 'inherit', 'inherit'],
     });
-    const run = createRunContext({ child });
+}
+
+// Resolves with the smoke's exit code: 0 only when every stage and the cleanup passed.
+async function main({
+    executable = executablePath,
+    listProcesses: listRunProcesses = listProcesses,
+    launch = launchPackagedExecutable,
+    runOptions = {},
+} = {}) {
+    if (!fs.existsSync(executable)) {
+        throw new Error(`Packaged executable not found: ${executable}`);
+    }
+    await assertSmokePortFree(baseUrl);
+    const baseline = takeProcessBaseline(listRunProcesses);
+
+    console.log(`Starting packaged executable on port ${port}...`);
+    const child = launch(executable);
+    const run = createRunContext({ child, listProcesses: listRunProcesses, baseline, ...runOptions });
     run.monitor.exited.then((record) => {
         console.log(`Launched executable (PID ${child.pid ?? 'none'}) ${describeChildExit(record)}.`);
     });
@@ -668,20 +981,20 @@ async function main() {
     // Ends any polling a failed stage left running, so it cannot outlive the run.
     run.stop();
 
-    const cleanupError = await cleanup(baselineSmokePids, baselineCloudflaredPids, run);
+    const cleanupError = await cleanup(run);
 
-    if (stageError || cleanupError) {
-        if (stageError) console.error(stageError.stack || String(stageError));
-        if (cleanupError) console.error(cleanupError.stack || String(cleanupError));
-        process.exitCode = 1;
-        return;
-    }
+    if (stageError) console.error(stageError.stack || String(stageError));
+    if (cleanupError) console.error(cleanupError.stack || String(cleanupError));
+    if (stageError || cleanupError) return 1;
     console.log('Packaged smoke passed.');
+    return 0;
 }
 
 // Only `node scripts/smoke-packaged.js` runs the smoke; tests require() the helpers below.
 if (require.main === module) {
-    main().catch((err) => {
+    main().then((code) => {
+        process.exitCode = code;
+    }, (err) => {
         console.error(err.stack || String(err));
         process.exitCode = 1;
     });
@@ -691,6 +1004,7 @@ module.exports = {
     CHILD_PHASES,
     fetchWithTimeout,
     isConnectionRefused,
+    classifyShutdownProbeError,
     assertSmokePortFree,
     parseWindowsProcessList,
     parsePsProcessList,
@@ -698,6 +1012,8 @@ module.exports = {
     isDescendant,
     caxaApplicationDirectory,
     decideReplacementAdoption,
+    selectCleanupTargets,
+    evaluateShutdown,
     classifyChildExit,
     describeChildExit,
     createChildExitMonitor,
@@ -714,5 +1030,6 @@ module.exports = {
     runStages,
     requestCleanupShutdown,
     cleanup,
+    takeProcessBaseline,
     main,
 };

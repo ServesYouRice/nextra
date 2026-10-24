@@ -212,7 +212,7 @@ H.264 rooms also use the High profile, and the Simple Output page is mirrored wh
 How these reach OBS:
 
 - The output mode, encoder, resolution, frame rate and stream target go over OBS WebSocket.
-- OBS WebSocket has no request for the encoder's own settings (bitrate, keyframe interval, B-frames, look-ahead). OBS reads those from `streamEncoder.json` in its profile folder each time a stream starts, so the Nextra server writes them there. This needs OBS on the same machine as Nextra and a host page opened on that machine. Otherwise the host page lists the values to set in **Settings > Output > Streaming**; without them OBS streams on its defaults (a keyframe only every 250 frames, B-frames and look-ahead on), which delays every viewer.
+- OBS WebSocket has no request for the encoder's own settings (bitrate, keyframe interval, B-frames, look-ahead). OBS reads those from `streamEncoder.json` in its profile folder each time a stream starts, so the Nextra server writes them there. This needs OBS on the same machine as Nextra and a host page opened on that machine. Otherwise the host page lists the values to set in **Settings > Output > Streaming**; without them OBS streams on its defaults (a keyframe only every 250 frames, B-frames and look-ahead on), which delays every viewer. If the setup then fails and rolls back, the server puts that file back as it was (or removes it if the setup created it).
 - The encoder is chosen from the list OBS writes to its log when it starts, so it does not depend on what the browser reveals about the GPU.
 - OBS applies a changed encoder or output mode only when it restarts. The host page says when that is needed: restart OBS once, then start sharing again.
 - OBS does not answer keyframe requests, so the keyframe interval is how long a new WebRTC viewer waits for a picture. The host page warns when OBS sends keyframes more than 2.5 seconds apart.
@@ -319,7 +319,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 |---|---|---|
 | `WHIP_ENABLED` | `true` | Enable WHIP ingest endpoint |
 | `PUBLIC_WHIP_ENABLED` | `false` | Also mount WHIP on the main/public server; the dedicated loopback endpoint remains available when this is off |
-| `PUBLIC_WHIP_RATE_LIMIT_MAX` | `5` | Public WHIP start attempts per IP per window |
+| `PUBLIC_WHIP_RATE_LIMIT_MAX` | `5` | Public WHIP start attempts per IP per window (an IPv6 client counts by its /64; at most 10,000 clients are tracked, oldest dropped first) |
 | `PUBLIC_WHIP_MAX_PENDING_STARTS` | `2` | Global cap on concurrent public WHIP startups before SDP/media allocation |
 | `WHIP_HTTP_PORT` | `3001` | HTTP port for WHIP endpoint |
 | `WHIP_BIND_HOST` | `127.0.0.1` | Bind address for the plaintext OBS-compatible WHIP endpoint |
