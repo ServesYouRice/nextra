@@ -654,20 +654,33 @@ async function holdSmokePort() {
     return null;
 }
 
-function runSmokeScript(args, timeoutMs) {
+// options.env is merged over this process's environment (a PATH given there replaces every
+// spelling of it), options.script runs instead of the smoke script, and options.onOutput sees
+// the output gathered so far after every chunk.
+function runSmokeScript(args, timeoutMs, { env: extraEnv = {}, script = smokeScript, onOutput = null } = {}) {
     return new Promise((resolve) => {
         const env = { ...process.env };
         delete env.NODE_TEST_CONTEXT;
+        if ('PATH' in extraEnv) {
+            for (const key of Object.keys(env)) {
+                if (key.toUpperCase() === 'PATH') delete env[key];
+            }
+        }
+        Object.assign(env, extraEnv);
         const startedAt = Date.now();
-        const proc = spawn(process.execPath, [smokeScript, ...args], {
+        const proc = spawn(process.execPath, [script, ...args], {
             cwd: repoRoot,
             env,
             windowsHide: true,
             stdio: ['ignore', 'pipe', 'pipe'],
         });
         let output = '';
-        proc.stdout.on('data', (chunk) => { output += chunk; });
-        proc.stderr.on('data', (chunk) => { output += chunk; });
+        const gather = (chunk) => {
+            output += chunk;
+            onOutput?.(output);
+        };
+        proc.stdout.on('data', gather);
+        proc.stderr.on('data', gather);
         const timer = setTimeout(() => proc.kill('SIGKILL'), timeoutMs);
         proc.on('close', (code, signal) => {
             clearTimeout(timer);
@@ -962,6 +975,7 @@ test('a simulated packaged run passes every stage in order, each destructive req
     // The replacement stops, then the original exits with its code, and the launched stub with it.
     fake.hooks.onShutdown = () => setImmediate(async () => {
         await fake.close();
+        records = [];
         child.emit('exit', 0, null);
     });
 
@@ -1008,4 +1022,642 @@ test('the cleanup shutdown request goes only to a server the run owns', async (t
 
     // Nothing on the port: nothing to send, and no error.
     assert.equal(await smoke.requestCleanupShutdown({ ...run, baseUrl: await closedPortUrl() }), false);
+});
+
+// ---------------------------------------------------------------------------
+// Shutdown and cleanup. A process list that cannot be read is an error, never "no processes".
+// The shutdown stage passes only when the shutdown was accepted, the launched executable
+// exited with code 0 in the 'shutdown' phase (or had already handed over during recovery), the
+// port refuses connections and no process the run owns is left. Cleanup kills only the
+// processes the run owns and their descendants, and reports what survived the shutdown before
+// it kills it.
+// ---------------------------------------------------------------------------
+
+const WORKER_PID = 5003;
+const workerCommand = (dir) => `${dir}/node_modules/mediasoup/worker/out/Release/mediasoup-worker`;
+
+const fetchFailed = (cause) => Object.assign(new TypeError('fetch failed'), { cause });
+const withCode = (message, code) => Object.assign(new Error(message), { code });
+
+// A fake child that, like a ChildProcess, emits 'exit' once it was killed.
+function createKillableChild(pid = CHILD_PID, onKill = () => {}) {
+    const child = createFakeChild(pid);
+    child.killSignals = [];
+    child.kill = (signal) => {
+        child.killSignals.push(signal);
+        onKill(signal);
+        setImmediate(() => child.emit('exit', null, signal));
+        return true;
+    };
+    return child;
+}
+
+// A run that passed readiness, as the shutdown stage finds it: the launched stub and its
+// server, owned and served on a fake Nextra. state.records is what the process list shows.
+async function runAtShutdown(t, overrides = {}) {
+    const fake = await startFakeNextra();
+    t.after(() => fake.close());
+    const child = overrides.child ?? createFakeChild();
+    const state = { records: launchedRecords() };
+    const run = fastRun(child, fake, { listProcesses: () => state.records, shutdownTimeoutMs: 1500, ...overrides });
+    await smoke.verifyLaunchedServer(run);
+    run.monitor.setPhase('stages');
+    return { fake, child, run, state };
+}
+
+test('listProcesses throws when the process list cannot be read, instead of returning no processes', () => {
+    const list = (platform, result) => () => smoke.listProcesses({ platform, spawnSyncImpl: () => result });
+    for (const platform of ['win32', 'darwin']) {
+        assert.throws(list(platform, { error: withCode('spawnSync powershell.exe ENOENT', 'ENOENT'), status: null, stdout: '' }), /ENOENT/, platform);
+        // Output over maxBuffer: spawnSync kills the query and sets ENOBUFS, keeping a cut-off stdout.
+        assert.throws(list(platform, {
+            error: withCode('spawnSync ps ENOBUFS', 'ENOBUFS'), status: null, signal: 'SIGTERM', stdout: '[{"ProcessId":4,',
+        }), /ENOBUFS/, platform);
+        assert.throws(list(platform, { status: 1, stdout: '', stderr: 'Access is denied.' }), /status 1.*Access is denied/, platform);
+        assert.throws(list(platform, { status: null, signal: 'SIGKILL', stdout: '' }), /SIGKILL/, platform);
+        assert.throws(list(platform, { status: 0, stdout: '' }), /no output/, platform);
+        assert.throws(list(platform, { status: 0, stdout: ' \r\n' }), /no output/, platform);
+    }
+    assert.throws(list('win32', { status: 0, stdout: '[{"ProcessId":4,' }), /could not be parsed/);
+    assert.throws(list('win32', { status: 0, stdout: '[]' }), /no process records/);
+    assert.throws(list('darwin', { status: 0, stdout: 'not a process line\n' }), /no process records/);
+
+    // A list that can be read still comes back as records, from the query each platform uses.
+    const calls = [];
+    const record = (command, args, options) => {
+        calls.push({ command, maxBuffer: options.maxBuffer });
+        return command === 'ps'
+            ? { status: 0, stdout: '    1     0 /sbin/launchd\n' }
+            : { status: 0, stdout: JSON.stringify({ ProcessId: 4, ParentProcessId: 0, Name: 'System' }) };
+    };
+    assert.deepEqual(smoke.listProcesses({ platform: 'darwin', spawnSyncImpl: record }), [{ pid: 1, ppid: 0, command: '/sbin/launchd' }]);
+    assert.deepEqual(smoke.listProcesses({ platform: 'win32', spawnSyncImpl: record }), [{ pid: 4, ppid: 0, command: 'System' }]);
+    assert.deepEqual(calls.map((call) => call.command), ['ps', 'powershell.exe']);
+    assert.ok(calls.every((call) => call.maxBuffer >= 64 * 1024 * 1024), 'room for a large process list');
+});
+
+test('selectCleanupTargets picks the processes the run owns and their descendants, never another instance or a pre-existing process', () => {
+    const pids = (records) => records.map((record) => record.pid).sort((a, b) => a - b);
+    const select = (options) => pids(smoke.selectCleanupTargets({ ownedPids: new Set([CHILD_PID, SERVER_PID]), ...options }));
+    const tree = [
+        ...launchedRecords(),
+        { pid: WORKER_PID, ppid: SERVER_PID, command: workerCommand(CAXA_DIR) },
+        { pid: REPLACEMENT_PID, ppid: SERVER_PID, command: serverCommand(CAXA_DIR) },
+    ];
+    // Another instance of the same build, started during the run: same caxa extraction, and its
+    // own worker, but neither descends from the launched child.
+    const sameBuild = [
+        { pid: FOREIGN_PID, ppid: 900, command: serverCommand(CAXA_DIR) },
+        { pid: 6002, ppid: FOREIGN_PID, command: workerCommand(CAXA_DIR) },
+    ];
+    assert.deepEqual(select({ records: [...tree, ...sameBuild] }), [CHILD_PID, SERVER_PID, REPLACEMENT_PID, WORKER_PID]);
+    assert.deepEqual(select({ records: sameBuild }), [], 'nothing of the run is left');
+    assert.deepEqual(pids(smoke.selectCleanupTargets({ records: tree, ownedPids: new Set() })), [], 'no owned PID, no target');
+
+    // On Windows a process keeps the PID of a parent that died. One that was there before the
+    // launch, whose dead parent had the PID the launched child got, is not the run's, and neither
+    // is a process it starts later.
+    const preExisting = { pid: 3001, ppid: CHILD_PID, command: 'C:\\Windows\\explorer.exe' };
+    const startedByIt = { pid: 3002, ppid: 3001, command: 'C:\\tools\\helper.exe' };
+    const baseline = new Map([[preExisting.pid, preExisting.command]]);
+    assert.deepEqual(select({ records: [...tree, preExisting, startedByIt], baseline }), [CHILD_PID, SERVER_PID, REPLACEMENT_PID, WORKER_PID]);
+    // The baseline protects a process, not a number: an owned process that got the PID of a
+    // baseline process that has since ended is still the run's.
+    assert.deepEqual(select({ records: tree, baseline: new Map([[SERVER_PID, 'powershell.exe -NoProfile']]) }), [CHILD_PID, SERVER_PID, REPLACEMENT_PID, WORKER_PID]);
+
+    // A worker whose server already exited keeps the server's PID as its parent on Windows.
+    assert.deepEqual(select({ records: [launchedRecords()[0], { pid: WORKER_PID, ppid: SERVER_PID, command: workerCommand(CAXA_DIR) }] }), [CHILD_PID, WORKER_PID]);
+    // On macOS it is reparented to launchd; only a process seen in the run's tree before is still known.
+    const reparented = { pid: WORKER_PID, ppid: 1, command: workerCommand(CAXA_DIR) };
+    assert.deepEqual(select({ records: [reparented] }), []);
+    assert.deepEqual(select({ records: [reparented], knownProcesses: new Map([[WORKER_PID, reparented.command]]) }), [WORKER_PID]);
+    // A known PID that now runs something else was reused: neither it nor its children are the run's.
+    const reused = [
+        { pid: SERVER_PID, ppid: 900, command: 'C:\\Windows\\System32\\notepad.exe' },
+        { pid: 7001, ppid: SERVER_PID, command: 'C:\\Windows\\System32\\conhost.exe' },
+    ];
+    assert.deepEqual(select({ records: reused, knownProcesses: new Map([[SERVER_PID, serverCommand(CAXA_DIR)]]) }), []);
+    // Once the launched child's exit was observed, a process holding its PID is not the child.
+    assert.deepEqual(select({
+        records: [{ pid: CHILD_PID, ppid: 900, command: '/repo/Nextra-macos-arm64' }, { pid: 7002, ppid: CHILD_PID, command: 'other' }],
+        exitedPids: [CHILD_PID],
+    }), []);
+});
+
+test('classifyShutdownProbeError counts only a refused or reset connection as down', async () => {
+    const classify = smoke.classifyShutdownProbeError;
+    assert.equal(classify(fetchFailed(withCode('connect ECONNREFUSED 127.0.0.1:31847', 'ECONNREFUSED'))), 'down');
+    assert.equal(classify(fetchFailed({ errors: [withCode('a', 'ECONNREFUSED'), withCode('b', 'ECONNREFUSED')] })), 'down');
+    assert.equal(classify(fetchFailed(withCode('read ECONNRESET', 'ECONNRESET'))), 'down');
+    assert.equal(classify(new DOMException('This operation was aborted', 'AbortError')), 'unknown', 'a timeout is not a stop');
+    assert.equal(classify(new DOMException('The operation timed out.', 'TimeoutError')), 'unknown');
+    assert.equal(classify(fetchFailed(withCode('other side closed', 'UND_ERR_SOCKET'))), 'unknown');
+    assert.equal(classify(fetchFailed({ errors: [withCode('a', 'ECONNREFUSED'), withCode('b', 'ETIMEDOUT')] })), 'unknown');
+    assert.equal(classify(new SyntaxError('Unexpected token')), 'unknown');
+
+    // The same, from real requests: a closed port, and a listener that never answers.
+    await assert.rejects(smoke.fetchWithTimeout(`${await closedPortUrl()}/healthz`, {}, 1000), (err) => classify(err) === 'down');
+    await assert.rejects(smoke.fetchWithTimeout(`${baseUrl}/no-headers`, {}, 200), (err) => classify(err) === 'unknown');
+});
+
+test('evaluateShutdown passes only an accepted shutdown, a code-0 exit in the shutdown phase or an earlier handover, and no survivors', () => {
+    const accepted = { status: 202 };
+    const exit = (phase, code = 0, signal = null) => ({ code, signal, phase, at: 0 });
+    const evaluate = (overrides) => smoke.evaluateShutdown({
+        childExit: exit('shutdown'), survivingOwnedPids: [], postResult: accepted, deadlineExpired: false, ...overrides,
+    });
+
+    const clean = evaluate({});
+    assert.equal(clean.passed, true);
+    assert.match(clean.notes.join(' '), /exited \(code 0, no signal\) in phase 'shutdown'/);
+
+    for (const phase of ['recovery', 'post-recovery']) {
+        const handedOver = evaluate({ childExit: exit(phase) });
+        assert.equal(handedOver.passed, true, phase);
+        assert.match(handedOver.notes.join(' '), /replacement exit code not observable/, phase);
+    }
+
+    const failures = [
+        [{ childExit: exit('shutdown', 1) }, /code 1, no signal.*'shutdown'/],
+        [{ childExit: exit('shutdown', null, 'SIGKILL') }, /signal SIGKILL.*'shutdown'/],
+        [{ childExit: exit('stages', 0) }, /before the shutdown/],
+        [{ childExit: null, deadlineExpired: true }, /did not exit/],
+        [{ survivingOwnedPids: [WORKER_PID, REPLACEMENT_PID], deadlineExpired: true }, /processes survived graceful shutdown: 5003, 5002/],
+        [{ postResult: { status: 404 } }, /HTTP 404/],
+        [{ postResult: { status: 503 } }, /HTTP 503/],
+        [{ postResult: { error: new DOMException('This operation was aborted', 'AbortError') } }, /shutdown request failed.*AbortError/],
+        [{ postResult: { error: fetchFailed(withCode('connect ECONNREFUSED', 'ECONNREFUSED')) } }, /shutdown request failed/],
+        [{ postResult: { error: fetchFailed(withCode('read ECONNRESET', 'ECONNRESET')) }, childExit: null, deadlineExpired: true }, /reset.*no exit/],
+        [{ portDown: false, deadlineExpired: true }, /did not refuse connections/],
+        [{ deadlineExpired: true }, /did not complete/],
+    ];
+    for (const [overrides, pattern] of failures) {
+        const evaluation = evaluate(overrides);
+        assert.equal(evaluation.passed, false, String(pattern));
+        assert.match(evaluation.failures.join('; '), pattern);
+    }
+
+    // The server may close the connection as it exits: a reset counts once an owned exit followed.
+    for (const error of [fetchFailed(withCode('read ECONNRESET', 'ECONNRESET')), fetchFailed(withCode('other side closed', 'UND_ERR_SOCKET'))]) {
+        assert.equal(evaluate({ postResult: { error } }).passed, true, error.cause.code);
+    }
+});
+
+test('the requested exit of the launched executable passes the shutdown stage, in the shutdown phase set before the request', async (t) => {
+    const log = t.mock.method(console, 'log', () => {});
+    const unhandled = trackUnhandledRejections(t);
+    const { fake, child, run, state } = await runAtShutdown(t);
+    let phaseAtRequest = null;
+    fake.hooks.onShutdown = () => {
+        phaseAtRequest = run.monitor.phase;
+        // The child exits with code 0 right after the shutdown answer, and its tree with it.
+        setImmediate(async () => {
+            await fake.close();
+            state.records = [];
+            child.emit('exit', 0, null);
+        });
+    };
+
+    await smoke.checkGracefulShutdown(run);
+    assert.equal(phaseAtRequest, 'shutdown');
+    assert.deepEqual({ ...run.monitor.record, at: 0 }, { code: 0, signal: null, phase: 'shutdown', at: 0 });
+    assert.equal(await isStillPending(run.monitor.unexpected), true, 'the expected exit is not unexpected');
+    const lines = log.mock.calls.map((call) => String(call.arguments[0]));
+    assert.ok(lines.some((line) => /exited \(code 0, no signal\) in phase 'shutdown'/.test(line)), lines.join('\n'));
+    await settle();
+    assert.deepEqual(unhandled, []);
+});
+
+test('after a handover in recovery the shutdown stage waits only for the adopted replacement, and says its exit code is not observable', async (t) => {
+    const log = t.mock.method(console, 'log', () => {});
+    const unhandled = trackUnhandledRejections(t);
+    const { fake, child, run, state } = await runAtShutdown(t);
+    // The launched stub handed over with code 0; the replacement is reparented away from it.
+    run.monitor.setPhase('recovery');
+    child.emit('exit', 0, null);
+    run.monitor.setPhase('post-recovery');
+    run.ownedPids.add(REPLACEMENT_PID);
+    fake.state.pid = REPLACEMENT_PID;
+    state.records = [{ pid: REPLACEMENT_PID, ppid: 1, command: serverCommand(CAXA_DIR) }];
+    fake.hooks.onShutdown = () => setTimeout(async () => {
+        await fake.close();
+        state.records = [];
+    }, 100);
+
+    const { error, ms } = await timed(smoke.checkGracefulShutdown(run));
+    assert.equal(error, undefined, error?.message);
+    assert.ok(ms < 1500, `waited ${ms} ms, as if for a child exit`);
+    const lines = log.mock.calls.map((call) => String(call.arguments[0]));
+    assert.ok(lines.some((line) => /replacement exit code not observable/.test(line)), lines.join('\n'));
+    await settle();
+    assert.deepEqual(unhandled, []);
+});
+
+test('a non-zero or signalled exit of the launched executable in the shutdown phase fails the shutdown stage', async (t) => {
+    t.mock.method(console, 'log', () => {});
+    for (const [exit, pattern] of [[[1, null], /code 1, no signal/], [[null, 'SIGTERM'], /signal SIGTERM/]]) {
+        const { fake, child, run, state } = await runAtShutdown(t);
+        fake.hooks.onShutdown = () => setImmediate(async () => {
+            await fake.close();
+            state.records = [];
+            child.emit('exit', ...exit);
+        });
+
+        const { error } = await timed(smoke.checkGracefulShutdown(run));
+        assert.match(error?.message ?? 'the stage passed', pattern);
+        assert.match(error.message, /'shutdown'/);
+    }
+});
+
+test('a /healthz timeout is not a stop: the shutdown stage fails when the port never refuses connections', async (t) => {
+    t.mock.method(console, 'log', () => {});
+    const { fake, child, run, state } = await runAtShutdown(t);
+    // The tree exits, but something keeps accepting connections on the port and never answers.
+    fake.hooks.stall.add('GET /healthz');
+    fake.hooks.onShutdown = () => setImmediate(() => {
+        state.records = [];
+        child.emit('exit', 0, null);
+    });
+
+    const { error, ms } = await timed(smoke.checkGracefulShutdown(run));
+    assert.match(error?.message ?? 'the stage passed', /did not shut down gracefully/);
+    assert.match(error.message, /did not refuse connections/);
+    assert.ok(ms < 1500 + 1000 + MARGIN_MS, `failed after ${ms} ms`);
+});
+
+test('a process the run owns that is still alive at the shutdown deadline fails the shutdown stage', async (t) => {
+    t.mock.method(console, 'log', () => {});
+    const { fake, child, run, state } = await runAtShutdown(t);
+    // The server and the stub exit with code 0, the server's media worker lingers.
+    fake.hooks.onShutdown = () => setImmediate(async () => {
+        await fake.close();
+        state.records = [{ pid: WORKER_PID, ppid: SERVER_PID, command: workerCommand(CAXA_DIR) }];
+        child.emit('exit', 0, null);
+    });
+
+    const { error, ms } = await timed(smoke.checkGracefulShutdown(run));
+    assert.match(error?.message ?? 'the stage passed', /processes survived graceful shutdown: 5003/);
+    assert.ok(ms >= 1400 && ms < 1500 + MARGIN_MS, `failed after ${ms} ms`);
+});
+
+test('cleanup kills the launched child through its handle, the processes the run owns and their descendants, and nothing else', async (t) => {
+    t.mock.method(console, 'log', () => {});
+    let records = [
+        ...launchedRecords(),
+        { pid: WORKER_PID, ppid: SERVER_PID, command: workerCommand(CAXA_DIR) },
+        // Another instance of the same build, started during the run, and one that ran before it.
+        { pid: FOREIGN_PID, ppid: 900, command: serverCommand(CAXA_DIR) },
+        { pid: 3001, ppid: 900, command: serverCommand(OTHER_CAXA_DIR) },
+    ];
+    const gone = (pid) => { records = records.filter((record) => record.pid !== pid); };
+    const killed = [];
+    const child = createKillableChild(CHILD_PID, () => gone(CHILD_PID));
+    const run = smoke.createRunContext({
+        child,
+        baseUrl: await closedPortUrl(),
+        listProcesses: () => records,
+        baseline: new Map([[3001, serverCommand(OTHER_CAXA_DIR)]]),
+        killProcess: (pid) => {
+            killed.push(pid);
+            gone(pid);
+        },
+        cleanupGraceMs: 20,
+    });
+    run.ownedPids.add(SERVER_PID);
+
+    assert.equal(await smoke.cleanup(run), null);
+    assert.deepEqual(child.killSignals, ['SIGKILL']);
+    assert.deepEqual(killed.sort((a, b) => a - b), [SERVER_PID, WORKER_PID]);
+    assert.deepEqual(records.map((record) => record.pid).sort((a, b) => a - b), [3001, FOREIGN_PID]);
+    assert.equal(run.monitor.record?.phase, 'cleanup');
+});
+
+test('a process list that cannot be read in cleanup is a cleanup error, and the child is still killed through its handle', async (t) => {
+    t.mock.method(console, 'log', () => {});
+    const child = createKillableChild();
+    const run = smoke.createRunContext({
+        child,
+        baseUrl: await closedPortUrl(),
+        listProcesses: () => { throw new Error('Process enumeration failed: powershell.exe exited with status 1.'); },
+        killProcess: () => assert.fail('nothing can be attributed without a process list'),
+        cleanupGraceMs: 20,
+    });
+
+    const error = await smoke.cleanup(run);
+    assert.match(error?.message ?? 'no cleanup error', /enumeration failed/);
+    assert.deepEqual(child.killSignals, ['SIGKILL']);
+    assert.equal(run.monitor.record?.signal, 'SIGKILL');
+});
+
+test('cleanup reports the processes that survived graceful shutdown as a failure, then kills them', async (t) => {
+    t.mock.method(console, 'log', () => {});
+    const killed = [];
+    // Called only once the run below exists.
+    const gone = (pid) => { setup.state.records = setup.state.records.filter((record) => record.pid !== pid); };
+    const child = createKillableChild(CHILD_PID, () => gone(CHILD_PID));
+    const setup = await runAtShutdown(t, {
+        child,
+        shutdownTimeoutMs: 300,
+        killProcess: (pid) => {
+            killed.push(pid);
+            gone(pid);
+        },
+        cleanupGraceMs: 20,
+    });
+    const { fake, run, state } = setup;
+    // The server stops answering, but neither it nor the stub exits.
+    fake.hooks.onShutdown = () => setImmediate(() => fake.close());
+
+    await assert.rejects(smoke.checkGracefulShutdown(run), /processes survived graceful shutdown/);
+    const error = await smoke.cleanup(run);
+    assert.match(error?.message ?? 'no cleanup error', /survived graceful shutdown: 4242 \(.*\), 5001 \(.*\)/);
+    assert.deepEqual(child.killSignals, ['SIGKILL']);
+    assert.deepEqual(killed, [SERVER_PID]);
+    assert.deepEqual(state.records, []);
+});
+
+test('cleanup reports a cloudflared the run started, or any new one, and never one that ran before', async (t) => {
+    t.mock.method(console, 'log', () => {});
+    const tunnel = { pid: 8100, ppid: SERVER_PID, command: 'C:\\cache\\cloudflared.exe tunnel --url http://127.0.0.1:31847' };
+    const earlier = { pid: 8200, ppid: 900, command: 'C:\\cache\\cloudflared.exe tunnel run' };
+    let records = [...launchedRecords(), tunnel, earlier];
+    const killed = [];
+    const child = createKillableChild(CHILD_PID, () => { records = records.filter((record) => record.pid !== CHILD_PID); });
+    const run = smoke.createRunContext({
+        child,
+        baseUrl: await closedPortUrl(),
+        listProcesses: () => records,
+        baseline: new Map([[earlier.pid, earlier.command]]),
+        killProcess: (pid) => {
+            killed.push(pid);
+            records = records.filter((record) => record.pid !== pid);
+        },
+        cleanupGraceMs: 20,
+    });
+    run.ownedPids.add(SERVER_PID);
+
+    const error = await smoke.cleanup(run);
+    assert.match(error?.message ?? 'no cleanup error', /cloudflared process remained after shutdown \(PID 8100\)/);
+    assert.doesNotMatch(error.message, /8200/);
+    assert.deepEqual(killed.sort((a, b) => a - b), [SERVER_PID, 8100]);
+});
+
+// ---------------------------------------------------------------------------
+// The real script against real processes: a stand-in for the packaged executable with the
+// process tree of the caxa build. It runs from a directory named like a caxa extraction, as
+// the stub, which starts the server; on kill-media-worker the server releases the port, runs a
+// replacement as its own child and ends with that child's exit code.
+// ---------------------------------------------------------------------------
+
+const FAKE_NEXTRA_SOURCE = String.raw`'use strict';
+// Loaded with --require into a bare node: with no script and stdin ignored it runs an empty
+// program, so this file is the whole process. Anything else that loads it through NODE_OPTIONS
+// (the smoke script, a test driver) has a script argument and is left alone.
+if (process.argv.length === 1 && process.env.FAKE_NEXTRA_ROLE) {
+    const fs = require('node:fs');
+    const http = require('node:http');
+    const { spawn } = require('node:child_process');
+    const role = process.env.FAKE_NEXTRA_ROLE;
+    const modes = new Set(String(process.env.FAKE_NEXTRA_MODE || '').split(',').filter(Boolean));
+    // Never outlive the test that started it.
+    setTimeout(() => process.exit(3), 60000).unref();
+    if (process.env.FAKE_NEXTRA_PID_FILE) {
+        fs.appendFileSync(process.env.FAKE_NEXTRA_PID_FILE, role + ' ' + process.pid + '\n');
+    }
+    const startRole = (next) => spawn(process.execPath, [], {
+        stdio: ['ignore', 'inherit', 'inherit'],
+        env: { ...process.env, FAKE_NEXTRA_ROLE: next },
+    });
+    if (role === 'stub') {
+        // The caxa stub runs the server from the extraction and ends with its exit code.
+        startRole('server').on('exit', (code) => process.exit(code === null ? 1 : code));
+    } else {
+        const workerPid = role === 'server' ? 101 : 102;
+        const readyAt = Date.now() + Number(process.env.FAKE_NEXTRA_READY_DELAY_MS || 0);
+        const server = http.createServer((req, res) => {
+            const route = req.method + ' ' + req.url.split('?')[0];
+            const json = (status, body) => {
+                res.writeHead(status, { 'content-type': 'application/json' });
+                res.end(JSON.stringify(body));
+            };
+            const release = () => {
+                server.close();
+                server.closeAllConnections();
+            };
+            if (route === 'GET /readyz') {
+                json(200, { status: Date.now() >= readyAt ? 'ready' : 'starting', components: {} });
+            } else if (route === 'GET /healthz') {
+                json(200, { status: 'ok' });
+            } else if (route === 'GET /') {
+                res.writeHead(200, { 'content-type': 'text/html' });
+                res.end('<div id="root"></div>');
+            } else if (route === 'GET /socket.io/') {
+                res.writeHead(200, { 'content-type': 'text/plain' });
+                res.end('0{"sid":"fake"}');
+            } else if (route === 'GET /api/package-info') {
+                const artifacts = { license: 'l', notices: 'n', sourceInstructions: 's', sbom: 'b', ffmpeg: 'f' };
+                if (modes.has('missing-artifact')) delete artifacts.ffmpeg;
+                json(200, { artifacts });
+            } else if (route === 'GET /api/metrics') {
+                json(200, { process: { pid: process.pid }, mediaWorker: { pid: workerPid } });
+            } else if (route === 'POST /api/test/kill-media-worker') {
+                res.on('finish', () => {
+                    release();
+                    // As server.js: with a supervisor declared, exit 1 for it to restart Nextra.
+                    if (['1', 'true', 'yes', 'on'].includes(String(process.env.EXTERNAL_SUPERVISOR || '').trim().toLowerCase())) {
+                        process.exit(1);
+                    }
+                    startRole('replacement').on('exit', (code) => process.exit(code === null ? 1 : code));
+                });
+                json(202, { status: 'terminating', workerPid });
+            } else if (route === 'POST /api/test/shutdown') {
+                if (!modes.has('ignore-shutdown')) {
+                    res.on('finish', () => {
+                        release();
+                        process.exit(0);
+                    });
+                }
+                json(202, { status: 'shutting-down' });
+            } else {
+                json(404, { error: 'not found' });
+            }
+        });
+        const listen = () => server.listen(Number(process.env.PORT), process.env.BIND_HOST || '127.0.0.1');
+        server.on('error', (err) => {
+            if (err && err.code === 'EADDRINUSE') setTimeout(listen, 50);
+            else throw err;
+        });
+        listen();
+    }
+}
+`;
+
+function tcpPortFree(checkPort) {
+    return new Promise((resolve) => {
+        const probe = net.createServer();
+        probe.once('error', () => resolve(false));
+        probe.listen(checkPort, '127.0.0.1', () => probe.close(() => resolve(true)));
+    });
+}
+
+// Keeps real-server tests off the smoke port pair while the launched stand-in listens on it.
+async function claimFreeSmokePort() {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+        const claim = await bindUdpClaim(SMOKE_PORT_PAIR_CLAIM);
+        if (claim) {
+            if (await tcpPortFree(SMOKE_PORT)) return { release: () => claim.close() };
+            claim.close();
+        }
+        await settle(500);
+    }
+    return null;
+}
+
+function isAlive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err) {
+        return err.code === 'EPERM';
+    }
+}
+
+// The stand-in executable under <tmp>/.../caxa/applications/nextra-<id>/0, the environment
+// that turns it into the stub, and the PIDs its processes wrote down. Afterwards it kills any
+// of them still running, matched by their command line, never by a PID alone.
+function prepareFakeExecutable(t) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nextra-smoke-tree-'));
+    const appDir = path.join(root, 'caxa', 'applications', `nextra-${path.basename(root).slice(-6).toLowerCase()}`, '0');
+    fs.mkdirSync(appDir, { recursive: true });
+    const executable = path.join(appDir, `Nextra${path.extname(process.execPath)}`);
+    try {
+        fs.linkSync(process.execPath, executable);
+    } catch {
+        fs.copyFileSync(process.execPath, executable);
+    }
+    const fixture = path.join(root, 'fake-nextra.js');
+    fs.writeFileSync(fixture, FAKE_NEXTRA_SOURCE);
+    const pidFile = path.join(root, 'pids.txt');
+    const pids = () => (fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : '')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+            const [role, pid] = line.trim().split(' ');
+            return { role, pid: Number(pid) };
+        });
+    t.after(async () => {
+        try {
+            const mine = executable.toLowerCase();
+            for (const record of smoke.listProcesses()) {
+                if (record.command.toLowerCase().includes(mine)) {
+                    try { process.kill(record.pid, 'SIGKILL'); } catch {}
+                }
+            }
+        } catch {}
+        await settle(300);
+        fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    });
+    return {
+        root,
+        executable,
+        pids,
+        env: {
+            NODE_OPTIONS: `--require "${fixture.split(path.sep).join('/')}"`,
+            FAKE_NEXTRA_ROLE: 'stub',
+            FAKE_NEXTRA_PID_FILE: pidFile,
+        },
+    };
+}
+
+test('cleanup kills the tree of the executable the smoke launched and leaves a Nextra instance started during the run alone', async (t) => {
+    const smokePort = await claimFreeSmokePort();
+    if (!smokePort) {
+        t.skip(`port ${SMOKE_PORT} stayed taken by another process`);
+        return;
+    }
+    t.after(() => smokePort.release());
+    const tree = prepareFakeExecutable(t);
+    // Another caxa-packaged Nextra, started after the smoke took its baseline.
+    const decoyScript = path.join(tree.root, 'caxa', 'applications', 'nextra-decoy', '0', 'server.js');
+    let decoy = null;
+    t.after(() => decoy?.kill('SIGKILL'));
+
+    const result = await runSmokeScript([tree.executable], 30000, {
+        env: { ...tree.env, FAKE_NEXTRA_MODE: 'missing-artifact,ignore-shutdown', FAKE_NEXTRA_READY_DELAY_MS: '1500' },
+        onOutput: (output) => {
+            if (!decoy && /Starting packaged executable/.test(output)) {
+                decoy = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', decoyScript], { stdio: 'ignore', windowsHide: true });
+            }
+        },
+    });
+    await settle(300);
+    const outcome = `exit ${result.code} ${result.signal} after ${result.ms} ms\n${result.output}`;
+    assert.ok(decoy, outcome);
+    assert.equal(result.code, 1, outcome);
+    assert.match(result.output, /Packaged artifact is missing ffmpeg/, outcome);
+    assert.equal(isAlive(decoy.pid), true, `the smoke killed a Nextra instance it did not launch (PID ${decoy.pid})\n${outcome}`);
+    assert.equal(decoy.exitCode, null, outcome);
+    const launched = tree.pids();
+    assert.deepEqual(launched.map((entry) => entry.role).sort(), ['server', 'stub'], outcome);
+    for (const { role, pid } of launched) {
+        assert.equal(isAlive(pid), false, `the launched ${role} (PID ${pid}) outlived the smoke\n${outcome}`);
+    }
+});
+
+test('a process list that cannot be read before the launch stops the smoke before it launches anything', async (t) => {
+    const smokePort = await claimFreeSmokePort();
+    if (!smokePort) {
+        t.skip(`port ${SMOKE_PORT} stayed taken by another process`);
+        return;
+    }
+    t.after(() => smokePort.release());
+    const tree = prepareFakeExecutable(t);
+    // With nothing on PATH, neither powershell.exe nor ps can be started.
+    const emptyPath = path.join(tree.root, 'empty-path');
+    fs.mkdirSync(emptyPath);
+
+    const result = await runSmokeScript([tree.executable], 20000, {
+        env: { ...tree.env, FAKE_NEXTRA_MODE: 'ignore-shutdown', PATH: emptyPath },
+    });
+    const outcome = `exit ${result.code} ${result.signal} after ${result.ms} ms\n${result.output}`;
+    assert.equal(result.code, 1, outcome);
+    assert.match(result.output, /process baseline/i, outcome);
+    assert.doesNotMatch(result.output, /Starting packaged executable/, outcome);
+    assert.deepEqual(tree.pids(), [], `something was launched\n${outcome}`);
+    assert.ok(result.ms < 10000, outcome);
+});
+
+test('a simulated packaged run with real processes passes, logs the launched executable exit, and the smoke ends on its own', async (t) => {
+    const smokePort = await claimFreeSmokePort();
+    if (!smokePort) {
+        t.skip(`port ${SMOKE_PORT} stayed taken by another process`);
+        return;
+    }
+    t.after(() => smokePort.release());
+    const tree = prepareFakeExecutable(t);
+    // The real main(), with the decoded-frame (Playwright) flow left out.
+    const driver = path.join(tree.root, 'drive-smoke.js');
+    fs.writeFileSync(driver, [
+        "'use strict';",
+        `const smoke = require(${JSON.stringify(smokeScript)});`,
+        `smoke.main({ executable: ${JSON.stringify(tree.executable)}, runOptions: { runPlaywright: () => {} } })`,
+        '    .then((code) => { process.exitCode = code; }, (err) => { console.error(err); process.exitCode = 1; });',
+        '',
+    ].join('\n'));
+
+    // A runner that declares a supervisor for its own services: the smoke pins it off for the
+    // executable it launches, whose own recovery it tests.
+    const result = await runSmokeScript([], 45000, { script: driver, env: { ...tree.env, EXTERNAL_SUPERVISOR: 'true' } });
+    const outcome = `exit ${result.code} ${result.signal} after ${result.ms} ms\n${result.output}`;
+    assert.equal(result.signal, null, `the smoke did not end on its own\n${outcome}`);
+    assert.equal(result.code, 0, outcome);
+    assert.match(result.output, /Adopted replacement server PID/, outcome);
+    assert.match(result.output, /Packaged graceful shutdown passed\./, outcome);
+    assert.match(result.output, /exited \(code 0, no signal\) in phase 'shutdown'/, outcome);
+    assert.match(result.output, /Packaged smoke passed\./, outcome);
+    const launched = tree.pids();
+    assert.deepEqual(launched.map((entry) => entry.role).sort(), ['replacement', 'server', 'stub'], outcome);
+    for (const { role, pid } of launched) {
+        assert.equal(isAlive(pid), false, `the ${role} (PID ${pid}) outlived the smoke\n${outcome}`);
+    }
 });
