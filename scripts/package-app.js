@@ -139,47 +139,198 @@ function getCloudflaredAssetName(platform = process.platform, arch = process.arc
     }
 }
 
-function downloadFileWithRedirects(url, destinationPath, redirectsLeft = 6) {
+// Production downloads go through https.get only; a plain-http URL, whether given
+// or reached through a redirect, is refused before any connection is made.
+function httpsOnlyGet(url, requestOptions, onResponse) {
+    const { protocol } = new URL(url);
+    if (protocol !== 'https:') {
+        throw new Error(`Refusing to download over ${protocol.replace(/:$/, '')} (HTTPS only): ${url}`);
+    }
+    return https.get(url, requestOptions, onResponse);
+}
+
+// Downloads `url` to `destinationPath`, following up to `redirectsLeft` redirects.
+//
+// Every request, including each one after a redirect, gets two bounds:
+// - connectTimeoutMs: how long the server may take to answer with response headers;
+// - idleTimeoutMs: how long the body may go without a single chunk.
+// A stall, a reset, an aborted or prematurely closed response and a file-stream
+// error all end the same way: the request, response and file are destroyed, the
+// partial file is deleted and the promise rejects, once. `get` is the transport
+// (https.get by default; tests inject their own).
+function downloadFileWithRedirects(url, destinationPath, redirectsLeft = 6, options = {}) {
+    const {
+        connectTimeoutMs = 30_000,
+        idleTimeoutMs = 60_000,
+        get = httpsOnlyGet,
+    } = options;
+
     return new Promise((resolve, reject) => {
-        const request = https.get(url, { headers: { 'User-Agent': 'nextra-packager' } }, (response) => {
-            const code = response.statusCode || 0;
-            const location = response.headers.location;
+        let settled = false;
+        let hop = 0; // numbers the requests, so a replaced one (after a redirect) is ignored
+        let timer = null;
+        let activeRequest = null;
+        let activeResponse = null;
+        let file = null;
 
-            if ([301, 302, 303, 307, 308].includes(code) && location) {
-                response.resume();
-                if (redirectsLeft <= 0) {
-                    reject(new Error(`Too many redirects while downloading ${url}`));
-                    return;
-                }
-                const nextUrl = new URL(location, url).toString();
-                downloadFileWithRedirects(nextUrl, destinationPath, redirectsLeft - 1)
-                    .then(resolve)
-                    .catch(reject);
+        const clearTimer = () => {
+            if (timer) clearTimeout(timer);
+            timer = null;
+        };
+        const armTimer = (ms, message) => {
+            clearTimer();
+            timer = setTimeout(() => fail(new Error(message)), ms);
+        };
+        const destroyQuietly = (stream) => {
+            try { stream?.destroy(); } catch { }
+        };
+
+        const succeed = () => {
+            if (settled) return;
+            settled = true;
+            clearTimer();
+            resolve();
+        };
+
+        const fail = (err) => {
+            if (settled) return;
+            settled = true;
+            clearTimer();
+            destroyQuietly(activeRequest);
+            destroyQuietly(activeResponse);
+            discardPartialFile(file, destinationPath).then(() => reject(err));
+        };
+
+        const fetchUrl = (currentUrl, left) => {
+            const thisHop = ++hop;
+            const stale = () => settled || thisHop !== hop;
+            // Stream and request errors that arrive after the promise settled, or after a
+            // redirect replaced this request, still need a listener: an unhandled 'error'
+            // event would throw.
+            const failIfCurrent = (err) => { if (!stale()) fail(err); };
+
+            armTimer(
+                connectTimeoutMs,
+                `Timed out: no response from ${currentUrl} within ${connectTimeoutMs} ms`
+            );
+
+            let request;
+            try {
+                request = get(currentUrl, { headers: { 'User-Agent': 'nextra-packager' } }, (response) => {
+                    if (stale()) {
+                        destroyQuietly(response);
+                        return;
+                    }
+                    clearTimer();
+                    activeResponse = response;
+                    response.on('error', failIfCurrent);
+                    response.on('aborted', () => {
+                        failIfCurrent(new Error(`Download from ${currentUrl} was aborted before the whole file arrived`));
+                    });
+
+                    const code = response.statusCode || 0;
+                    const location = response.headers.location;
+
+                    if ([301, 302, 303, 307, 308].includes(code) && location) {
+                        if (left <= 0) {
+                            fail(new Error(`Too many redirects while downloading ${currentUrl}`));
+                            return;
+                        }
+                        let nextUrl;
+                        try {
+                            nextUrl = new URL(location, currentUrl).toString();
+                        } catch (err) {
+                            fail(err);
+                            return;
+                        }
+                        // The redirect's own body is of no use; drop the connection with it.
+                        // Replace this request first, so the 'aborted' and 'close' that
+                        // destroying it emits are taken for what they are: stale.
+                        hop += 1;
+                        destroyQuietly(request);
+                        destroyQuietly(response);
+                        activeRequest = null;
+                        activeResponse = null;
+                        fetchUrl(nextUrl, left - 1);
+                        return;
+                    }
+
+                    if (code !== 200) {
+                        fail(new Error(`Failed to download (${code}) from ${currentUrl}`));
+                        return;
+                    }
+
+                    let ended = false;
+                    try {
+                        fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+                        file = fs.createWriteStream(destinationPath);
+                    } catch (err) {
+                        fail(err);
+                        return;
+                    }
+                    const resetIdle = () => {
+                        if (!stale()) {
+                            armTimer(
+                                idleTimeoutMs,
+                                `Download from ${currentUrl} stalled: no data for ${idleTimeoutMs} ms`
+                            );
+                        }
+                    };
+
+                    file.on('error', failIfCurrent);
+                    // A slow disk pauses the response; its drains show the transfer is alive.
+                    file.on('drain', resetIdle);
+                    file.on('close', () => {
+                        if (ended && file.writableFinished && !stale()) succeed();
+                    });
+                    response.on('data', resetIdle);
+                    response.on('end', () => { ended = true; });
+                    // pipe() does not end the file when the response closes without 'end', so a
+                    // reset connection would otherwise leave the promise pending for ever.
+                    response.on('close', () => {
+                        if (!ended) {
+                            failIfCurrent(new Error(`Connection to ${currentUrl} closed before the whole file arrived`));
+                        }
+                    });
+
+                    resetIdle();
+                    response.pipe(file);
+                });
+            } catch (err) {
+                fail(err);
                 return;
             }
 
-            if (code !== 200) {
-                response.resume();
-                reject(new Error(`Failed to download (${code}) from ${url}`));
-                return;
-            }
+            activeRequest = request;
+            request.on('error', failIfCurrent);
+        };
 
-            fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-            const file = fs.createWriteStream(destinationPath);
-            response.pipe(file);
+        fetchUrl(url, redirectsLeft);
+    });
+}
 
-            file.on('finish', () => {
-                file.close(() => resolve());
-            });
-
-            file.on('error', (err) => {
-                response.destroy();
-                try { fs.unlinkSync(destinationPath); } catch { }
-                reject(err);
-            });
-        });
-
-        request.on('error', (err) => reject(err));
+// Destroys the partial file stream, waits for its handle to close (so the file
+// exists and can be deleted, also on Windows), then deletes it. Nothing happens
+// if no file was ever opened for this download. A directory at the destination
+// is never removed: rmSync without `recursive` refuses it.
+function discardPartialFile(file, destinationPath) {
+    return new Promise((resolve) => {
+        if (!file) {
+            resolve();
+            return;
+        }
+        const removeFile = () => {
+            try {
+                fs.rmSync(destinationPath, { force: true, maxRetries: 5, retryDelay: 50 });
+            } catch { }
+            resolve();
+        };
+        if (file.closed) {
+            removeFile();
+            return;
+        }
+        file.once('close', removeFile);
+        file.destroy();
     });
 }
 
@@ -636,6 +787,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+    downloadFileWithRedirects,
     getCloudflaredAssetName,
     getFfmpegAsset,
 };
