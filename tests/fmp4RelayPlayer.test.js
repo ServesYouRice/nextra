@@ -1065,3 +1065,177 @@ test('VAL-094: a full SourceBuffer (QuotaExceededError) is still trimmed and ret
     assert.deepEqual(errors, []);
     assert.notEqual(player.getState().state, 'error');
 });
+
+// A viewer's pause (VAL-095). The player never calls pause() itself, so a
+// 'pause' event is always the viewer's (or the browser's on their behalf), while
+// a play() that autoplay policy refused, or a stall, leaves the element paused
+// without one.
+
+// Counts the player's own play() calls on the fake element.
+function countPlays(video) {
+    const calls = { count: 0 };
+    const play = video.play.bind(video);
+    video.play = () => {
+        calls.count += 1;
+        return play();
+    };
+    return calls;
+}
+
+// What the browser does when the viewer pauses or resumes: the element changes
+// state first, then the event fires.
+function viewerPauses(video) {
+    video.paused = true;
+    video.dispatch('pause');
+}
+
+function viewerPlays(video) {
+    video.paused = false;
+    video.dispatch('play');
+}
+
+test('VAL-095: live sync leaves a viewer\'s pause alone, however long it lasts', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { video } = await startPlaying(t);
+    assert.equal(video.paused, false, 'the player started playback');
+    const plays = countPlays(video);
+
+    viewerPauses(video);
+    // 0.5 s is buffered ahead of the playhead, which is more than the least needed to play.
+    t.mock.timers.tick(20 * 250);
+    await flushTasks();
+    assert.equal(plays.count, 0, 'live sync did not call play()');
+    assert.equal(video.paused, true);
+});
+
+test('VAL-095: a paused picture stays where the viewer stopped it, and play jumps to live', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { video, sourceBuffer } = await startPlaying(t);
+    assert.equal(video.currentTime, 1.5);
+    const plays = countPlays(video);
+
+    viewerPauses(video);
+    // The stream goes on while the viewer is paused: seconds of media pile up ahead.
+    sourceBuffer.buffered = timeRanges([[0, 8]]);
+    t.mock.timers.tick(8 * 250);
+    assert.equal(video.currentTime, 1.5, 'the paused picture does not move');
+    assert.equal(video.playbackRate, 1);
+
+    // Resuming: the next live-sync tick goes to the live edge, a cushion behind it.
+    viewerPlays(video);
+    assert.equal(video.currentTime, 1.5);
+    t.mock.timers.tick(250);
+    assert.equal(video.currentTime, 7.5);
+    assert.equal(plays.count, 0, 'the viewer resumed it, the player did not');
+});
+
+test('VAL-095: a paused element without a pause event is a stall or a refused start, and is resumed', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { video } = await startPlaying(t);
+    const plays = countPlays(video);
+
+    // Autoplay policy refused a play(): the element is paused and nothing fired.
+    video.paused = true;
+    t.mock.timers.tick(250);
+    await flushTasks();
+    assert.equal(plays.count, 1, 'live sync starts it again');
+    assert.equal(video.paused, false);
+});
+
+test('VAL-095: playing again clears the pause, so a later stall is resumed as before', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { video } = await startPlaying(t);
+    const plays = countPlays(video);
+
+    viewerPauses(video);
+    t.mock.timers.tick(4 * 250);
+    assert.equal(plays.count, 0);
+
+    viewerPlays(video);
+    t.mock.timers.tick(250);
+    assert.equal(plays.count, 0, 'nothing to resume while it plays');
+
+    // The browser stalls playback without a pause event.
+    video.paused = true;
+    t.mock.timers.tick(250);
+    await flushTasks();
+    assert.equal(plays.count, 1);
+    assert.equal(video.paused, false);
+
+    // And a second pause is honoured again.
+    viewerPauses(video);
+    t.mock.timers.tick(4 * 250);
+    assert.equal(plays.count, 1);
+});
+
+test('VAL-095: the pause event that playback reaching its end raises is not a viewer\'s pause', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { video } = await startPlaying(t);
+    const plays = countPlays(video);
+
+    video.ended = true;
+    video.paused = true;
+    video.dispatch('pause');
+    video.ended = false;
+    t.mock.timers.tick(250);
+    await flushTasks();
+    assert.equal(plays.count, 1, 'live sync still resumes it');
+});
+
+test('VAL-095: a viewer\'s pause survives a rebuild: the rebuilt player does not start playing by itself', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const { player, socket, video, sourceBuffer } = await startHeldPlaying(t);
+    const plays = countPlays(video);
+    viewerPauses(video);
+
+    // The SourceBuffer fails; the player rebuilds from a fresh init segment.
+    sourceBuffer.dispatch('error');
+    const rebuilt = await answerRecovery(socket, 1);
+    sendFragment(socket, 1, 2);
+    await flushTasks();
+    assert.equal(rebuilt.sourceBuffer.appended.length, 2, 'the rebuilt SourceBuffer got media');
+    t.mock.timers.tick(4 * 250);
+    assert.equal(plays.count, 0, 'the rebuilt player waits for the viewer');
+    assert.equal(video.paused, true);
+
+    viewerPlays(video);
+    t.mock.timers.tick(250);
+    assert.equal(player.getState().state, 'playing');
+});
+
+test('VAL-095: the player listens for the viewer\'s pause and play until stop()', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { player, video } = await startPlaying(t);
+    assert.equal(video.listenerCount('pause'), 1);
+    assert.equal(video.listenerCount('play'), 1);
+
+    player.stop();
+    assert.equal(video.listenerCount('pause'), 0, 'stop() removes the pause listener');
+    assert.equal(video.listenerCount('play'), 0, 'stop() removes the play listener');
+});
+
+test('VAL-095: a pause before stop() does not carry into the same player started again', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { player, socket, video } = await startPlaying(t);
+    viewerPauses(video);
+    player.stop();
+
+    player.start();
+    const plays = countPlays(video);
+    socket.serverEmit('media-init', { generation: 2, mimeType: MIME, initSegment: Uint8Array.of(1, 2) });
+    const mediaSource = FakeMediaSource.instances.at(-1);
+    mediaSource.open();
+    await flushTasks();
+    socket.serverEmit('media-chunk', { generation: 2, sequence: 1, keyframeStart: true, chunk: Uint8Array.of(3, 4) });
+    await flushTasks();
+    assert.equal(plays.count, 1, 'the new run starts playing');
+});

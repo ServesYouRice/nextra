@@ -96,6 +96,11 @@ export function createFmp4RelayPlayer(opts) {
     // How much of the cushion is reserve held for a bitrate switch.
     let switchReserve = 0;
     let started = false;
+    // The viewer paused on purpose and has not played again. The player never
+    // calls pause() itself, so a 'pause' event is theirs. A play() that was
+    // refused, or a stall, leaves the element paused without one: that is
+    // not this, and the player starts it again.
+    let userPaused = false;
     // Whether the SourceBuffer lays fragments end to end (see setupMediaSource).
     let sequenceMode = false;
 
@@ -333,7 +338,8 @@ export function createFmp4RelayPlayer(opts) {
         started = true;
         clearBufferingTimer();
         seekToCushion(range);
-        play();
+        // A rebuild while the viewer is paused starts over paused.
+        if (!userPaused) play();
         startLiveSyncTimer();
     }
 
@@ -360,6 +366,14 @@ export function createFmp4RelayPlayer(opts) {
         if (state !== 'playing' && state !== 'buffering') return;
         const range = getLiveBufferedRange();
         if (!range) return;
+        if (userPaused) {
+            // The picture stays where the viewer stopped it, and nothing starts
+            // it again. Media keeps arriving past it; the first tick after they
+            // play takes the playhead to the live edge.
+            lastPlayTime = -1;
+            stallTicks = 0;
+            return;
+        }
         const now = Date.now();
 
         // The playhead sits outside the live range: in front of a hole before it
@@ -761,10 +775,23 @@ export function createFmp4RelayPlayer(opts) {
         socket.on('media-chunk', handleMediaChunk);
         socket.on('relay-filler', handleRelayFiller);
 
+        // On the element for the whole run, not per MediaSource: a pause or play
+        // that comes while the player rebuilds is the viewer's all the same.
+        const onVideoPause = () => {
+            // Playback running into the end of the stream raises 'pause' too.
+            if (videoElement.ended) return;
+            userPaused = true;
+        };
+        const onVideoPlay = () => { userPaused = false; };
+        videoElement.addEventListener('pause', onVideoPause);
+        videoElement.addEventListener('play', onVideoPlay);
+
         cleanupFns.push(() => {
             socket.off('media-init', handleMediaInit);
             socket.off('media-chunk', handleMediaChunk);
             socket.off('relay-filler', handleRelayFiller);
+            try { videoElement.removeEventListener('pause', onVideoPause); } catch { }
+            try { videoElement.removeEventListener('play', onVideoPlay); } catch { }
         });
 
         // Request current init segment
@@ -779,6 +806,7 @@ export function createFmp4RelayPlayer(opts) {
         initRequestEpoch += 1;
         initTimeoutRetries = 0;
         failureRecoveries = 0;
+        userPaused = false;
         cleanupFns.forEach(fn => { try { fn(); } catch { } });
         cleanupFns = [];
         cleanupMediaSource();
