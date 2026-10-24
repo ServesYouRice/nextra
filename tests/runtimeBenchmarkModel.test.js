@@ -6,6 +6,8 @@ const {
     calculateHeadroomPercent,
     buildThresholdHeadroom,
     evaluateTopology,
+    observeTopology,
+    evaluateTopologySamples,
     finiteOrNull,
     sumCpuComponents,
     cpuPercent,
@@ -73,6 +75,120 @@ test('topology evaluation rejects signalling-only and idle relay runs', () => {
         'required 5 mediasoup consumers, observed 0',
         'required 1024 relay bytes forwarded during measurement, observed 0',
     ]);
+});
+
+function topologySample(overrides = {}, at) {
+    return {
+        ...(at === undefined ? {} : { at }),
+        topology: {
+            rooms: 1,
+            producers: 1,
+            consumers: 5,
+            viewers: 5,
+            relayViewers: 0,
+            fallbackPipelines: 0,
+            ...overrides,
+        },
+    };
+}
+
+test('observeTopology reads the load of one metrics sample and counts a missing field as 0', () => {
+    assert.deepEqual(observeTopology({
+        rooms: { active: 2, totalViewers: 7, totalRelayViewers: 3, totalMediasoupConsumers: 4 },
+        sockets: { counters: { activeProducers: 2, activeFallbackPipelines: 1 } },
+    }), {
+        rooms: 2,
+        producers: 2,
+        consumers: 4,
+        viewers: 7,
+        relayViewers: 3,
+        fallbackPipelines: 1,
+    });
+    // A field the server did not report is no load, so a requirement for it fails closed.
+    const none = { rooms: 0, producers: 0, consumers: 0, viewers: 0, relayViewers: 0, fallbackPipelines: 0 };
+    assert.deepEqual(observeTopology({}), none);
+    assert.deepEqual(observeTopology(undefined), none);
+    assert.deepEqual(observeTopology({ rooms: { active: 1 }, sockets: {} }), { ...none, rooms: 1 });
+});
+
+test('topology samples [ok, ok, ok] pass and report the lowest value of each requirement', () => {
+    const requirements = { rooms: 1, producers: 1, consumers: 5, relayViewers: 0, fallbackPipelines: 0, relayBytesForwarded: 0 };
+    const result = evaluateTopologySamples([
+        topologySample({ consumers: 5 }),
+        topologySample({ consumers: 8, rooms: 2 }),
+        topologySample({ consumers: 6, producers: 3 }),
+    ], requirements);
+    assert.deepEqual(result.failures, []);
+    assert.deepEqual(result.minimums, {
+        rooms: 1,
+        producers: 1,
+        consumers: 5,
+        viewers: 5,
+        relayViewers: 0,
+        fallbackPipelines: 0,
+    });
+});
+
+test('topology samples [ok, under-loaded, ok] fail and name the sample where the requirement was first unmet', () => {
+    const requirements = { rooms: 1, producers: 1, consumers: 5, relayViewers: 0, fallbackPipelines: 0, relayBytesForwarded: 0 };
+    // The last sample alone satisfies the requirements: this is the run the old
+    // last-sample check let through.
+    const samples = [
+        topologySample({}, Date.UTC(2026, 9, 24, 12, 0, 0)),
+        topologySample({ consumers: 2 }, Date.UTC(2026, 9, 24, 12, 0, 1)),
+        topologySample({ consumers: 1 }, Date.UTC(2026, 9, 24, 12, 0, 2)),
+        topologySample({}, Date.UTC(2026, 9, 24, 12, 0, 3)),
+    ];
+    assert.deepEqual(evaluateTopology(samples[3].topology, requirements), []);
+    const result = evaluateTopologySamples(samples, requirements);
+    assert.deepEqual(result.failures, [
+        'required 5 mediasoup consumers in every sample, lowest observed 1, first unmet at sample 2 of 4 (2026-10-24T12:00:01.000Z)',
+    ]);
+    assert.equal(result.minimums.consumers, 1);
+    assert.equal(result.minimums.rooms, 1);
+});
+
+test('topology samples report every unmet requirement in the order of the final-sample check', () => {
+    const requirements = { rooms: 1, producers: 1, consumers: 2, relayViewers: 1, fallbackPipelines: 1, relayBytesForwarded: 1024 };
+    const result = evaluateTopologySamples([
+        topologySample({ consumers: 2, relayViewers: 1, fallbackPipelines: 1 }),
+        topologySample({ consumers: 2, relayViewers: 0, fallbackPipelines: 1 }),
+        topologySample({ rooms: 0, producers: 0, consumers: 2, relayViewers: 1, fallbackPipelines: 0 }),
+    ], requirements, { relayBytesForwarded: 1000 });
+    assert.deepEqual(result.failures, [
+        'required 1 rooms in every sample, lowest observed 0, first unmet at sample 3 of 3',
+        'required 1 producers in every sample, lowest observed 0, first unmet at sample 3 of 3',
+        'required 1 relay viewers in every sample, lowest observed 0, first unmet at sample 2 of 3',
+        'required 1 fallback pipelines in every sample, lowest observed 0, first unmet at sample 3 of 3',
+        'required 1024 relay bytes forwarded during measurement, observed 1000',
+    ]);
+});
+
+test('relay bytes stay a whole-window total and are not required of each sample', () => {
+    const requirements = { rooms: 1, producers: 0, consumers: 0, relayViewers: 0, fallbackPipelines: 0, relayBytesForwarded: 1 };
+    assert.deepEqual(evaluateTopologySamples([topologySample(), topologySample()], requirements, { relayBytesForwarded: 1 }).failures, []);
+    assert.deepEqual(evaluateTopologySamples([topologySample()], requirements, { relayBytesForwarded: 0 }).failures, [
+        'required 1 relay bytes forwarded during measurement, observed 0',
+    ]);
+    // No whole-window total given counts as none forwarded.
+    assert.deepEqual(evaluateTopologySamples([topologySample()], requirements).failures, [
+        'required 1 relay bytes forwarded during measurement, observed 0',
+    ]);
+});
+
+test('topology samples without any sample fail every requirement and report no minimum', () => {
+    const requirements = { rooms: 1, producers: 0, consumers: 0, relayViewers: 0, fallbackPipelines: 0, relayBytesForwarded: 0 };
+    const result = evaluateTopologySamples([], requirements);
+    assert.deepEqual(result.failures, ['required 1 rooms in every sample, no sample observed']);
+    assert.deepEqual(result.minimums, {
+        rooms: null,
+        producers: null,
+        consumers: null,
+        viewers: null,
+        relayViewers: null,
+        fallbackPipelines: null,
+    });
+    assert.deepEqual(evaluateTopologySamples([], { ...requirements, rooms: 0 }).failures, []);
 });
 
 test('threshold headroom is explicit and negative when a limit is breached', () => {

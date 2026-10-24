@@ -301,6 +301,64 @@ test('benchmark fails closed when the worker usage lacks the system CPU time', a
     }
 });
 
+// --- The required topology must hold in every sample of the measured window ---
+
+// Request 1 is the warm-up whose result is discarded; request n (n >= 2) is sample n - 1.
+test('benchmark fails when the required load is missing in earlier samples even though the last sample has it', async () => {
+    const fixture = await startBenchmarkFixture((metrics, requestNumber) => {
+        if (requestNumber === 3) {
+            return { ...metrics, rooms: { ...metrics.rooms, totalMediasoupConsumers: 0 } };
+        }
+        if (requestNumber === 4) {
+            return { ...metrics, sockets: { ...metrics.sockets, counters: { ...metrics.sockets.counters, activeProducers: 0 } } };
+        }
+        return metrics;
+    });
+    try {
+        const { exitCode, summary } = await runBenchmarkHarness(fixture.baseUrl);
+        // The final sample alone meets every requirement: the topology it reports is complete.
+        assert.equal(summary.topology.producers, 1);
+        assert.equal(summary.topology.consumers, 1);
+        assert.equal(exitCode, 1);
+        assert.equal(summary.pass, false);
+        assert.equal(summary.failures.length, 2, JSON.stringify(summary.failures));
+        assert.match(summary.failures[0], /^required 1 producers in every sample, lowest observed 0, first unmet at sample 3 of \d+ \(\d{4}-\d{2}-\d{2}T[\d:.]+Z\)$/);
+        assert.match(summary.failures[1], /^required 1 mediasoup consumers in every sample, lowest observed 0, first unmet at sample 2 of \d+ \(\d{4}-\d{2}-\d{2}T[\d:.]+Z\)$/);
+        assert.equal(summary.topologyMinimums.producers, 0);
+        assert.equal(summary.topologyMinimums.consumers, 0);
+        assert.equal(summary.topologyMinimums.rooms, 1);
+    } finally {
+        await fixture.close();
+    }
+});
+
+test('benchmark reports the lowest observed load of the window and passes when every sample meets the requirements', async () => {
+    const fixture = await startBenchmarkFixture((metrics, requestNumber) => ({
+        ...metrics,
+        rooms: { ...metrics.rooms, totalMediasoupConsumers: requestNumber === 4 ? 2 : 3, totalViewers: requestNumber === 4 ? 2 : 3 },
+    }));
+    try {
+        const { exitCode, summary } = await runBenchmarkHarness(fixture.baseUrl);
+        assert.equal(exitCode, 0, JSON.stringify(summary.failures));
+        assert.equal(summary.pass, true);
+        assert.deepEqual(summary.failures, []);
+        assert.deepEqual(summary.topologyMinimums, {
+            rooms: 1,
+            producers: 1,
+            consumers: 2,
+            viewers: 2,
+            relayViewers: 0,
+            fallbackPipelines: 0,
+        });
+        // The existing keys keep their meaning: the last sample's load and the whole-window relay total.
+        assert.equal(summary.topology.clients, 1);
+        assert.equal(summary.topology.consumers, 3);
+        assert.equal(summary.topology.relayBytesForwarded, 0);
+    } finally {
+        await fixture.close();
+    }
+});
+
 // --- A failed run must close every socket it opened and exit with code 1 ---
 
 // Runs the harness for a case that fails before it can print a summary. `killed` is
