@@ -12,6 +12,7 @@ const {
     isLocalHostname,
     shouldTrustForwardedHeaders,
     getTrustedForwardedClientIp,
+    getCloudflareClientIp,
     classifyClient,
     isIpInTrustedLan,
     timingSafeTokenEqual,
@@ -266,6 +267,17 @@ test('CF-Connecting-IP is honoured only under the explicit Cloudflare mode, and 
     // Trust still needs a loopback peer and the forwarded-header gate.
     assert.equal(getTrustedForwardedClientIp({ 'cf-connecting-ip': '203.0.113.9' }, '192.168.0.10', true, cloudflare), '');
     assert.equal(getTrustedForwardedClientIp({ 'cf-connecting-ip': '203.0.113.9' }, LOOPBACK_PEER, false, cloudflare), '');
+});
+
+test('getCloudflareClientIp returns CF-Connecting-IP only when it is one valid address', () => {
+    assert.equal(getCloudflareClientIp({ 'cf-connecting-ip': ' 203.0.113.9 ' }), '203.0.113.9');
+    assert.equal(getCloudflareClientIp({ 'cf-connecting-ip': '::ffff:203.0.113.9' }), '203.0.113.9');
+    assert.equal(getCloudflareClientIp({ 'cf-connecting-ip': '2001:db8::1' }), '2001:db8::1');
+    for (const value of ['', 'not-an-ip', '203.0.113.9, 127.0.0.1', ['203.0.113.9'], undefined]) {
+        assert.equal(getCloudflareClientIp({ 'cf-connecting-ip': value }), '', JSON.stringify(value));
+    }
+    assert.equal(getCloudflareClientIp(), '');
+    assert.equal(getCloudflareClientIp(null), '');
 });
 
 // C-a223946bd23a / VAL-009: an entry that is not a valid network and a prefix of 1 to 32 matches nothing.

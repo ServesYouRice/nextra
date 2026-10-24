@@ -274,6 +274,13 @@ function getKnownPublicShareOrigins() {
     ].filter((origin) => origin && isPublicOrigin(origin));
 }
 
+// The URL of the cloudflared tunnel Nextra launched (quick or named), while it runs: the one relay whose
+// CF-Connecting-IP is Cloudflare's record of the viewer. A SHARE_BASE_URL on its own may front any proxy.
+function getManagedTunnelOrigin() {
+    const { status, baseUrl } = getPublicTunnelState();
+    return status === 'active' && baseUrl && isPublicOrigin(baseUrl) ? baseUrl : '';
+}
+
 // Who a request or socket comes from; see lib/requestIdentity.js. The tunnel and any same-host proxy relay from
 // loopback, so a relayed request is classified as a known proxy, never as the local operator.
 const {
@@ -286,6 +293,8 @@ const {
     getKnownPublicShareOrigins,
     getTrustForwardedHeaders: () => config.TRUST_X_FORWARDED_HEADERS,
     getTrustProxy: () => config.TRUST_PROXY,
+    getManagedTunnelOrigin,
+    getTrustCloudflareClientIp: () => config.TRUST_CLOUDFLARE_CONNECTING_IP,
 });
 
 function getRequestClientIp(req) {
@@ -1356,6 +1365,9 @@ async function startWhipHttpServer(whipRouter) {
     }
     if (config.TRUST_X_FORWARDED_HEADERS) {
         console.log('Forwarded header trust: enabled for loopback proxy peers only.');
+    }
+    if (config.TRUST_CLOUDFLARE_CONNECTING_IP) {
+        console.log('CF-Connecting-IP trust: enabled for loopback proxy peers; use it only behind cloudflared.');
     }
     if (config.WHIP_ALLOW_INSECURE_REMOTE
         && config.WHIP_BIND_HOST.toLowerCase() !== 'localhost'
