@@ -209,10 +209,13 @@ app.use(helmet({
             imgSrc: ["'self'", 'data:', 'blob:'],
             mediaSrc: ["'self'", 'blob:'],
             workerSrc: ["'self'", 'blob:'],
-            // Operators who explicitly allow plaintext relay on a declared LAN
-            // must be able to load the SPA over HTTP on that LAN. All other
-            // deployments keep Helmet's HTTPS-upgrade directive.
-            upgradeInsecureRequests: config.ALLOW_INSECURE_TRUSTED_LAN_RELAY ? null : [],
+            // The directive follows the scheme this listener really serves. On
+            // plain HTTP it would make some browsers (Safari on localhost) fetch
+            // the app's own resources over TLS from a plaintext port, so it is
+            // sent only when LOCAL_HTTPS is on. Operators who explicitly allow
+            // plaintext relay on a declared LAN must also be able to load the
+            // SPA over HTTP on that LAN, so that setting turns it off too.
+            upgradeInsecureRequests: config.LOCAL_HTTPS && !config.ALLOW_INSECURE_TRUSTED_LAN_RELAY ? [] : null,
         },
     },
     crossOriginEmbedderPolicy: false,
