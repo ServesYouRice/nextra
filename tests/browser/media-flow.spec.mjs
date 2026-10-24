@@ -1,6 +1,8 @@
 import { test, expect, devices } from '@playwright/test';
 import { execFile } from 'node:child_process';
+import path from 'node:path';
 import { promisify } from 'node:util';
+import { createLockSession } from './support/exclusiveFileLock.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -758,48 +760,31 @@ test('autoplay denial falls back to muted playback and unmuting control succeeds
 
 let loopbackProxySequence = 0;
 let loopbackProxyState = null;
-// The running test's place in the lock queue, kept from the first line of
-// beforeEach. When the test timeout fires inside beforeEach, Playwright stops
-// waiting for the hook without throwing into it, so the hook's own catch never
-// runs: afterEach then removes the ticket and marks it abandoned, which ends
-// the abandoned wait instead of leaving a ticket queued ahead of every later
-// test.
-let mediaFlowTicket = null;
+// The running test's claim on the lock, kept from the first line of beforeEach.
+// When the test timeout fires inside beforeEach, Playwright stops waiting for the
+// hook without throwing into it, so the hook's own catch never runs: afterEach
+// then cancels a wait that is still going on and gives back a lock that was
+// taken, instead of leaving it to block every later test.
+let mediaFlowLockSession = null;
 
 test.beforeEach(async ({ browser }, testInfo) => {
-    const ticket = { abandoned: false, remove: async () => {} };
-    mediaFlowTicket = ticket;
-    const [fs, http, net, path] = await Promise.all([
-        import('node:fs/promises'),
+    // One media-flow test at a time may use the shared server and room, across
+    // workers (see support/exclusiveFileLock.mjs). The folder is under the project's
+    // outputDir, which Playwright clears when a run starts, so a lock left by a
+    // killed run does not block the next run.
+    const lockSession = createLockSession({
+        directory: path.join(testInfo.project.outputDir, '.media-flow-lock'),
+        workerIndex: testInfo.workerIndex,
+    });
+    mediaFlowLockSession = lockSession;
+    const [http, net] = await Promise.all([
         import('node:http'),
         import('node:net'),
-        import('node:path'),
     ]);
     loopbackProxySequence += 1;
-    // Under the project's outputDir, which Playwright clears when a run starts,
-    // so a ticket left by a killed run does not block the next run.
-    const lockDirectory = path.join(testInfo.project.outputDir, '.media-flow-lock');
-    const ticketName = `${[
-        String(Date.now()).padStart(13, '0'),
-        String(testInfo.workerIndex).padStart(4, '0'),
-        String(process.pid).padStart(8, '0'),
-        String(loopbackProxySequence).padStart(4, '0'),
-    ].join('-')}.ticket`;
-    const ticketPath = path.join(lockDirectory, ticketName);
-    ticket.remove = () => fs.rm(ticketPath, { force: true });
-    await fs.mkdir(lockDirectory, { recursive: true });
-    await fs.writeFile(ticketPath, '', { flag: 'wx' });
+    await lockSession.acquire();
 
     try {
-        for (;;) {
-            if (ticket.abandoned) throw new Error('beforeEach timed out waiting for the media-flow lock');
-            const tickets = (await fs.readdir(lockDirectory))
-                .filter((entry) => entry.endsWith('.ticket'))
-                .sort();
-            if (tickets[0] === ticketName) break;
-            await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-
         const port = serverPort(testInfo);
         const workerOctet = (testInfo.workerIndex % 250) + 1;
         const testOctet = (loopbackProxySequence % 250) + 2;
@@ -841,7 +826,7 @@ test.beforeEach(async ({ browser }, testInfo) => {
             proxy.once('error', reject);
             proxy.listen(0, '127.0.0.1', resolve);
         });
-        if (ticket.abandoned) {
+        if (lockSession.cancelled) {
             proxy.close();
             throw new Error('beforeEach timed out while starting the loopback proxy');
         }
@@ -862,15 +847,17 @@ test.beforeEach(async ({ browser }, testInfo) => {
             sockets,
         };
     } catch (error) {
-        await ticket.remove();
+        // afterEach releases it again and reports a failure to do so.
+        await lockSession.release().catch(() => {});
         throw error;
     }
 });
 
 test.afterEach(async () => {
-    const ticket = mediaFlowTicket;
-    mediaFlowTicket = null;
-    if (ticket) ticket.abandoned = true;
+    const lockSession = mediaFlowLockSession;
+    mediaFlowLockSession = null;
+    // First, so an abandoned beforeEach cannot take the lock while this hook runs.
+    lockSession?.cancel();
 
     if (loopbackProxyState) {
         const {
@@ -884,5 +871,7 @@ test.afterEach(async () => {
         for (const socket of sockets) socket.destroy();
         await new Promise((resolve) => proxy.close(resolve));
     }
-    if (ticket) await ticket.remove();
+    // After the proxy is closed, so the next test starts on a quiet server. A lock that
+    // someone else took meanwhile fails this test here.
+    await lockSession?.release();
 });
