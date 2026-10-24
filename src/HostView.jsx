@@ -11,7 +11,7 @@ import UserErrorAlert from './components/UserErrorAlert';
 import RoomSharePanel from './components/RoomSharePanel';
 import { useHostSessionController } from './hooks/useHostSessionController';
 import { formatBytes } from './lib/formatBytes.mjs';
-import { isMediaDebugEnabled } from './lib/mediaDebug.mjs';
+import { getLocalStorageSafely, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 import { evaluateHostPreflight } from './lib/hostPreflight.mjs';
 import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
 import { setNavigationGuard } from './lib/navigationGuard.mjs';
@@ -66,7 +66,7 @@ const CAPTURE_PREFS_STORAGE_KEY = 'nextra.capturePrefs.v1';
 // and create-room (two 15 s attempts, each after up to 10 s of connecting). A
 // newer start waits at most this long for an older one's request.
 const ROOM_REQUEST_SETTLE_TIMEOUT_MS = (10_000 + 5_000) + 2 * (10_000 + 15_000);
-const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, window.localStorage);
+const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, getLocalStorageSafely(window));
 
 function mediaDebugLog(...args) {
     if (MEDIA_DEBUG_LOGS) {
