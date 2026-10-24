@@ -30,11 +30,13 @@ import {
 import { createSubscriptionLedger, emitClaimedStart, releaseSubscription } from './lib/subscriptionLedger.mjs';
 import { beginFallbackStart } from './lib/fallbackStart.mjs';
 import { isSocketNotConnectedError } from './lib/timedAck.mjs';
-import { createRelayAppendQueue } from './lib/relayAppendQueue.mjs';
+import {
+    createRelayAppendQueue,
+    RELAY_QUEUE_MAX_BYTES as MAX_QUEUE_BYTES,
+    RELAY_QUEUE_MAX_CHUNKS as MAX_QUEUE_CHUNKS,
+} from './lib/relayAppendQueue.mjs';
 import { abandonStaleJoin, createViewerSession, isStaleViewerSessionError } from './lib/viewerSession.mjs';
 
-const MAX_QUEUE_CHUNKS = 240;
-const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
 const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, getLocalStorageSafely(window));
 
 function mediaDebugLog(...args) {

@@ -12,7 +12,8 @@
 // behind the playhead and appends the same chunk again, once. Anything else
 // that stops the stream from reaching the picture is a failure, reported once
 // through onFailure, after which the queue takes nothing more:
-// - more chunks or bytes queued than the limits (the viewer fell behind);
+// - more live chunks or bytes queued than the limits (the viewer fell behind),
+//   or a later viewer's bootstrap snapshot above them (see prepend);
 // - a SourceBuffer that is still full after its eviction, or has nothing to evict;
 // - any other appendBuffer() exception;
 // - the SourceBuffer's 'error' (the browser could not parse an append);
@@ -38,6 +39,13 @@ export function relayAppendRefusedMessage(err) {
 
 /** Seconds of media before the playhead that an eviction keeps. */
 export const EVICTION_KEEP_SECONDS = 10;
+
+// WatchView's limits: the live media a relay viewer may have queued, and the
+// most a later viewer's bootstrap snapshot may hold. lib/socket.js keeps the
+// snapshot to RELAY_QUEUE_MAX_BYTES (MAX_RELAY_BOOTSTRAP_BYTES), and
+// tests/socketRelayBootstrap.test.js holds the two together.
+export const RELAY_QUEUE_MAX_CHUNKS = 240;
+export const RELAY_QUEUE_MAX_BYTES = 24 * 1024 * 1024;
 
 /** @param {unknown} err */
 export function isQuotaExceededError(err) {
@@ -82,6 +90,10 @@ export function createRelayAppendQueue({
     /** @type {Uint8Array[]} */
     let chunks = [];
     let bytes = 0;
+    // The bootstrap chunks still queued, counted apart from the live limits.
+    /** @type {Set<Uint8Array>} */
+    const bootstrap = new Set();
+    let bootstrapBytes = 0;
     /** @type {RelaySourceBuffer | null} */
     let sourceBuffer = null;
     /** @type {RelayMediaSource | null} */
@@ -102,6 +114,8 @@ export function createRelayAppendQueue({
         done = true;
         chunks = [];
         bytes = 0;
+        bootstrap.clear();
+        bootstrapBytes = 0;
         pending = null;
         evictedFor = null;
         while (unlisten.length) /** @type {() => void} */ (unlisten.pop())();
@@ -121,6 +135,7 @@ export function createRelayAppendQueue({
         if (index < 0) return;
         chunks.splice(index, 1);
         bytes -= chunk.byteLength;
+        if (bootstrap.delete(chunk)) bootstrapBytes -= chunk.byteLength;
     };
 
     /** @param {RelaySourceBuffer} target @param {Uint8Array} chunk @param {unknown} err */
@@ -209,15 +224,15 @@ export function createRelayAppendQueue({
 
         /**
          * Queues a live chunk and appends it when its turn comes. False when the
-         * queue takes nothing (failed, closed, or not current) or the chunk took it
-         * past its limits, which fails it.
+         * queue takes nothing (failed, closed, or not current) or the chunk took the
+         * live chunks past the limits, which fails it.
          * @param {Uint8Array} chunk
          */
         enqueue(chunk) {
             if (done || !isActive()) return false;
             chunks.push(chunk);
             bytes += chunk.byteLength;
-            if (chunks.length > maxChunks || bytes > maxBytes) {
+            if (chunks.length - bootstrap.size > maxChunks || bytes - bootstrapBytes > maxBytes) {
                 fail(RELAY_FELL_BEHIND_MESSAGE);
                 return false;
             }
@@ -226,14 +241,25 @@ export function createRelayAppendQueue({
         },
 
         /**
-         * Puts chunks in front of the queue (a later viewer's bootstrap snapshot),
-         * before the first append starts. The limits are checked at the next enqueue.
+         * Puts a later viewer's bootstrap snapshot in front of the queue, before
+         * the first append starts. The snapshot may itself reach the limits: it
+         * is counted apart from the live chunks until it is appended, so the live
+         * media that arrives meanwhile keeps the whole allowance. A snapshot above
+         * the limits fails the queue. False when the queue took nothing.
          * @param {Uint8Array[]} list
          */
         prepend(list) {
-            if (done) return;
+            if (done) return false;
+            const listBytes = list.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+            if (bootstrap.size + list.length > maxChunks || bootstrapBytes + listBytes > maxBytes) {
+                fail(RELAY_FELL_BEHIND_MESSAGE);
+                return false;
+            }
             chunks.unshift(...list);
-            for (const chunk of list) bytes += chunk.byteLength;
+            bytes += listBytes;
+            for (const chunk of list) bootstrap.add(chunk);
+            bootstrapBytes += listBytes;
+            return true;
         },
 
         /**
@@ -243,6 +269,8 @@ export function createRelayAppendQueue({
         clear() {
             chunks = [];
             bytes = 0;
+            bootstrap.clear();
+            bootstrapBytes = 0;
             evictedFor = null;
         },
 

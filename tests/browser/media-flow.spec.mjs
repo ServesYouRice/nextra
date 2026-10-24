@@ -304,6 +304,57 @@ async function trackHostRecorders(page, { recordMp4 = true } = {}) {
     }, recordMp4);
 }
 
+// Hands each relay recording slice of the host page to HostView as `parts`
+// chunks, as a recorder with a far shorter timeslice would, so a generation
+// passes hundreds of chunks in seconds; the bytes and their order are
+// unchanged. MP4 is off: a later viewer of a VP8 generation replays all of it.
+// __nextraHoldRelayChunks() keeps the chunks back until
+// __nextraReleaseRelayChunks() hands them over, in order.
+async function splitHostRelayChunks(page, parts) {
+    await page.addInitScript((count) => {
+        const NativeMediaRecorder = window.MediaRecorder;
+        window.__nextraRecorders = [];
+        const held = [];
+        let holding = false;
+        window.__nextraHoldRelayChunks = () => { holding = true; };
+        window.__nextraReleaseRelayChunks = () => {
+            holding = false;
+            for (const handOver of held.splice(0)) handOver();
+        };
+        window.MediaRecorder = class SplittingMediaRecorder extends NativeMediaRecorder {
+            static isTypeSupported(type) {
+                if (String(type).startsWith('video/mp4')) return false;
+                return NativeMediaRecorder.isTypeSupported(type);
+            }
+
+            constructor(...args) {
+                super(...args);
+                this.chunksMade = 0;
+                window.__nextraRecorders.push(this);
+            }
+
+            get ondataavailable() {
+                return super.ondataavailable;
+            }
+
+            set ondataavailable(handler) {
+                super.ondataavailable = typeof handler === 'function'
+                    ? (event) => {
+                        const blob = event.data;
+                        const size = Math.max(1, Math.ceil(blob.size / count));
+                        for (let offset = 0; offset < blob.size; offset += size) {
+                            this.chunksMade += 1;
+                            const data = blob.slice(offset, offset + size);
+                            if (holding) held.push(() => handler.call(this, { data }));
+                            else handler.call(this, { data });
+                        }
+                    }
+                    : handler;
+            }
+        };
+    }, parts);
+}
+
 // Holds what the viewer's WebSocket receives and hands it over in one task, as
 // a connection that stalls and then catches up does.
 async function installHeldWebSocket(page) {
@@ -784,6 +835,50 @@ test('delayed relay-first viewers select one fresh recorder generation and clean
     });
 
     await secondViewerContext.close();
+    await firstViewerContext.close();
+    await hostContext.close();
+});
+
+// A later relay viewer of a VP8 generation starts from the server's bootstrap,
+// every chunk since the generation began. The bootstrap arrives as one buffer,
+// so the browser's relay queue (240 chunks, 72 s of 300 ms slices) takes it
+// however many chunks the generation has passed. The host holds its chunks
+// while the late viewer starts and hands them over once it plays, so what
+// reaches the viewer during its start is the bootstrap alone.
+test('a relay viewer who joins after the generation passed 240 recorder chunks plays from its bootstrap', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const firstViewerContext = await browser.newContext();
+    const lateViewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const firstViewerPage = await firstViewerContext.newPage();
+    const lateViewerPage = await lateViewerContext.newPage();
+    await splitHostRelayChunks(hostPage, 25);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(firstViewerPage, code, testInfo);
+    const generation = (await getRoomByCode(request, code)).mediaGeneration;
+    expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1).mimeType)).toMatch(/^video\/webm/);
+    await expect.poll(() => hostPage.evaluate(() => window.__nextraRecorders.at(-1).chunksMade), {
+        timeout: 30_000,
+    }).toBeGreaterThan(300);
+
+    await hostPage.evaluate(() => window.__nextraHoldRelayChunks());
+    await joinAndWatchRelay(lateViewerPage, code, testInfo);
+    await hostPage.evaluate(() => window.__nextraReleaseRelayChunks());
+    // It joined the running generation from its bootstrap; nothing restarted for it.
+    expect((await getRoomByCode(request, code)).mediaGeneration).toBe(generation);
+    const startedAt = await videoTime(lateViewerPage);
+    await expect.poll(() => videoTime(lateViewerPage)).toBeGreaterThan(startedAt + 2);
+    expect(await lateViewerPage.locator('video').evaluate((video) => video.error?.code ?? null)).toBeNull();
+    await expect(lateViewerPage.getByText(/relay mode active/i)).toBeVisible();
+    await expect(lateViewerPage.getByRole('alert')).toHaveCount(0);
+
+    await lateViewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await firstViewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await lateViewerContext.close();
     await firstViewerContext.close();
     await hostContext.close();
 });

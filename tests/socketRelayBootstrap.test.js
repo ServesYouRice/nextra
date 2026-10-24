@@ -95,9 +95,17 @@ async function startRelayRoom(options, viewerNames) {
     for (const viewer of viewers) {
         assert.equal((await request(viewer, 'join-room', { code: created.code })).success, true);
     }
+    const serverHost = ioServer.sockets.sockets.get(host.id);
     return {
         host,
         viewers,
+        room,
+        // Runs the server's own handler for an event from the host, for chunks
+        // above the test server's 1 MB Socket.IO message limit.
+        fromHost(event, payload) {
+            const [listener] = serverHost.listeners(event);
+            return listener(payload);
+        },
         async close() {
             [host, ...viewers].forEach((client) => client.close());
             destroyRoom(room.code);
@@ -237,6 +245,215 @@ test('an unparseable MP4 relay generation asks the host to fall back to VP8', { 
         relay.host.emit('media-chunk', { generation: 1, chunk: box('mdat', Buffer.alloc(8)) });
         await request(relay.host, 'get-media-init');
         assert.equal(failures.length, 1);
+    } finally {
+        await relay.close();
+    }
+});
+
+// ── A later relay viewer's bootstrap against the browser's relay queue ──
+//
+// WatchView feeds relay media through src/lib/relayAppendQueue.mjs. These tests
+// run that queue, with its own limits, on what the server sends a later viewer:
+// the live chunks it receives from its start, and the bootstrap from the
+// acknowledgement in front of them, against a SourceBuffer whose appends the
+// test ends by hand.
+
+const WEBM_MIME = 'video/webm;codecs=vp8,opus';
+const MB = 1024 * 1024;
+const loadRelayQueue = () => import('../src/lib/relayAppendQueue.mjs');
+
+class ManualSourceBuffer extends EventTarget {
+    constructor() {
+        super();
+        this.updating = false;
+        this.appended = [];
+    }
+
+    appendBuffer(data) {
+        assert.equal(this.updating, false, 'one append at a time');
+        this.updating = true;
+        this.appended.push(Buffer.from(data.buffer, data.byteOffset, data.byteLength));
+    }
+
+    remove() {
+        assert.fail('nothing is evicted here');
+    }
+
+    // Ends the running append and each one the queue starts after it.
+    finishAll() {
+        while (this.updating) {
+            this.updating = false;
+            this.dispatchEvent(new Event('updateend'));
+        }
+    }
+}
+
+class OpenMediaSource extends EventTarget {
+    constructor() {
+        super();
+        this.readyState = 'open';
+    }
+}
+
+// What startRelayPlayback does for a later relay viewer, up to its first append.
+async function startLateRelayViewer(viewer) {
+    const { createRelayAppendQueue, RELAY_QUEUE_MAX_BYTES, RELAY_QUEUE_MAX_CHUNKS } = await loadRelayQueue();
+    const failures = [];
+    const queue = createRelayAppendQueue({
+        maxChunks: RELAY_QUEUE_MAX_CHUNKS,
+        maxBytes: RELAY_QUEUE_MAX_BYTES,
+        onFailure: (failure) => failures.push(failure.message),
+    });
+    viewer.on('media-chunk', ({ chunk }) => queue.enqueue(new Uint8Array(chunk)));
+    const start = await request(viewer, 'relay-consume-start');
+    assert.equal(start.success, true);
+    assert.equal(start.relayViewerCount, 2);
+    const sourceBuffer = new ManualSourceBuffer();
+    queue.attach(sourceBuffer, new OpenMediaSource());
+    queue.prepend(start.bootstrapChunks.map((chunk) => new Uint8Array(chunk)));
+    queue.pump();
+    return { start, sourceBuffer, failures };
+}
+
+// Records a WebM generation of `total` bytes in chunks of `size`, each one
+// delivered to the viewer already watching before the next is sent.
+async function recordWebm(relay, watcher, total, size) {
+    const recorded = [];
+    let bytes = 0;
+    while (bytes < total) {
+        const chunk = Buffer.alloc(Math.min(size, total - bytes), recorded.length % 251);
+        const delivered = nextEvent(watcher, 'media-chunk', () => true);
+        relay.fromHost('media-chunk', { generation: 1, chunk });
+        await delivered;
+        recorded.push(chunk);
+        bytes += chunk.length;
+    }
+    return recorded;
+}
+
+async function startWebmGeneration(relay, firstViewer) {
+    assert.equal((await request(firstViewer, 'relay-consume-start')).success, true);
+    relay.host.emit('media-init', { mimeType: WEBM_MIME, generation: 1 });
+    await request(relay.host, 'get-media-init');
+}
+
+// The browser's queue holds 240 live chunks (72 s of 300 ms recorder slices).
+// The bootstrap reaches it as one buffer, so a viewer that joins long after
+// the generation began still starts.
+test('a late relay viewer starts from a bootstrap of more recorder chunks than the browser queue holds', { concurrency: false }, async () => {
+    const { RELAY_QUEUE_MAX_CHUNKS } = await loadRelayQueue();
+    const relay = await startRelayRoom({}, ['first', 'late']);
+    const [firstViewer, lateViewer] = relay.viewers;
+    try {
+        await startWebmGeneration(relay, firstViewer);
+        const recorded = await recordWebm(relay, firstViewer, (RELAY_QUEUE_MAX_CHUNKS + 60) * 1024, 1024);
+
+        const late = await startLateRelayViewer(lateViewer);
+        assert.equal(late.start.bootstrapComplete, true);
+        assert.ok(late.start.bootstrapChunks.length <= RELAY_QUEUE_MAX_CHUNKS);
+        const live = Buffer.alloc(1024, 0xee);
+        const arrived = nextEvent(lateViewer, 'media-chunk', () => true);
+        relay.fromHost('media-chunk', { generation: 1, chunk: live });
+        await arrived;
+        late.sourceBuffer.finishAll();
+        assert.deepEqual(late.failures, []);
+        assert.deepEqual(late.sourceBuffer.appended, [Buffer.concat(recorded), live]);
+    } finally {
+        await relay.close();
+    }
+});
+
+// The server keeps a bootstrap up to the browser queue's byte ceiling. The
+// live chunks that reach the viewer while its browser appends that bootstrap
+// queue behind it, and must still fit.
+test('a late relay viewer whose bootstrap is near the byte ceiling keeps the live chunks that arrive while it is appended', { concurrency: false }, async () => {
+    const { RELAY_QUEUE_MAX_BYTES } = await loadRelayQueue();
+    const relay = await startRelayRoom({}, ['first', 'late']);
+    const [firstViewer, lateViewer] = relay.viewers;
+    try {
+        await startWebmGeneration(relay, firstViewer);
+        const recorded = await recordWebm(relay, firstViewer, RELAY_QUEUE_MAX_BYTES - 64 * 1024, MB);
+
+        const late = await startLateRelayViewer(lateViewer);
+        assert.equal(late.start.bootstrapComplete, true);
+        assert.equal(late.start.bootstrapChunks[0].length, RELAY_QUEUE_MAX_BYTES - 64 * 1024);
+        // One 300 ms slice of the 14 Mbps relay tier (1440p at 30 fps).
+        const slice = Buffer.alloc(525_000, 0xee);
+        const arrived = nextEvent(lateViewer, 'media-chunk', () => true);
+        relay.fromHost('media-chunk', { generation: 1, chunk: slice });
+        await arrived;
+        assert.deepEqual(late.failures, []);
+        late.sourceBuffer.finishAll();
+        assert.equal(late.sourceBuffer.appended.length, 2);
+        assert.ok(late.sourceBuffer.appended[0].equals(Buffer.concat(recorded)));
+        assert.ok(late.sourceBuffer.appended[1].equals(slice));
+    } finally {
+        await relay.close();
+    }
+});
+
+// The browser's queue takes a bootstrap of up to RELAY_QUEUE_MAX_BYTES next to
+// its live allowance. The server keeps a WebM bootstrap up to exactly that;
+// past it the generation is too long for a late join, which WatchView refuses.
+test("the server keeps a WebM relay bootstrap up to the browser queue's ceiling and no further", { concurrency: false }, async () => {
+    const { RELAY_QUEUE_MAX_BYTES } = await loadRelayQueue();
+    const relay = await startRelayRoom({}, ['first', 'late']);
+    const [firstViewer, lateViewer] = relay.viewers;
+    try {
+        await startWebmGeneration(relay, firstViewer);
+        await recordWebm(relay, firstViewer, RELAY_QUEUE_MAX_BYTES, MB);
+        const atCeiling = await request(lateViewer, 'relay-consume-start');
+        assert.equal(atCeiling.bootstrapComplete, true);
+        assert.equal(atCeiling.bootstrapChunks.length, 1);
+        assert.equal(atCeiling.bootstrapChunks[0].length, RELAY_QUEUE_MAX_BYTES);
+        assert.equal((await request(lateViewer, 'relay-consume-stop')).success, true);
+
+        await recordWebm(relay, firstViewer, 1, 1);
+        const past = await request(lateViewer, 'relay-consume-start');
+        assert.equal(past.bootstrapComplete, false);
+        assert.deepEqual(past.bootstrapChunks, []);
+    } finally {
+        await relay.close();
+    }
+});
+
+// The same ceiling holds for an MP4 bootstrap, its init segment included.
+test("a late MP4 relay viewer's bootstrap, init segment included, stays within the browser queue's ceiling", { concurrency: false }, async () => {
+    const { RELAY_QUEUE_MAX_BYTES } = await loadRelayQueue();
+    // No viewer counts as behind here, however large a fragment.
+    const relay = await startRelayRoom({ measureRelayBacklogBytes: () => 0 }, ['first', 'late']);
+    const [firstViewer, lateViewer] = relay.viewers;
+    const send = (bytes) => {
+        for (let offset = 0; offset < bytes.length; offset += MB) {
+            relay.fromHost('media-chunk', { generation: 1, chunk: bytes.subarray(offset, offset + MB) });
+        }
+    };
+    const lateStart = async () => {
+        const start = await request(lateViewer, 'relay-consume-start');
+        assert.equal((await request(lateViewer, 'relay-consume-stop')).success, true);
+        return {
+            complete: start.bootstrapComplete,
+            bytes: start.bootstrapChunks.reduce((sum, chunk) => sum + chunk.length, 0),
+        };
+    };
+    try {
+        assert.equal((await request(firstViewer, 'relay-consume-start')).success, true);
+        relay.host.emit('media-init', { mimeType: MP4_MIME, generation: 1 });
+        await request(relay.host, 'get-media-init');
+        send(init);
+
+        // A keyframe fragment that fits the ceiling alone, but not after the init segment.
+        send(keyFragment(RELAY_QUEUE_MAX_BYTES - init.length - keyFragment(0).length + 1));
+        assert.deepEqual(await lateStart(), { complete: false, bytes: 0 });
+
+        // A GOP that reaches the ceiling exactly, then passes it by one fragment.
+        const key = keyFragment(1000);
+        send(key);
+        assert.deepEqual(await lateStart(), { complete: true, bytes: init.length + key.length });
+        send(deltaFragment(RELAY_QUEUE_MAX_BYTES - init.length - key.length - deltaFragment(0).length));
+        assert.deepEqual(await lateStart(), { complete: true, bytes: RELAY_QUEUE_MAX_BYTES });
+        send(deltaFragment(0));
+        assert.deepEqual(await lateStart(), { complete: false, bytes: 0 });
     } finally {
         await relay.close();
     }
