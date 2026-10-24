@@ -1,3 +1,11 @@
+export function getLocalStorageSafely(windowLike) {
+    try {
+        return windowLike?.localStorage ?? null;
+    } catch {
+        return null;
+    }
+}
+
 export function isMediaDebugEnabled(locationLike, storageLike) {
     try {
         const params = new URLSearchParams(locationLike?.search || '');
