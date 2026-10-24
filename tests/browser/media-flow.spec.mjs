@@ -85,6 +85,43 @@ async function joinAndWatch(viewerPage, code) {
     ))).toBe(true);
 }
 
+// Lets a test hold back the media-init events a viewer receives and drop the
+// viewer's Socket.IO WebSocket, which socket.io-client then re-establishes
+// under a new socket.id (the viewer's reconnect path). Engine.IO reads the
+// WebSocket constructor when its bundle loads, so this runs before the page.
+async function installViewerSocketControl(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const control = { withholdMediaInit: false, withheldMediaInit: 0, sockets: [] };
+        window.__nextraSocketControl = control;
+        class ControlledWebSocket extends NativeWebSocket {
+            constructor(...args) {
+                super(...args);
+                control.sockets.push(this);
+            }
+
+            get onmessage() {
+                return super.onmessage;
+            }
+
+            set onmessage(handler) {
+                super.onmessage = typeof handler === 'function'
+                    ? (event) => {
+                        if (control.withholdMediaInit
+                            && typeof event.data === 'string'
+                            && event.data.startsWith('42["media-init"')) {
+                            control.withheldMediaInit += 1;
+                            return;
+                        }
+                        handler.call(this, event);
+                    }
+                    : handler;
+            }
+        }
+        window.WebSocket = ControlledWebSocket;
+    });
+}
+
 async function joinAndWatchRelay(viewerPage, code) {
     await viewerPage.goto(`https://nextra.cloudflare.test:3210/#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
@@ -568,6 +605,79 @@ test('a relay viewer that is behind keeps playing across a VP8 recorder restart'
     await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
     await confirmStopIfPrompted(hostPage);
     await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+test('a relay start superseded by a socket reconnect leaves no stale playback, error or subscription', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerSocketControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`https://nextra.cloudflare.test:3210/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
+    await expect(watchButton).toBeEnabled();
+
+    // A tunnel viewer's relay-first attempt waits up to 7 s for the live
+    // media-init of the recorder generation its start triggers; hold it back
+    // so the attempt is still waiting when the connection drops.
+    await viewerPage.evaluate(() => { window.__nextraSocketControl.withholdMediaInit = true; });
+    await watchButton.click();
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraSocketControl.withheldMediaInit))
+        .toBeGreaterThan(0);
+    const liveInitWaitStartedAt = Date.now();
+
+    await viewerPage.evaluate(() => window.__nextraSocketControl.sockets.at(-1).close());
+    await expect.poll(() => viewerPage.evaluate(() => {
+        const { sockets } = window.__nextraSocketControl;
+        return sockets.length > 1 && sockets.at(-1).readyState === WebSocket.OPEN;
+    })).toBe(true);
+    // The reconnect rejoined the room on the new socket.id.
+    await expect.poll(async () => (await getOnlyRoom(request))?.viewerCount).toBe(1);
+
+    // Past the moment the superseded attempt's media-init wait gives up: it
+    // must not report an error, start another playback mode, or leave a
+    // relay subscription or consumer behind.
+    await viewerPage.waitForTimeout(Math.max(0, liveInitWaitStartedAt + 9_500 - Date.now()));
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect(viewerPage.getByText(/WebRTC mode active|relay mode active/i)).toHaveCount(0);
+    expect(await getOnlyRoom(request)).toMatchObject({
+        viewerCount: 1,
+        relayViewerCount: 0,
+        mediasoupConsumerCount: 0,
+    });
+    expect(await viewerPage.locator('video').evaluate((video) => ({
+        src: video.getAttribute('src') || '',
+        hasStream: Boolean(video.srcObject),
+    }))).toEqual({ src: '', hasStream: false });
+    await expect(watchButton).toBeEnabled();
+
+    // A new Watch on the reconnected socket plays through the relay.
+    await viewerPage.evaluate(() => { window.__nextraSocketControl.withholdMediaInit = false; });
+    await watchButton.click();
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible();
+    await expect.poll(() => viewerPage.locator('video').evaluate((video) => (
+        video.videoWidth > 0
+        && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+        && video.currentTime > 0
+    ))).toBe(true);
+    expect((await getOnlyRoom(request)).relayViewerCount).toBe(1);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json()).toMatchObject({
+        rooms: {
+            active: 0,
+            totalRelayViewers: 0,
+            totalMediasoupConsumers: 0,
+        },
+    });
+
     await viewerContext.close();
     await hostContext.close();
 });
