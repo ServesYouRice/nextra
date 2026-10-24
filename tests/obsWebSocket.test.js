@@ -1215,9 +1215,11 @@ test('a rollback that never finishes cannot hold the setup past its hard cap', a
 
 test('a rollback already under way when the deadline passes is not cut off', async () => {
     // The setup fails by itself (OBS has no AV1 encoder) and the restore is
-    // answered after the deadline. The result stays the failure it was.
+    // answered after the deadline. The result stays the failure it was. The
+    // restore is the third service write, after the encoder-reset probe and
+    // the room.
     const obs = deadlineObs((ws, request, count) => {
-        if (count !== 2) return undefined;
+        if (count !== 3) return undefined;
         setTimeout(() => ws.respond(request), 700);
         return 'stall';
     });
@@ -1396,6 +1398,14 @@ test('configureObsStream restores the previous service after a later validation 
         assert.match(result.message, /No AV1 OBS encoders/);
         assert.match(result.message, /settings were restored.*use H\.264/i);
         assert.deepEqual(serviceWrites, [
+            // The encoder-reset test stream's probe, then the room.
+            {
+                streamServiceType: 'whip_custom',
+                streamServiceSettings: {
+                    server: 'http://127.0.0.1:8889/whip/room/probe',
+                    bearer_token: 'new-token',
+                },
+            },
             {
                 streamServiceType: 'whip_custom',
                 streamServiceSettings: {
@@ -1690,9 +1700,10 @@ test('an encoder OBS kept from a stream that never connected is released before 
     });
 
     assert.equal(result.success, true);
-    // Stop the retry, point OBS at the new room, run a stream there just long
-    // enough for OBS to release the old encoder, and only then change the video.
-    assert.deepEqual(obs.order, ['StopStream', 'SetStreamServiceSettings', 'StartStream', 'StopStream', 'SetVideoSettings']);
+    // Stop the retry, point OBS at the server's probe, run a stream there just
+    // long enough for OBS to release the old encoder, point OBS at the new
+    // room, and only then change the video.
+    assert.deepEqual(obs.order, ['StopStream', 'SetStreamServiceSettings', 'StartStream', 'StopStream', 'SetStreamServiceSettings', 'SetVideoSettings']);
     assert.match(result.message, /encoder reset/);
     assert.doesNotMatch(result.message, /Warnings/);
 });
@@ -1709,7 +1720,8 @@ test('an idle OBS is assumed to hold an old encoder, because OBS does not say', 
     });
 
     assert.equal(result.success, true);
-    assert.deepEqual(obs.order, ['SetStreamServiceSettings', 'StartStream', 'StopStream', 'SetVideoSettings']);
+    // The probe, its test stream, then the room.
+    assert.deepEqual(obs.order, ['SetStreamServiceSettings', 'StartStream', 'StopStream', 'SetStreamServiceSettings', 'SetVideoSettings']);
     assert.match(result.message, /encoder reset/);
     assert.equal(obs.status.outputActive, false);
 });
@@ -1728,8 +1740,9 @@ test('a test stream the room refuses is stopped and reported, not waited on', as
     });
 
     assert.equal(result.success, true);
-    // Tried twice, since a test stream that fails leaves an encoder behind too.
-    assert.deepEqual(obs.order, ['SetStreamServiceSettings', 'StartStream', 'StopStream', 'StartStream', 'StopStream']);
+    // Tried twice, since a test stream that fails leaves an encoder behind too;
+    // then OBS is pointed at the room.
+    assert.deepEqual(obs.order, ['SetStreamServiceSettings', 'StartStream', 'StopStream', 'StartStream', 'StopStream', 'SetStreamServiceSettings']);
     assert.match(result.message, /could not run the short test stream/);
     assert.equal(obs.status.outputActive, false);
     assert.ok(Date.now() - startedAt < 3000, 'gave up on the first sign of a retry');
@@ -1899,7 +1912,7 @@ test('a stop OBS refuses for a test stream that is already down is not a failure
 
     assert.equal(result.success, true);
     assert.match(result.message, /encoder reset/);
-    assert.deepEqual(obs.log.slice(obs.log.indexOf('StopStream')), ['StopStream', 'GetStreamStatus', 'GetVideoSettings', 'SetVideoSettings']);
+    assert.deepEqual(obs.log.slice(obs.log.indexOf('StopStream')), ['StopStream', 'GetStreamStatus', 'SetStreamServiceSettings', 'GetVideoSettings', 'SetVideoSettings']);
 });
 
 test('a test stream OBS refuses to start is still stopped and seen idle before the video changes (VAL-116)', async () => {
@@ -1913,7 +1926,7 @@ test('a test stream OBS refuses to start is still stopped and seen idle before t
     assert.equal(result.success, true);
     assert.match(result.message, /could not run the short test stream/);
     // Tried once: a refused start is not retried.
-    assert.deepEqual(obs.log.slice(obs.log.indexOf('StartStream')), ['StartStream', 'StopStream', 'GetStreamStatus', 'GetVideoSettings', 'SetVideoSettings']);
+    assert.deepEqual(obs.log.slice(obs.log.indexOf('StartStream')), ['StartStream', 'StopStream', 'GetStreamStatus', 'SetStreamServiceSettings', 'GetVideoSettings', 'SetVideoSettings']);
 });
 
 test('a setup that fails after a clean test stream does not stop the stream again in its rollback', async () => {
@@ -1932,7 +1945,8 @@ test('a setup that fails after a clean test stream does not stop the stream agai
 
 test('without auto-start an idle OBS still runs the encoder-reset test stream once, and stops it (section-84098610a3c7f7be0c63f39f/Q-001, VAL-117)', async () => {
     // The decision: the reset is kept when autoStart is false; nothing is
-    // gated on the flag except the final start.
+    // gated on the flag except the final start. Its test stream goes to the
+    // server's probe (section-49e0545c60d121dd3e784d86/Q-002, tested below).
     const obs = testStreamObs();
 
     const result = await configureWith(obs, {
@@ -1945,17 +1959,131 @@ test('without auto-start an idle OBS still runs the encoder-reset test stream on
     assert.match(result.message, /Click "Start Streaming" in OBS\.$/);
     assert.equal(obs.log.filter((requestType) => requestType === 'StartStream').length, 1);
     assertEveryStartStopped(obs.log);
-    // The stop is confirmed (an idle status) before the video changes, and no
-    // start follows.
+    // The stop is confirmed (an idle status) before OBS is pointed at the room
+    // and the video changes, and no start follows.
     assert.deepEqual(obs.log.slice(obs.log.indexOf('StartStream')), [
         'StartStream',
         'GetStreamStatus',
         'StopStream',
         'GetStreamStatus',
+        'SetStreamServiceSettings',
         'GetVideoSettings',
         'SetVideoSettings',
     ]);
     assert.equal(obs.status.outputActive, false);
+});
+
+// ── The encoder-reset test stream goes to the server's probe, never to the room (section-49e0545c60d121dd3e784d86/Q-002) ──
+
+// The room's WHIP URL configureWith() passes, and the probe address next to it
+// that lib/whipRoutes.js answers without forwarding the stream to anyone.
+const ROOM_WHIP_URL = 'http://127.0.0.1:3001/whip/broadcast/ABC123';
+const ROOM_PROBE_URL = 'http://127.0.0.1:3001/whip/broadcast/ABC123/probe';
+
+// Wraps a fake OBS socket class to record where OBS's stream service points
+// each time a stream is started (`starts`), and the settings of every service
+// write it is sent (`serviceWrites`).
+function observeStreamTargets(WebSocketImpl) {
+    const starts = [];
+    const serviceWrites = [];
+    let server = null;
+    class ObservedObsSocket extends WebSocketImpl {
+        send(payload) {
+            const message = JSON.parse(payload);
+            if (message.op === 6) {
+                const { requestType, requestData } = message.d;
+                if (requestType === 'SetStreamServiceSettings') {
+                    server = requestData?.streamServiceSettings?.server ?? null;
+                    serviceWrites.push(requestData?.streamServiceSettings);
+                }
+                if (requestType === 'StartStream') starts.push(server);
+            }
+            super.send(payload);
+        }
+    }
+    return { WebSocketImpl: ObservedObsSocket, starts, serviceWrites };
+}
+
+test('without auto-start the encoder-reset test stream runs at the server\'s probe, never at the room\'s WHIP URL (section-49e0545c60d121dd3e784d86/Q-002)', async () => {
+    const obs = testStreamObs();
+    const observed = observeStreamTargets(obs.WebSocketImpl);
+
+    const result = await configureWith({ WebSocketImpl: observed.WebSocketImpl }, {
+        autoStart: false,
+        videoSettings: resetVideoSettings,
+    });
+
+    assert.equal(result.success, true);
+    assert.match(result.message, /encoder reset/);
+    assert.match(result.message, /Click "Start Streaming" in OBS\.$/);
+    // The one stream OBS ran went to the probe, which no viewer receives.
+    assert.deepEqual(observed.starts, [ROOM_PROBE_URL]);
+    // OBS is pointed at the room, with the host's token, only once that stream
+    // is stopped and seen idle, and before the video changes.
+    assert.deepEqual(observed.serviceWrites, [
+        { server: ROOM_PROBE_URL, bearer_token: 'token' },
+        { server: ROOM_WHIP_URL, bearer_token: 'token' },
+    ]);
+    assert.deepEqual(obs.log.slice(obs.log.indexOf('StopStream')), [
+        'StopStream',
+        'GetStreamStatus',
+        'SetStreamServiceSettings',
+        'GetVideoSettings',
+        'SetVideoSettings',
+    ]);
+    assert.equal(obs.status.outputActive, false);
+});
+
+test('with auto-start the only stream sent to the room is the auto-start after the video change; the test stream still goes to the probe (section-49e0545c60d121dd3e784d86/Q-002)', async () => {
+    const obs = testStreamObs();
+    const observed = observeStreamTargets(obs.WebSocketImpl);
+
+    const result = await configureWith({ WebSocketImpl: observed.WebSocketImpl }, {
+        autoStart: true,
+        videoSettings: resetVideoSettings,
+    });
+
+    assert.equal(result.success, true);
+    assert.match(result.message, /encoder reset/);
+    assert.match(result.message, /streaming started/);
+    assert.deepEqual(observed.starts, [ROOM_PROBE_URL, ROOM_WHIP_URL]);
+    assert.ok(obs.log.lastIndexOf('StartStream') > obs.log.indexOf('SetVideoSettings'), obs.log.join(', '));
+    assert.equal(obs.status.outputActive, true);
+});
+
+test('a setup that fails after the encoder reset puts back the service OBS had before, not the probe (section-49e0545c60d121dd3e784d86/Q-002)', async () => {
+    const obs = testStreamObs();
+    const observed = observeStreamTargets(obs.WebSocketImpl);
+
+    const result = await configureWith({ WebSocketImpl: observed.WebSocketImpl }, {
+        encoderSettings: { videoCodec: 'av1', obsEncoderIds: [] },
+        encoderResetOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.message, /No AV1 OBS encoders/);
+    assert.match(result.message, /OBS settings were restored/);
+    assert.deepEqual(observed.starts, [ROOM_PROBE_URL]);
+    assert.deepEqual(observed.serviceWrites, [
+        { server: ROOM_PROBE_URL, bearer_token: 'token' },
+        { server: ROOM_WHIP_URL, bearer_token: 'token' },
+        { server: 'rtmp://previous.example/live' },
+    ]);
+});
+
+test('a WHIP URL with no probe address next to it gets no test stream at all, only the restart warning (section-49e0545c60d121dd3e784d86/Q-002)', async () => {
+    const obs = testStreamObs();
+    const observed = observeStreamTargets(obs.WebSocketImpl);
+
+    const result = await configureWith({ WebSocketImpl: observed.WebSocketImpl }, {
+        whipUrl: 'not a URL',
+        videoSettings: resetVideoSettings,
+    });
+
+    assert.equal(result.success, true);
+    assert.match(result.message, /could not run the short test stream.*restart OBS/);
+    assert.deepEqual(observed.starts, []);
+    assert.deepEqual(observed.serviceWrites, [{ server: 'not a URL', bearer_token: 'token' }]);
 });
 
 // A setup that fails after the encoder settings file was written. The first

@@ -1547,6 +1547,295 @@ test('WHIP DELETE answers 404 for an unknown or stale resource without asking fo
     }
 });
 
+// ── The encoder-reset probe: OBS's short test stream is answered, and goes to no one (section-49e0545c60d121dd3e784d86/Q-002) ──
+
+// A WHIP router (the local one, or with publicEndpoint the public one) with fake transports, and spies on all
+// that would carry a stream to viewers or the host page: viewer events, host metrics, relay prewarm, produce() and
+// the room's media-pipeline ownWhip(). Helpers for the probe and for the room's own WHIP start.
+async function startProbeHarness(hostId, { publicEndpoint = false, roomOptions = {}, probeLifetimeMs } = {}) {
+    const previous = { enabled: config.WHIP_ENABLED, publicEnabled: config.PUBLIC_WHIP_ENABLED };
+    config.WHIP_ENABLED = true;
+    config.PUBLIC_WHIP_ENABLED = true;
+    const room = await createRoom(hostId, { ingestMode: 'obs', ...roomOptions });
+    const transports = [];
+    const connects = [];
+    const emitted = [];
+    const hostMetrics = [];
+    const relayStarts = [];
+    const ownWhipCalls = [];
+
+    const pipeline = room._mediaPipeline;
+    const realOwnWhip = pipeline.ownWhip.bind(pipeline);
+    pipeline.ownWhip = (name, resource, close) => {
+        ownWhipCalls.push(name);
+        return realOwnWhip(name, resource, close);
+    };
+    setIo({ to: (target) => ({ emit: (event, data) => emitted.push({ target, event, data }) }) });
+    setMediaLifecycle({
+        emitHostMetrics: (_io, roomCode) => hostMetrics.push(roomCode),
+        startFallbackRelay: async (relayRoom) => { relayStarts.push(relayRoom.code); },
+    });
+
+    const app = express();
+    app.use('/whip', createWhipRouter({}, {
+        publicEndpoint,
+        probeLifetimeMs,
+        getClientIp: () => '198.51.100.70',
+        createWebRtcTransport: async () => {
+            const transport = createFakeTransport(`probe-harness-transport-${transports.length + 1}`);
+            const connect = transport.connect;
+            transport.connect = (params) => {
+                connects.push(params);
+                return connect(params);
+            };
+            transports.push(transport);
+            return { transport, params: FAKE_TRANSPORT_PARAMS };
+        },
+    }));
+    const { server, baseUrl } = await listen(app);
+    const hostAuth = { Authorization: `Bearer ${room.hostToken}` };
+    const probeUrl = `${baseUrl}/whip/broadcast/${room.code}/probe`;
+
+    return {
+        room,
+        transports,
+        connects,
+        emitted,
+        hostMetrics,
+        relayStarts,
+        ownWhipCalls,
+        baseUrl,
+        probeUrl,
+        probe: ({ body = LIVE_OFFER, headers = hostAuth, url = probeUrl } = {}) => fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/sdp', ...headers },
+            body,
+        }),
+        deleteProbe: (location, headers = hostAuth) => fetch(location, { method: 'DELETE', headers }),
+        startRoomSession: () => fetch(`${baseUrl}/whip/broadcast/${room.code}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/sdp', ...hostAuth },
+            body: LIVE_OFFER,
+        }),
+        roomResources: () => [...sessionRegistry.whipResources]
+            .filter(([, roomCode]) => roomCode === room.code)
+            .map(([resourceId]) => resourceId),
+        async close() {
+            destroyRoom(room.code);
+            setIo(null);
+            setMediaLifecycle({ emitHostMetrics: () => {}, startFallbackRelay: async () => {} });
+            config.WHIP_ENABLED = previous.enabled;
+            config.PUBLIC_WHIP_ENABLED = previous.publicEnabled;
+            const closed = new Promise((resolve) => server.close(resolve));
+            server.closeAllConnections();
+            await closed;
+        },
+    };
+}
+
+// Nothing of the probe is on the room: no WHIP session, producer, registered resource or pipeline ownership.
+function assertRoomUntouchedByProbe(h) {
+    assert.equal(h.room.whipTransport, null);
+    assert.equal(h.room.whipProducer, null);
+    assert.equal(h.room.whipAudioProducer, null);
+    assert.equal(h.room.whipSessionId, null);
+    assert.equal(h.room.whipResourceId, null);
+    assert.equal(h.room.whipConnected, false);
+    assert.equal(h.room.whipStarting, false);
+    assert.deepEqual(h.roomResources(), [], 'no WHIP resource is registered for the room');
+    assert.deepEqual(h.ownWhipCalls, [], 'the room\'s media pipeline owns nothing of the probe');
+}
+
+test('a WHIP probe is answered and connected like a start, but nothing reaches viewers, the relay or the host page (section-49e0545c60d121dd3e784d86/Q-002)', { concurrency: false }, async () => {
+    const h = await startProbeHarness('whip-probe-reaches-no-one');
+    try {
+        const response = await h.probe();
+        assert.equal(response.status, 201, await response.clone().text());
+        assert.match(response.headers.get('content-type'), /^application\/sdp\b/);
+        const answer = await response.text();
+        assert.match(answer, /^a=ice-ufrag:srvufrag$/m);
+        assert.match(answer, /^a=recvonly$/m);
+        const location = response.headers.get('location');
+        assert.match(location, new RegExp(`^${h.probeUrl}/[0-9a-f]{32}$`));
+
+        const [transport] = h.transports;
+        assert.equal(h.connects.length, 1, 'the transport is connected, so OBS sees a stream that runs');
+        assert.equal(h.connects[0].dtlsParameters.role, 'client');
+
+        // DTLS comes up as it would for OBS: still nothing is produced or announced.
+        transport.emit('dtlsstatechange', 'connected');
+        await flush();
+        assert.deepEqual(transport.producers, [], 'no producer is made from the probe');
+        assert.deepEqual(h.emitted, [], 'no viewer is told of a producer');
+        assert.deepEqual(h.hostMetrics, [], 'the host page is not told of an OBS stream');
+        assert.deepEqual(h.relayStarts, [], 'no fallback relay is started');
+        assertRoomUntouchedByProbe(h);
+        assert.equal(transport.closed, false);
+
+        // OBS's DELETE when the test stream stops ends it, with the host's token only.
+        assert.equal((await h.deleteProbe(location, {})).status, 403);
+        assert.equal(transport.closed, false);
+        const deleted = await h.deleteProbe(location);
+        assert.equal(deleted.status, 200);
+        assert.deepEqual(await deleted.json(), { ok: true });
+        assert.equal(transport.closed, true);
+        assert.equal((await h.deleteProbe(location)).status, 404);
+        assert.deepEqual(h.emitted, []);
+        assert.deepEqual(h.hostMetrics, []);
+        assertRoomUntouchedByProbe(h);
+    } finally {
+        await h.close();
+    }
+});
+
+test('a WHIP probe leaves the room\'s own live session as it is (section-49e0545c60d121dd3e784d86/Q-002)', { concurrency: false }, async () => {
+    const h = await startProbeHarness('whip-probe-beside-live-session');
+    try {
+        const started = await h.startRoomSession();
+        assert.equal(started.status, 201);
+        const [session] = h.transports;
+        session.emit('dtlsstatechange', 'connected');
+        await flush();
+        assert.equal(h.room.whipConnected, true);
+        const sessionResource = h.room.whipResourceId;
+        const emittedBefore = h.emitted.length;
+        const metricsBefore = h.hostMetrics.length;
+        const relayStartsBefore = h.relayStarts.length;
+
+        const response = await h.probe();
+        assert.equal(response.status, 201);
+        const probeTransport = h.transports[1];
+        probeTransport.emit('dtlsstatechange', 'connected');
+        await flush();
+        assert.equal((await h.deleteProbe(response.headers.get('location'))).status, 200);
+
+        assert.equal(h.room.whipTransport, session);
+        assert.equal(session.closed, false);
+        for (const producer of session.producers) assert.equal(producer.closed, false, `${producer.kind} producer is open`);
+        assert.equal(h.room.whipResourceId, sessionResource);
+        assert.deepEqual(h.roomResources(), [sessionResource]);
+        assert.equal(h.room.whipConnected, true);
+        assert.deepEqual(probeTransport.producers, []);
+        assert.equal(h.emitted.length, emittedBefore, 'no viewer event');
+        assert.equal(h.hostMetrics.length, metricsBefore, 'no host metrics');
+        assert.equal(h.relayStarts.length, relayStartsBefore, 'no relay start');
+    } finally {
+        await h.close();
+    }
+});
+
+test('a WHIP probe takes the encoder OBS has, H.264 or AV1, whatever the room streams (section-49e0545c60d121dd3e784d86/Q-002)', { concurrency: false }, async () => {
+    const av1Offer = LIVE_OFFER
+        .replace('a=rtpmap:96 H264/90000', 'a=rtpmap:96 AV1/90000')
+        .replace(/a=fmtp:96 [^\r]*\r\n/, '');
+    for (const [name, roomOptions, body] of [
+        ['an AV1 stream to an H.264 room', {}, av1Offer],
+        ['an H.264 stream to an AV1 room', { obsAv1Mode: true }, LIVE_OFFER],
+    ]) {
+        const h = await startProbeHarness(`whip-probe-codec-${roomOptions.obsAv1Mode ? 'av1-room' : 'h264-room'}`, { roomOptions });
+        try {
+            const response = await h.probe({ body });
+            assert.equal(response.status, 201, `${name}: ${await response.clone().text()}`);
+            assertRoomUntouchedByProbe(h);
+        } finally {
+            await h.close();
+        }
+    }
+});
+
+test('a WHIP probe is refused, with no transport made, without the host token, for an unknown or non-OBS room, or for an offer it cannot answer', { concurrency: false }, async () => {
+    const h = await startProbeHarness('whip-probe-refusals');
+    const browserRoom = await createRoom('whip-probe-refusals-browser-room', { ingestMode: 'browser' });
+    try {
+        const cases = [
+            ['no token', { headers: {} }, 403],
+            ['a wrong token', { headers: { Authorization: 'Bearer not-the-host-token' } }, 403],
+            ['an unknown room', { url: `${h.baseUrl}/whip/broadcast/ZZZZZZ/probe` }, 404],
+            ['a room without OBS ingest', {
+                url: `${h.baseUrl}/whip/broadcast/${browserRoom.code}/probe`,
+                headers: { Authorization: `Bearer ${browserRoom.hostToken}` },
+            }, 403],
+            ['an offer without a DTLS fingerprint', { body: LIVE_OFFER.replace(/a=fingerprint:[^\r]*\r\n/, '') }, 400],
+            ['an offer with neither H.264 nor AV1', { body: LIVE_OFFER.replace('a=rtpmap:96 H264/90000', 'a=rtpmap:96 VP8/90000') }, 409],
+        ];
+        for (const [name, request, status] of cases) {
+            const response = await h.probe(request);
+            assert.equal(response.status, status, `${name}: ${await response.clone().text()}`);
+        }
+        config.WHIP_ENABLED = false;
+        assert.equal((await h.probe()).status, 404, 'WHIP turned off');
+        config.WHIP_ENABLED = true;
+
+        assert.deepEqual(h.transports, []);
+        assertRoomUntouchedByProbe(h);
+    } finally {
+        destroyRoom(browserRoom.code);
+        await h.close();
+    }
+});
+
+test('a WHIP probe ends when a newer probe of the room replaces it, when its DTLS fails, and at the latest when its lifetime is over', { concurrency: false }, async (t) => {
+    const h = await startProbeHarness('whip-probe-endings', { probeLifetimeMs: 10_000 });
+    try {
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const first = await h.probe();
+        assert.equal(first.status, 201);
+        const second = await h.probe();
+        assert.equal(second.status, 201);
+        const [replaced, replacing] = h.transports;
+        assert.equal(replaced.closed, true, 'one probe per room: the newer one replaces it');
+        assert.equal((await h.deleteProbe(first.headers.get('location'))).status, 404);
+        assert.equal(replacing.closed, false);
+
+        replacing.emit('dtlsstatechange', 'failed');
+        assert.equal(replacing.closed, true, 'a probe whose DTLS failed is closed');
+        assert.equal((await h.deleteProbe(second.headers.get('location'))).status, 404);
+
+        const third = await h.probe();
+        assert.equal(third.status, 201);
+        const lingering = h.transports[2];
+        t.mock.timers.tick(9_999);
+        assert.equal(lingering.closed, false);
+        t.mock.timers.tick(2);
+        assert.equal(lingering.closed, true, 'a probe OBS never deleted is closed when its lifetime is over');
+        assert.equal((await h.deleteProbe(third.headers.get('location'))).status, 404);
+        assert.deepEqual(h.emitted, []);
+        assert.deepEqual(h.hostMetrics, []);
+        assertRoomUntouchedByProbe(h);
+    } finally {
+        t.mock.timers.reset();
+        await h.close();
+    }
+});
+
+test('the public WHIP router has no probe (section-49e0545c60d121dd3e784d86/Q-002)', { concurrency: false }, async () => {
+    const h = await startProbeHarness('whip-probe-not-public', { publicEndpoint: true });
+    try {
+        const response = await h.probe();
+        assert.equal(response.status, 404);
+        assert.deepEqual(h.transports, []);
+        assertRoomUntouchedByProbe(h);
+    } finally {
+        await h.close();
+    }
+});
+
+test('the probe address the OBS setup gives OBS is the one this router answers (section-49e0545c60d121dd3e784d86/Q-002)', { concurrency: false }, async () => {
+    const { whipProbeUrl } = await import('../src/lib/obsWebSocket.js');
+    const h = await startProbeHarness('whip-probe-address-contract');
+    try {
+        const roomWhipUrl = `${h.baseUrl}/whip/broadcast/${h.room.code}`;
+        assert.equal(typeof whipProbeUrl, 'function', 'obsWebSocket.js exports whipProbeUrl');
+        assert.equal(whipProbeUrl(roomWhipUrl), h.probeUrl);
+        assert.equal(whipProbeUrl(`${roomWhipUrl}/`), h.probeUrl);
+        const response = await h.probe({ url: whipProbeUrl(roomWhipUrl) });
+        assert.equal(response.status, 201);
+        assertRoomUntouchedByProbe(h);
+    } finally {
+        await h.close();
+    }
+});
+
 // ── Public WHIP rate limiting keeps bounded state and buckets by the trusted client ──
 
 const { createClientRateLimiter, rateLimitBucketKey, MAX_TRACKED_RATE_LIMIT_CLIENTS } = require('../lib/whipRoutes');
