@@ -344,3 +344,77 @@ test('socketRequest tags a connect that never reports an error with the connect 
         (err) => err.message === 'Socket is not connected' && err.phase === 'connect',
     );
 });
+
+// A request whose caller has gone away (an effect cleaned up) is cancelled with
+// options.signal: it must not reach the server once the signal is aborted.
+
+test('socketRequest sends nothing when its signal is aborted while it waits for the socket to connect', async () => {
+    const { socketRequest } = await loadClientModule();
+    let requests = 0;
+    const socket = new FakeSocket({
+        connected: false,
+        onRequest(_event, _payload, callback) {
+            requests += 1;
+            callback({ success: true });
+        },
+    });
+    const controller = new AbortController();
+
+    const settled = socketRequest(socket, 'reclaim-host', {}, { connectTimeoutMs: 1000, signal: controller.signal })
+        .then(() => null, (e) => e);
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    // The connection comes up after the abort.
+    socket.connected = true;
+    socket.emit('connect');
+    const err = await settled;
+
+    assert.equal(requests, 0, 'requests sent after the abort');
+    assert.equal(err?.phase, 'cancelled');
+    assert.equal(socket.listenerCount('connect'), 0);
+    assert.equal(socket.listenerCount('connect_error'), 0);
+});
+
+test('socketRequest with a signal aborted beforehand sends nothing and is not retried', async () => {
+    const { socketRequest } = await loadClientModule();
+    let requests = 0;
+    const socket = new FakeSocket({
+        onRequest() {
+            requests += 1;
+        },
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    await assert.rejects(
+        socketRequest(socket, 'reclaim-host', {}, { timeoutMs: 20, signal: controller.signal }),
+        (err) => err.phase === 'cancelled',
+    );
+    assert.equal(requests, 0);
+    assert.equal(socket.connectCalls, 0);
+});
+
+test('socketRequest stops waiting for the acknowledgement when its signal is aborted, and does not retry', async () => {
+    const { socketRequest } = await loadClientModule();
+    let requests = 0;
+    let answer = null;
+    const socket = new FakeSocket({
+        onRequest(_event, _payload, callback) {
+            requests += 1;
+            answer = callback;
+        },
+    });
+    const controller = new AbortController();
+
+    const settled = socketRequest(socket, 'reclaim-host', {}, { timeoutMs: 200, signal: controller.signal })
+        .then(() => null, (e) => e);
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    const err = await settled;
+
+    assert.equal(err?.phase, 'cancelled');
+    assert.equal(requests, 1, 'a cancelled request is not sent again');
+    assert.equal(socket.listenerCount('disconnect'), 0);
+    // A late answer to the cancelled request is dropped.
+    answer({ success: true });
+});

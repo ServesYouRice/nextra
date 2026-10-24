@@ -1090,7 +1090,10 @@ export default function HostView() {
     useEffect(() => {
         const stored = loadHostRecoverySession();
         if (!stored) return undefined;
-        let cancelled = false;
+        // Aborted by the cleanup (leaving the host view, or StrictMode's replay):
+        // it ends the retry loop and stops an attempt that is still waiting for
+        // the socket from sending once the socket is back.
+        const effectRun = new AbortController();
         const retryWait = createCancellableWait();
         const startGuard = startGuardRef.current;
 
@@ -1132,7 +1135,8 @@ export default function HostView() {
                     ...stored,
                     reloadRecovery: true,
                 }, attempt),
-                isCancelled: () => cancelled,
+                isCancelled: () => effectRun.signal.aborted,
+                signal: effectRun.signal,
                 // A room the host started on this page since the reload owns the
                 // session; the old room is no longer worth retrying for.
                 shouldGiveUp: () => startGuard.activeOperation !== null,
@@ -1166,7 +1170,7 @@ export default function HostView() {
 
         reclaimStoredRoom();
         return () => {
-            cancelled = true;
+            effectRun.abort();
             retryWait.cancel();
         };
     }, [socket, terminateHostSession]);

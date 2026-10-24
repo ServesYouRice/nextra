@@ -229,6 +229,66 @@ test('leaving the host page during the pause between reclaim attempts sends no f
     expect(reclaims.length, 'attempts sent after the host view was left').toBe(sent);
 });
 
+test('leaving the host page while a reclaim attempt waits for the connection sends nothing once it is back', async ({ page }) => {
+    await seedRecoverySession(page, 'browser');
+    // The first reclaim-host loses the connection right after the emit, and the
+    // reconnection that follows is held: the server's messages reach the page
+    // only once the test lets them through, so the page's socket stays
+    // disconnected and the next attempt, due 0.5 s after the failure, waits for it.
+    const reclaims = [];
+    const reconnect = { released: false, held: [], connected: false, release: () => {} };
+    let connections = 0;
+    await page.routeWebSocket(/\/socket\.io\//, (ws) => {
+        connections += 1;
+        const upstream = ws.connectToServer();
+        if (connections > 1) {
+            const deliver = (message) => {
+                // Socket.IO's namespace connect: the page's socket is up again.
+                if (String(message).startsWith('40')) reconnect.connected = true;
+                ws.send(message);
+            };
+            reconnect.release = () => {
+                reconnect.released = true;
+                reconnect.held.splice(0).forEach(deliver);
+            };
+            upstream.onMessage((message) => {
+                if (reconnect.released) deliver(message);
+                else reconnect.held.push(message);
+            });
+        }
+        ws.onMessage((raw) => {
+            const text = typeof raw === 'string' ? raw : raw.toString();
+            if (!/^42\d*\["reclaim-host",/.test(text)) {
+                upstream.send(raw);
+                return;
+            }
+            reclaims.push(text);
+            ws.close({ code: 3001, reason: 'test: connection dropped' });
+            upstream.close({ code: 1000 });
+        });
+    });
+    const firstFailed = page.waitForEvent('console', {
+        predicate: (message) => message.text().includes('Reclaiming the previous room failed (attempt 1)'),
+        timeout: 20_000,
+    });
+
+    await page.goto(`${server.baseUrl}/#host`);
+    await firstFailed;
+    // Past the 0.5 s pause and well inside the attempt's 5 s connect timeout.
+    await page.waitForTimeout(1_500);
+    expect(connections, 'the reconnection is held').toBe(2);
+    expect(reclaims).toHaveLength(1);
+
+    await page.evaluate(() => { window.location.hash = '#privacy'; });
+    await expect(page.getByRole('heading', { name: /Privacy/i })).toBeVisible();
+    reconnect.release();
+    await expect.poll(() => reconnect.connected, { message: 'the page\'s socket connected again' }).toBe(true);
+    // An attempt left waiting would have been sent as the socket connected.
+    await page.waitForTimeout(1_000);
+
+    expect(reclaims, 'reclaim-host requests sent after the host view was left').toHaveLength(1);
+});
+
 // Browser capture the test steers: getDisplayMedia hands out a canvas stream,
 // or, while window.__captureMode is 'deny', rejects the way a cancelled or
 // dismissed picker does.

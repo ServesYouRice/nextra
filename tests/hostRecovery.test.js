@@ -515,6 +515,60 @@ test('createCancellableWait: StrictMode\'s replayed effect cancels the first run
     assert.equal(timers.active(), 0);
 });
 
+test('reclaimWithRetry over socketRequest: an attempt still waiting for the connection when the effect is cleaned up is never sent', async () => {
+    const { reclaimWithRetry, createCancellableWait } = await loadRecovery();
+    const { socketRequest } = await loadClient();
+    const timers = createFakeTimers();
+    const waiter = createCancellableWait(timers);
+    const effect = new AbortController();
+    const sent = [];
+    // Every reclaim-host loses the connection right after the emit, and the
+    // socket stays down until the test brings it back (Socket.IO reconnects
+    // 0.5 to 1.5 s after a drop, so the pause can end first).
+    const socket = new FakeSocket({
+        onRequest: (event) => {
+            sent.push(event);
+            socket.connected = false;
+            socket.emit('disconnect', 'transport close');
+        },
+    });
+
+    // Wired the way HostView's mount effect wires it.
+    const run = reclaimWithRetry({
+        request: (attempt) => socketRequest(socket, 'reclaim-host', {
+            code: 'ABCDEF',
+            hostToken: 'a'.repeat(32),
+            reloadRecovery: true,
+        }, attempt),
+        isCancelled: () => effect.signal.aborted,
+        signal: effect.signal,
+        wait: waiter.wait,
+    });
+    await drainMicrotasks();
+    assert.deepEqual(sent, ['reclaim-host'], 'the first attempt was sent and dropped');
+    assert.equal(timers.active(), 1, 'the pause before the second attempt');
+
+    // The pause ends before the socket is back: the second attempt waits for it.
+    timers.fireAll();
+    await drainMicrotasks();
+    assert.equal(socket.listenerCount('connect'), 1, 'the second attempt waits for the connection');
+
+    // The host leaves the page: the effect's cleanup.
+    effect.abort();
+    waiter.cancel();
+    // Then the socket reconnects.
+    socket.connected = true;
+    socket.emit('connect');
+    const outcome = await run;
+    await drainMicrotasks();
+
+    assert.deepEqual(sent, ['reclaim-host'], 'reclaim-host requests sent after the cleanup');
+    assert.equal(outcome.status, 'cancelled');
+    assert.equal(socket.listenerCount('connect'), 0);
+    assert.equal(socket.listenerCount('connect_error'), 0);
+    assert.equal(timers.active(), 0);
+});
+
 test('shouldTeardownAfterStartFailure: a reclaimed room survives a failure before its capture is in use', async () => {
     const { START_PHASES, shouldTeardownAfterStartFailure } = await loadRecovery();
 

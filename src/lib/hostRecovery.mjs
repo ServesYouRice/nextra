@@ -100,6 +100,7 @@ export function createCancellableWait({
  * @property {number} timeoutMs Acknowledgement timeout for this attempt.
  * @property {number} connectTimeoutMs How long this attempt waits for a disconnected socket to connect.
  * @property {number} maxAttempts Always 1: the retrying is done here, within the window.
+ * @property {AbortSignal} [signal] The caller's `signal`, when it gave one.
  */
 
 /**
@@ -116,7 +117,11 @@ export function createCancellableWait({
  * socket to connect when it is down.
  *
  * `isCancelled` is the effect's cleanup flag: nothing more is sent after it,
- * and whatever a request in flight returns is ignored. `shouldGiveUp` is
+ * and whatever a request in flight returns is ignored. An attempt that has
+ * begun but not yet sent (socketRequest waits for a socket that is down, and
+ * after a dropped connection the pause can end before Socket.IO reconnects)
+ * would still send once the socket is back, so the cleanup also aborts
+ * `signal`, which every attempt is handed. `shouldGiveUp` is
  * checked only before an attempt and before a pause (the host started a room of
  * their own, which retrying must not disturb); a response that arrives is still
  * delivered.
@@ -124,6 +129,7 @@ export function createCancellableWait({
  * @param {object} options
  * @param {(attempt: ReclaimAttemptOptions) => Promise<any>} options.request
  * @param {() => boolean} options.isCancelled
+ * @param {AbortSignal} [options.signal] Aborted by the same cleanup that sets isCancelled.
  * @param {(ms: number) => Promise<void>} options.wait
  * @param {() => boolean} [options.shouldGiveUp]
  * @param {() => number} [options.now]
@@ -137,6 +143,7 @@ export function createCancellableWait({
 export async function reclaimWithRetry({
     request,
     isCancelled,
+    signal,
     wait,
     shouldGiveUp = () => false,
     now = Date.now,
@@ -160,7 +167,12 @@ export async function reclaimWithRetry({
         );
         attempts += 1;
         try {
-            const response = await request({ timeoutMs, connectTimeoutMs: timeoutMs, maxAttempts: 1 });
+            const response = await request({
+                timeoutMs,
+                connectTimeoutMs: timeoutMs,
+                maxAttempts: 1,
+                ...(signal ? { signal } : {}),
+            });
             if (isCancelled()) return { status: 'cancelled', attempts };
             return { status: 'reclaimed', response, attempts };
         } catch (error) {

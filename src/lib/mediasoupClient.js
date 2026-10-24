@@ -26,9 +26,14 @@ const IDEMPOTENT_EVENTS = new Set([
 //   'ack-timeout'            the request may have reached the server; the late ack is dropped.
 //   'disconnect-after-emit'  same: retry only events the server can handle twice (IDEMPOTENT_EVENTS).
 //   'server'                 the server answered with an error: never retry, whatever the message says.
+//   'cancelled'              the caller aborted options.signal: never retry, and nothing is sent after it.
 function tagPhase(error, phase) {
     error.phase = phase;
     return error;
+}
+
+function cancelledError(event) {
+    return tagPhase(new Error(`Request "${event}" was cancelled`), 'cancelled');
 }
 
 export async function getDevice() {
@@ -61,7 +66,10 @@ function formatSocketConnectError(err) {
     return `Socket connect failed: ${rawMessage}`;
 }
 
-function waitForSocketConnect(socket, timeoutMs = 10000) {
+// A request waiting here when its signal is aborted gives up at once: once the
+// socket is back it would otherwise send for a caller that has gone away.
+function waitForSocketConnect(socket, event, timeoutMs = 10000, signal = undefined) {
+    if (signal?.aborted) return Promise.reject(cancelledError(event));
     if (socket.connected) return Promise.resolve();
 
     return new Promise((resolve, reject) => {
@@ -80,19 +88,28 @@ function waitForSocketConnect(socket, timeoutMs = 10000) {
             lastConnectError = new Error(formatSocketConnectError(err));
         };
 
+        const onAbort = () => {
+            cleanup();
+            reject(cancelledError(event));
+        };
+
         const cleanup = () => {
             clearTimeout(timer);
             socket.off('connect', onConnect);
             socket.off('connect_error', onConnectError);
+            signal?.removeEventListener('abort', onAbort);
         };
 
         socket.on('connect', onConnect);
         socket.on('connect_error', onConnectError);
+        signal?.addEventListener('abort', onAbort);
         socket.connect();
     });
 }
 
-function emitWithAck(socket, event, data, timeoutMs) {
+function emitWithAck(socket, event, data, timeoutMs, signal = undefined) {
+    if (signal?.aborted) return Promise.reject(cancelledError(event));
+
     return new Promise((resolve, reject) => {
         let settled = false;
 
@@ -116,12 +133,22 @@ function emitWithAck(socket, event, data, timeoutMs) {
             ));
         };
 
+        // Already sent: stop waiting for an answer nobody wants; a late ack is dropped.
+        const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(cancelledError(event));
+        };
+
         const cleanup = () => {
             clearTimeout(timer);
             socket.off('disconnect', onDisconnect);
+            signal?.removeEventListener('abort', onAbort);
         };
 
         socket.on('disconnect', onDisconnect);
+        signal?.addEventListener('abort', onAbort);
         socket.emit(event, data, (response) => {
             if (settled) return;
             settled = true;
@@ -157,16 +184,20 @@ function shouldRetry(event, err) {
     }
 }
 
+// options.signal (an AbortSignal) cancels the request: once it is aborted nothing more is sent, a wait
+// for the connection or for the acknowledgement ends at once, and the promise rejects with the
+// 'cancelled' phase.
 export async function socketRequest(socket, event, data = {}, options = {}) {
     const timeoutMs = options.timeoutMs || 15000;
     const connectTimeoutMs = options.connectTimeoutMs || 10000;
     const maxAttempts = options.maxAttempts || (RETRYABLE_EVENTS.has(event) ? 2 : 1);
+    const { signal } = options;
 
     let lastError = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
-            await waitForSocketConnect(socket, connectTimeoutMs);
-            return await emitWithAck(socket, event, data, timeoutMs);
+            await waitForSocketConnect(socket, event, connectTimeoutMs, signal);
+            return await emitWithAck(socket, event, data, timeoutMs, signal);
         } catch (err) {
             lastError = err;
             if (attempt >= maxAttempts || !shouldRetry(event, err)) {
