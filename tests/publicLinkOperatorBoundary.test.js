@@ -2,11 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const http = require('node:http');
-const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { io: createSocketClient } = require('socket.io-client');
+const { claimServerPorts } = require('./serverPorts');
 
 const projectRoot = path.resolve(__dirname, '..');
 const SHARE_BASE_URL = 'https://nextra-proof.trycloudflare.com';
@@ -20,17 +20,6 @@ const TUNNEL_HEADERS = {
     'x-forwarded-proto': 'https',
     'x-forwarded-for': '203.0.113.9',
 };
-
-function reserveTcpPort() {
-    return new Promise((resolve, reject) => {
-        const server = net.createServer();
-        server.once('error', reject);
-        server.listen(0, '127.0.0.1', () => {
-            const { port } = server.address();
-            server.close((err) => (err ? reject(err) : resolve(port)));
-        });
-    });
-}
 
 async function waitForReady(baseUrl, child, getOutput, timeoutMs = 20_000) {
     const deadline = Date.now() + timeoutMs;
@@ -81,9 +70,7 @@ function socketRequest(socket, event, payload = {}) {
 }
 
 test('requests relayed through the public link never get the local operator\'s rights', { concurrency: false, timeout: 40_000 }, async (t) => {
-    const port = await reserveTcpPort();
-    let rtcPort = await reserveTcpPort();
-    while (rtcPort === port) rtcPort = await reserveTcpPort();
+    const { port, rtcPort } = await claimServerPorts();
     const baseUrl = `http://127.0.0.1:${port}`;
     const testDistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-public-link-dist-'));
     await fs.writeFile(path.join(testDistDir, 'index.html'), '<!doctype html><div id="root"></div>');

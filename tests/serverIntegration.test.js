@@ -1,24 +1,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
-const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { io: createSocketClient } = require('socket.io-client');
+const { claimServerPorts } = require('./serverPorts');
 
 const projectRoot = path.resolve(__dirname, '..');
-
-function reserveTcpPort() {
-    return new Promise((resolve, reject) => {
-        const server = net.createServer();
-        server.once('error', reject);
-        server.listen(0, '127.0.0.1', () => {
-            const { port } = server.address();
-            server.close((err) => (err ? reject(err) : resolve(port)));
-        });
-    });
-}
 
 function waitForExit(child, timeoutMs = 10_000) {
     if (child.exitCode !== null) {
@@ -152,9 +141,7 @@ function waitForSocketEvent(socket, event, predicate = () => true, timeoutMs = 5
 }
 
 test('real server composition enforces HTTP and Socket.IO operational contracts', { concurrency: false, timeout: 40_000 }, async (t) => {
-    const port = await reserveTcpPort();
-    let rtcPort = await reserveTcpPort();
-    while (rtcPort === port) rtcPort = await reserveTcpPort();
+    const { port, rtcPort } = await claimServerPorts();
     const metricsToken = 'integration-metrics-token';
     const baseUrl = `http://127.0.0.1:${port}`;
     let output = '';
@@ -508,9 +495,7 @@ test('real server composition enforces HTTP and Socket.IO operational contracts'
 });
 
 test('missing production SPA keeps readiness at 503 while liveness and build guidance remain available', { concurrency: false, timeout: 30_000 }, async (t) => {
-    const port = await reserveTcpPort();
-    let rtcPort = await reserveTcpPort();
-    while (rtcPort === port) rtcPort = await reserveTcpPort();
+    const { port, rtcPort } = await claimServerPorts();
     const baseUrl = `http://127.0.0.1:${port}`;
     const ownedTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-missing-dist-'));
     const missingDistDir = path.join(ownedTempDir, 'dist');
@@ -571,9 +556,7 @@ test('missing production SPA keeps readiness at 503 while liveness and build gui
 });
 
 test('unexpected unhandled rejection logs its shutdown reason and exits for supervision', { concurrency: false, timeout: 30_000 }, async (t) => {
-    const port = await reserveTcpPort();
-    let rtcPort = await reserveTcpPort();
-    while (rtcPort === port) rtcPort = await reserveTcpPort();
+    const { port, rtcPort } = await claimServerPorts();
     const baseUrl = `http://127.0.0.1:${port}`;
     const testDistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-fatal-dist-'));
     await fs.writeFile(path.join(testDistDir, 'index.html'), '<!doctype html><div id="root"></div>');
