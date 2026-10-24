@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { clientBuildDir } from './clientBuild.mjs';
 
 const require = createRequire(import.meta.url);
 const { claimServerPorts } = require('../serverPorts.js');
@@ -15,11 +16,13 @@ const RECOVERY_KEY = 'nextra.hostRecovery.v1';
 // server (which rejects a room it never had, with terminal: true), or a
 // connection the test drops. The spec starts its own server on ports it claims
 // and serves the same build as the shared web server unless
-// NEXTRA_TEST_DIST_DIR names another.
+// NEXTRA_TEST_DIST_DIR names another (clientBuildDir refuses a dist older than
+// the client source).
 let server = null;
 let serverOutput = '';
 
 async function startServer() {
+    const distDir = clientBuildDir(projectRoot);
     const { port, rtcPort } = await claimServerPorts();
     const child = spawn(process.execPath, ['server.js'], {
         cwd: projectRoot,
@@ -44,7 +47,7 @@ async function startServer() {
             RTC_MIN_PORT: String(rtcPort),
             RTC_MAX_PORT: String(rtcPort),
             NEXTRA_SMOKE_TEST: '1',
-            NEXTRA_TEST_DIST_DIR: process.env.NEXTRA_TEST_DIST_DIR || path.join(projectRoot, 'dist'),
+            NEXTRA_TEST_DIST_DIR: distDir,
             LOG_LEVEL: 'info',
         },
     });
