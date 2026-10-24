@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseOffer, validateCodecs, toMediasoupRtpParameters, createAnswer, parseDtlsParameters } = require('../lib/whip');
+const { parseOffer, validateCodecs, toMediasoupRtpParameters, createAnswer, parseDtlsParameters, missingSsrcSections } = require('../lib/whip');
 
 function buildOffer(videoSection) {
     return [
@@ -738,4 +738,54 @@ test('WHIP answer uses the candidate tcpType, and defaults a TCP candidate witho
             'a=candidate:1 1 TCP 2130706431 192.0.2.11 40002 typ host tcptype passive',
         ],
     );
+});
+
+// ── SSRC presence: the producer is matched to its RTP by SSRC only ───────────
+
+// mediasoup matches incoming RTP to a producer by the encodings' ssrc (this server
+// maps no mid, rid or header extensions), so a produced section needs an a=ssrc line.
+const withoutSsrc = (section) => section.filter((line) => !line.startsWith('a=ssrc:'));
+
+test('WHIP offer with a=ssrc in every produced section has no section missing its SSRC', () => {
+    const parsed = parseOffer(offerWithSections(h264Video('0'), opusAudio('1')));
+
+    assert.deepEqual(missingSsrcSections(parsed), []);
+    const rtpParameters = toMediasoupRtpParameters(parsed);
+    assert.deepEqual(rtpParameters.video.encodings, [{ ssrc: 1111 }]);
+    assert.deepEqual(rtpParameters.audio.encodings, [{ ssrc: 2222 }]);
+});
+
+test('WHIP offer check names the video section that lacks a=ssrc', () => {
+    const parsed = parseOffer(offerWithSections(withoutSsrc(h264Video('0')), opusAudio('1')));
+
+    assert.deepEqual(missingSsrcSections(parsed), ['video']);
+});
+
+test('WHIP offer check names the audio section that lacks a=ssrc', () => {
+    const parsed = parseOffer(offerWithSections(h264Video('0'), withoutSsrc(opusAudio('1'))));
+
+    assert.deepEqual(missingSsrcSections(parsed), ['audio']);
+});
+
+test('WHIP offer check names both sections when neither has a=ssrc, and works for a video-only offer', () => {
+    const both = parseOffer(offerWithSections(withoutSsrc(h264Video('0')), withoutSsrc(opusAudio('1'))));
+    assert.deepEqual(missingSsrcSections(both), ['video', 'audio']);
+
+    const videoOnly = parseOffer(offerWithSections(withoutSsrc(h264Video('0'))));
+    assert.deepEqual(missingSsrcSections(videoOnly), ['video']);
+});
+
+test('WHIP offer check ignores a section that is not produced, such as audio without Opus', () => {
+    const parsed = parseOffer(offerWithSections(h264Video('0'), withoutSsrc(pcmuAudio('1'))));
+
+    assert.equal(parsed.audio.selectedCodec, null);
+    assert.deepEqual(missingSsrcSections(parsed), []);
+    assert.equal(toMediasoupRtpParameters(parsed).audio, null);
+});
+
+test('WHIP offer check treats an SSRC of 0 as present', () => {
+    const parsed = parseOffer(offerWithSections(h264Video('0', 0), opusAudio('1')));
+
+    assert.equal(parsed.video.ssrc, 0);
+    assert.deepEqual(missingSsrcSections(parsed), []);
 });
