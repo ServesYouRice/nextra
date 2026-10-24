@@ -130,6 +130,32 @@ test('Host downloads an allowlisted diagnostics JSON file', async ({ page }) => 
     await expect(page.locator('.host-diagnostics [role="status"]')).toContainText('Downloaded nextra-diagnostics-');
 });
 
+// VAL-086: the skip link moves focus to <main>; it must not be treated as a
+// hash route, which would render NotFound and unmount the current view.
+for (const { route, marker } of [
+    { route: '/#watch', marker: '.join-form' },
+    { route: '/#host', marker: '.host-side-panel' },
+]) {
+    test(`skip to content on ${route} focuses main and keeps the view mounted`, async ({ page }) => {
+        await page.goto(route);
+        await expect(page.locator(marker)).toBeVisible();
+
+        // Focus the link directly: the watch view autofocuses its room code
+        // field, which would take a Tab from body. Tab order is covered by the
+        // keyboard test below.
+        const skipLink = page.getByRole('link', { name: 'Skip to content' });
+        await skipLink.focus();
+        await expect(skipLink).toBeFocused();
+        await page.keyboard.press('Enter');
+
+        await expect.poll(() => page.evaluate(() => document.activeElement?.id || '')).toBe('main');
+        await expect(page.getByRole('heading', { name: 'Page not found' })).toHaveCount(0);
+        await expect(page.locator(marker)).toBeVisible();
+        expect(new URL(page.url()).hash).toBe(route.slice(route.indexOf('#')));
+        await expect(page.getByTestId('route-announcer')).toHaveText('');
+    });
+}
+
 test('keyboard users can reach the main content and the join controls', async ({ page }) => {
     await page.goto('/#watch');
 

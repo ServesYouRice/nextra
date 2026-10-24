@@ -45,6 +45,17 @@ function Router() {
             const nextRoute = window.location.hash;
             const previousRoute = routeRef.current;
             if (nextRoute === previousRoute) return;
+            if (nextRoute === '#main') {
+                // '#main' is the skip link's target, not a route. Keep the
+                // current view mounted, restore the address and focus <main>.
+                window.history.replaceState(
+                    null,
+                    '',
+                    previousRoute || `${window.location.pathname}${window.location.search}`,
+                );
+                mainRef.current?.focus({ preventScroll: true });
+                return;
+            }
             if (!canLeaveRoute(nextRoute)) {
                 // The guard is prompting instead. Put the address bar back
                 // without firing another hashchange; replaceState also keeps
@@ -92,7 +103,18 @@ function Router() {
 
     return (
         <div className="app-layout">
-            <a href="#main" className="skip-link">Skip to content</a>
+            <a
+                href="#main"
+                className="skip-link"
+                onClick={(event) => {
+                    // Move focus only: the link keeps its href for semantics, but
+                    // following it would make '#main' a route and drop the view.
+                    event.preventDefault();
+                    mainRef.current?.focus({ preventScroll: true });
+                }}
+            >
+                Skip to content
+            </a>
             <header className="main-nav">
                 <div className="nav-brand">
                     <a href="#" className="nav-logo" title="Home">
