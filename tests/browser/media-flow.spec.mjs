@@ -751,8 +751,17 @@ test('autoplay denial falls back to muted playback and unmuting control succeeds
 
 let loopbackProxySequence = 0;
 let loopbackProxyState = null;
+// The running test's place in the lock queue, kept from the first line of
+// beforeEach. When the test timeout fires inside beforeEach, Playwright stops
+// waiting for the hook without throwing into it, so the hook's own catch never
+// runs: afterEach then removes the ticket and marks it abandoned, which ends
+// the abandoned wait instead of leaving a ticket queued ahead of every later
+// test.
+let mediaFlowTicket = null;
 
 test.beforeEach(async ({ browser }, testInfo) => {
+    const ticket = { abandoned: false, remove: async () => {} };
+    mediaFlowTicket = ticket;
     const [fs, http, net, path] = await Promise.all([
         import('node:fs/promises'),
         import('node:http'),
@@ -760,7 +769,9 @@ test.beforeEach(async ({ browser }, testInfo) => {
         import('node:path'),
     ]);
     loopbackProxySequence += 1;
-    const lockDirectory = path.join(process.cwd(), 'test-results', '.media-flow-lock');
+    // Under the project's outputDir, which Playwright clears when a run starts,
+    // so a ticket left by a killed run does not block the next run.
+    const lockDirectory = path.join(testInfo.project.outputDir, '.media-flow-lock');
     const ticketName = `${[
         String(Date.now()).padStart(13, '0'),
         String(testInfo.workerIndex).padStart(4, '0'),
@@ -768,11 +779,13 @@ test.beforeEach(async ({ browser }, testInfo) => {
         String(loopbackProxySequence).padStart(4, '0'),
     ].join('-')}.ticket`;
     const ticketPath = path.join(lockDirectory, ticketName);
+    ticket.remove = () => fs.rm(ticketPath, { force: true });
     await fs.mkdir(lockDirectory, { recursive: true });
     await fs.writeFile(ticketPath, '', { flag: 'wx' });
 
     try {
         for (;;) {
+            if (ticket.abandoned) throw new Error('beforeEach timed out waiting for the media-flow lock');
             const tickets = (await fs.readdir(lockDirectory))
                 .filter((entry) => entry.endsWith('.ticket'))
                 .sort();
@@ -820,6 +833,10 @@ test.beforeEach(async ({ browser }, testInfo) => {
             proxy.once('error', reject);
             proxy.listen(0, '127.0.0.1', resolve);
         });
+        if (ticket.abandoned) {
+            proxy.close();
+            throw new Error('beforeEach timed out while starting the loopback proxy');
+        }
         const proxyPort = proxy.address().port;
 
         const originalNewContext = browser.newContext;
@@ -832,32 +849,32 @@ test.beforeEach(async ({ browser }, testInfo) => {
         };
         loopbackProxyState = {
             browser,
-            fs,
             originalNewContext,
             proxy,
             sockets,
-            ticketPath,
         };
     } catch (error) {
-        await fs.rm(ticketPath, { force: true });
+        await ticket.remove();
         throw error;
     }
 });
 
 test.afterEach(async () => {
-    if (!loopbackProxyState) return;
+    const ticket = mediaFlowTicket;
+    mediaFlowTicket = null;
+    if (ticket) ticket.abandoned = true;
 
-    const {
-        browser,
-        fs,
-        originalNewContext,
-        proxy,
-        sockets,
-        ticketPath,
-    } = loopbackProxyState;
-    loopbackProxyState = null;
-    browser.newContext = originalNewContext;
-    for (const socket of sockets) socket.destroy();
-    await new Promise((resolve) => proxy.close(resolve));
-    await fs.rm(ticketPath, { force: true });
+    if (loopbackProxyState) {
+        const {
+            browser,
+            originalNewContext,
+            proxy,
+            sockets,
+        } = loopbackProxyState;
+        loopbackProxyState = null;
+        browser.newContext = originalNewContext;
+        for (const socket of sockets) socket.destroy();
+        await new Promise((resolve) => proxy.close(resolve));
+    }
+    if (ticket) await ticket.remove();
 });
