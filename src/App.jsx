@@ -206,7 +206,7 @@ function Landing() {
 
                 <div className="landing-footer">
                     <p className="footer-note">
-                        Media is encrypted in transit over WebRTC/TURN. Media is not stored by Nextra.
+                        WebRTC media is encrypted in transit; relay media is encrypted only as far as the page connection is. Media is not stored by Nextra.
                     </p>
                 </div>
             </div>
