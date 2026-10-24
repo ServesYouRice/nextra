@@ -2,6 +2,7 @@
 
 let deviceInstance = null;
 
+// Events that get a second attempt by default; shouldRetry decides per failure whether it is made.
 const RETRYABLE_EVENTS = new Set([
     'create-room',
     'join-room',
@@ -9,6 +10,26 @@ const RETRYABLE_EVENTS = new Set([
     'leave-room',
     'get-media-init',
 ]);
+
+// A repeat of these gives the same result or a harmless no-op on the server: get-media-init only reads,
+// reclaim-host rechecks the host token for the same room, and leave-room with no room answers success.
+// create-room (a second room) and join-room (a second viewer) are not in this set.
+const IDEMPOTENT_EVENTS = new Set([
+    'reclaim-host',
+    'leave-room',
+    'get-media-init',
+]);
+
+// Every failure of a request carries the phase it happened in, and the phase (never the message text)
+// decides whether sending the request again is safe:
+//   'connect'                the socket never connected, so nothing was sent: retry any event.
+//   'ack-timeout'            the request may have reached the server; the late ack is dropped.
+//   'disconnect-after-emit'  same: retry only events the server can handle twice (IDEMPOTENT_EVENTS).
+//   'server'                 the server answered with an error: never retry, whatever the message says.
+function tagPhase(error, phase) {
+    error.phase = phase;
+    return error;
+}
 
 export async function getDevice() {
     if (deviceInstance) return deviceInstance;
@@ -47,7 +68,7 @@ function waitForSocketConnect(socket, timeoutMs = 10000) {
         let lastConnectError = null;
         const timer = setTimeout(() => {
             cleanup();
-            reject(lastConnectError || new Error('Socket is not connected'));
+            reject(tagPhase(lastConnectError || new Error('Socket is not connected'), 'connect'));
         }, timeoutMs);
 
         const onConnect = () => {
@@ -79,14 +100,20 @@ function emitWithAck(socket, event, data, timeoutMs) {
             if (settled) return;
             settled = true;
             cleanup();
-            reject(new Error(`Request "${event}" timed out after ${Math.round(timeoutMs / 1000)}s`));
+            reject(tagPhase(
+                new Error(`Request "${event}" timed out after ${Math.round(timeoutMs / 1000)}s`),
+                'ack-timeout',
+            ));
         }, timeoutMs);
 
         const onDisconnect = (reason) => {
             if (settled) return;
             settled = true;
             cleanup();
-            reject(new Error(`Connection lost while waiting for "${event}" (${reason})`));
+            reject(tagPhase(
+                new Error(`Connection lost while waiting for "${event}" (${reason})`),
+                'disconnect-after-emit',
+            ));
         };
 
         const cleanup = () => {
@@ -101,7 +128,7 @@ function emitWithAck(socket, event, data, timeoutMs) {
             cleanup();
 
             if (!response) {
-                reject(new Error(`Request "${event}" failed (empty response)`));
+                reject(tagPhase(new Error(`Request "${event}" failed (empty response)`), 'server'));
                 return;
             }
 
@@ -112,19 +139,22 @@ function emitWithAck(socket, event, data, timeoutMs) {
 
             const error = new Error(response.error || response.message || 'Unknown error');
             Object.assign(error, response);
-            reject(error);
+            // After the assign, so a field named `phase` in the server's response cannot change the class.
+            reject(tagPhase(error, 'server'));
         });
     });
 }
 
-function isTransientError(err) {
-    const message = (err?.message || '').toLowerCase();
-    return (
-        message.includes('timed out')
-        || message.includes('socket is not connected')
-        || message.includes('connection lost')
-        || message.includes('socket connect failed')
-    );
+function shouldRetry(event, err) {
+    switch (err?.phase) {
+        case 'connect':
+            return true;
+        case 'ack-timeout':
+        case 'disconnect-after-emit':
+            return IDEMPOTENT_EVENTS.has(event);
+        default:
+            return false;
+    }
 }
 
 export async function socketRequest(socket, event, data = {}, options = {}) {
@@ -139,7 +169,7 @@ export async function socketRequest(socket, event, data = {}, options = {}) {
             return await emitWithAck(socket, event, data, timeoutMs);
         } catch (err) {
             lastError = err;
-            if (attempt >= maxAttempts || !isTransientError(err)) {
+            if (attempt >= maxAttempts || !shouldRetry(event, err)) {
                 throw err;
             }
             socket.connect();
