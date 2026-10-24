@@ -384,3 +384,167 @@ test('WHIP accepts only the first supported section of each kind and rejects the
     assert.ok(answerVp8.sections[1].lines.includes('a=rtpmap:96 H264/90000'));
     assert.deepEqual(answerVp8.bundle, ['1', '2']);
 });
+
+// ── RTCP feedback in the answer (RFC 4585 §4.2, RFC 5104) ────────────────────
+//
+// The answer carries a=rtcp-fb for each accepted codec: exactly the feedback
+// the offer lists for that payload type (or with the '*' wildcard) that the
+// producer is also configured with. The producer keeps forcing nack, nack pli
+// and ccm fir for video; those are only answered when the offer asked for them.
+
+// The a=rtcp-fb lines of one answer section, as '<pt> <feedback>' in answer order.
+function rtcpFbLines(section) {
+    return section.lines
+        .filter((line) => line.startsWith('a=rtcp-fb:'))
+        .map((line) => line.slice('a=rtcp-fb:'.length));
+}
+
+function h264VideoWithFeedback(mid, feedbackLines) {
+    return [...h264Video(mid), ...feedbackLines];
+}
+
+function opusAudioWithFeedback(mid, feedbackLines) {
+    return [...opusAudio(mid), ...feedbackLines];
+}
+
+const PRODUCER_FORCED_VIDEO_FEEDBACK = [
+    { type: 'nack', parameter: '' },
+    { type: 'nack', parameter: 'pli' },
+    { type: 'ccm', parameter: 'fir' },
+];
+
+test('WHIP parser reads a=rtcp-fb for one payload type and for the * wildcard', () => {
+    const offer = offerWithSections(
+        h264VideoWithFeedback('0', ['a=rtcp-fb:96 nack pli', 'a=rtcp-fb:* ccm fir', 'a=rtcp-fb:* transport-cc']),
+        opusAudio('1'),
+    );
+    const parsed = parseOffer(offer);
+
+    assert.deepEqual(parsed.video.rtcpFb, [
+        { payloadType: 96, type: 'nack pli' },
+        { payloadType: '*', type: 'ccm fir' },
+        { payloadType: '*', type: 'transport-cc' },
+    ]);
+    assert.deepEqual(parsed.audio.rtcpFb, []);
+});
+
+test('WHIP answer carries every offered feedback for the accepted payload type', (t) => {
+    const offer = offerWithSections(
+        h264VideoWithFeedback('0', [
+            'a=rtcp-fb:96 goog-remb',
+            'a=rtcp-fb:96 transport-cc',
+            'a=rtcp-fb:96 ccm fir',
+            'a=rtcp-fb:96 nack',
+            'a=rtcp-fb:96 nack pli',
+        ]),
+        opusAudioWithFeedback('1', ['a=rtcp-fb:111 transport-cc']),
+    );
+    const { sections } = answerFor(t, offer);
+
+    // Offered order first, then the producer's own order: stable for a given offer.
+    assert.deepEqual(rtcpFbLines(sections[0]), [
+        '96 goog-remb',
+        '96 transport-cc',
+        '96 ccm fir',
+        '96 nack',
+        '96 nack pli',
+    ]);
+    assert.deepEqual(rtcpFbLines(sections[1]), ['111 transport-cc']);
+});
+
+test('WHIP answer leaves out the forced feedback the offer did not ask for', (t) => {
+    const offer = offerWithSections(
+        h264VideoWithFeedback('0', ['a=rtcp-fb:96 nack', 'a=rtcp-fb:96 nack pli']),
+        opusAudio('1'),
+    );
+    const parsed = parseOffer(offer);
+    const { sections } = answerFor(t, offer);
+
+    assert.deepEqual(rtcpFbLines(sections[0]), ['96 nack', '96 nack pli']);
+    assert.deepEqual(rtcpFbLines(sections[1]), []);
+    // Q-002: the producer still carries all three forced types, offered or not.
+    assert.deepEqual(toMediasoupRtpParameters(parsed).video.codecs[0].rtcpFeedback, PRODUCER_FORCED_VIDEO_FEEDBACK);
+});
+
+test('WHIP answer applies a * wildcard to the accepted payload type, for what the producer supports', (t) => {
+    const offer = offerWithSections(
+        h264VideoWithFeedback('0', [
+            'a=rtcp-fb:* nack',
+            'a=rtcp-fb:* nack pli',
+            'a=rtcp-fb:* ccm fir',
+            // The producer is not configured for these, so they cannot be accepted.
+            'a=rtcp-fb:* transport-cc',
+            'a=rtcp-fb:* goog-remb',
+        ]),
+        opusAudioWithFeedback('1', ['a=rtcp-fb:* transport-cc']),
+    );
+    const parsed = parseOffer(offer);
+    const { sections } = answerFor(t, offer);
+
+    assert.deepEqual(rtcpFbLines(sections[0]), ['96 nack', '96 nack pli', '96 ccm fir']);
+    // The audio producer carries no feedback configuration, so nothing is accepted for it.
+    assert.deepEqual(rtcpFbLines(sections[1]), []);
+    // A wildcard does not change what the producer is configured with.
+    assert.deepEqual(toMediasoupRtpParameters(parsed).video.codecs[0].rtcpFeedback, PRODUCER_FORCED_VIDEO_FEEDBACK);
+    assert.deepEqual(toMediasoupRtpParameters(parsed).audio.codecs[0].rtcpFeedback, []);
+});
+
+test('WHIP answer lists feedback once when the offer gives it for the payload type and with *', (t) => {
+    const offer = offerWithSections(
+        h264VideoWithFeedback('0', ['a=rtcp-fb:96 nack', 'a=rtcp-fb:* nack', 'a=rtcp-fb:* nack pli']),
+        opusAudio('1'),
+    );
+    const { sections } = answerFor(t, offer);
+
+    assert.deepEqual(rtcpFbLines(sections[0]), ['96 nack', '96 nack pli']);
+});
+
+test('WHIP answer has no a=rtcp-fb when the offer lists no feedback', (t) => {
+    const offer = offerWithSections(h264Video('0'), opusAudio('1'));
+    const parsed = parseOffer(offer);
+    const { sections } = answerFor(t, offer);
+
+    for (const section of sections) assert.deepEqual(rtcpFbLines(section), []);
+    assert.deepEqual(toMediasoupRtpParameters(parsed).video.codecs[0].rtcpFeedback, PRODUCER_FORCED_VIDEO_FEEDBACK);
+});
+
+test('WHIP answer takes feedback only from the accepted payload type, never from another or from RTX', (t) => {
+    const offer = offerWithSections([
+        'm=video 9 UDP/TLS/RTP/SAVPF 96 97 98',
+        'c=IN IP4 0.0.0.0',
+        'a=mid:0',
+        'a=sendonly',
+        'a=rtpmap:96 H264/90000',
+        'a=fmtp:96 profile-level-id=42e01f;packetization-mode=1',
+        'a=rtcp-fb:96 nack',
+        'a=rtpmap:97 rtx/90000',
+        'a=fmtp:97 apt=96',
+        'a=rtcp-fb:97 nack',
+        'a=rtcp-fb:97 nack pli',
+        'a=rtpmap:98 H264/90000',
+        'a=fmtp:98 profile-level-id=640032;packetization-mode=1',
+        'a=rtcp-fb:98 ccm fir',
+        'a=ssrc:1111 cname:test',
+    ], opusAudio('1'));
+    const parsed = parseOffer(offer);
+    const { sections } = answerFor(t, offer);
+
+    // The profile-level-id 640032 payload type is the one accepted.
+    assert.equal(parsed.video.selectedCodec.payloadType, 98);
+    assert.deepEqual(sections[0].formats, ['98']);
+    assert.deepEqual(rtcpFbLines(sections[0]), ['98 ccm fir']);
+    assert.ok(!sections[0].lines.some((line) => /^a=rtcp-fb:97 /.test(line)), 'no feedback line for the RTX payload type');
+});
+
+test('WHIP answer gives a rejected section no a=rtcp-fb', (t) => {
+    const offer = offerWithSections(
+        h264VideoWithFeedback('0', ['a=rtcp-fb:96 nack']),
+        h264VideoWithFeedback('1', ['a=rtcp-fb:96 nack pli']),
+        opusAudio('2'),
+    );
+    const { sections } = answerFor(t, offer);
+
+    assert.deepEqual(rtcpFbLines(sections[0]), ['96 nack']);
+    assert.equal(sections[1].port, 0);
+    assert.deepEqual(rtcpFbLines(sections[1]), []);
+});
