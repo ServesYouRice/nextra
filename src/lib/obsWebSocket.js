@@ -330,16 +330,36 @@ async function waitForStreamInactive(sendRequest, {
     return { inactive: false, statusKnown };
 }
 
-async function stopActiveStream(sendRequest) {
+/**
+ * Stop the stream OBS has when a setup begins, and wait until it is down.
+ *
+ * Only a stream OBS reports live and not retrying (`wasLive`) is stopped
+ * through `sendRequest`, the transaction, so that a setup which fails starts
+ * it again once the service it streamed to is back: it was the host's output,
+ * and its target answered. Any other stream is stopped over `stopUnjournaled`
+ * and stays stopped: one that was only retrying a target that is gone (a room
+ * that ended), and one OBS reports up without saying whether it is retrying.
+ * Starting either again would put what OBS shows on the wire to a target that
+ * may not answer, and a retry sets the encoder up once more (see
+ * releaseStaleEncoder); left stopped, it is one click in OBS. A status that
+ * cannot be read at all is taken as no stream, and nothing is stopped.
+ *
+ * @returns {Promise<{ stopped: boolean, ok: boolean, wasLive?: boolean, retrying?: boolean, message?: string }>}
+ *   `wasLive`: the stream was live and is journaled to be started again.
+ *   `retrying`: OBS said the stream was retrying.
+ */
+async function stopActiveStream(sendRequest, stopUnjournaled) {
     const status = await getStreamStatus(sendRequest);
     if (!status?.outputActive && !status?.outputReconnecting) {
         return { stopped: false, ok: true, wasLive: false };
     }
     // A stream that was really running hands its encoder back when it stops;
-    // one that was only retrying does not.
-    const wasLive = status.outputReconnecting !== true;
+    // one that was only retrying does not, and one OBS did not say was
+    // running may not have.
+    const wasLive = status.outputActive === true && status.outputReconnecting === false;
+    const retrying = status.outputReconnecting === true;
 
-    const stopResponse = await sendRequest('StopStream');
+    const stopResponse = await (wasLive ? sendRequest : stopUnjournaled)('StopStream');
     if (stopResponse.requestStatus?.result !== true) {
         return {
             stopped: false,
@@ -350,13 +370,14 @@ async function stopActiveStream(sendRequest) {
 
     const { inactive } = await waitForStreamInactive(sendRequest);
     if (inactive) {
-        return { stopped: true, ok: true, wasLive };
+        return { stopped: true, ok: true, wasLive, retrying };
     }
 
     return {
         stopped: true,
         ok: false,
         wasLive,
+        retrying,
         message: 'OBS did not stop the previous stream in time.',
     };
 }
@@ -958,6 +979,15 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         const housekeepingRequest = (requestType, requestData) => (signal.aborted
             ? Promise.reject(signal.reason)
             : rawSendRequest(requestType, requestData));
+        // The stream the setup stopped (stopActiveStream's result), once it is
+        // confirmed down. A rollback starts it again only if it was live.
+        let stoppedStream = null;
+        const stoppedStreamOutcome = () => {
+            if (!stoppedStream) return '';
+            if (stoppedStream.wasLive) return ' The stream OBS was running when the setup began was started again.';
+            if (stoppedStream.retrying) return ' OBS was retrying a stream whose target did not answer when the setup began; that stream was left stopped.';
+            return ' OBS did not report whether the stream it had when the setup began was live, so that stream was left stopped.';
+        };
         let finishing = false;
         const finish = async (result, { timedOut = false } = {}) => {
             if (finishing) return;
@@ -971,10 +1001,11 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
                         ...result,
                         message: `${result.message} Rollback incomplete: ${rollbackFailures.join('; ')}`,
                     };
-                } else if (timedOut || requestedAv1) {
+                } else {
+                    const restored = timedOut || requestedAv1 ? ' OBS settings were restored.' : '';
                     result = {
                         ...result,
-                        message: `${result.message} OBS settings were restored.${requestedAv1 ? ' Disable AV1 mode and retry to use H.264.' : ''}`,
+                        message: `${result.message}${restored}${stoppedStreamOutcome()}${requestedAv1 ? ' Disable AV1 mode and retry to use H.264.' : ''}`,
                     };
                 }
             }
@@ -999,8 +1030,9 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         // live output. A stream that outlived its target — the server was
         // killed, or the host page went away without a WHIP DELETE — is still
         // "active" as far as OBS is concerned, so this is the common case on
-        // the second Start sharing rather than a rare one.
-        const stopResult = await stopActiveStream(sendRequest);
+        // the second Start sharing rather than a rare one. Only the stop of a
+        // live stream is journaled; a rollback leaves any other one stopped.
+        const stopResult = await stopActiveStream(sendRequest, housekeepingRequest);
         if (!stopResult.ok) {
             await finish({
                 success: false,
@@ -1010,6 +1042,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         }
         if (stopResult.stopped) {
             applied.push('previous stream stopped');
+            stoppedStream = stopResult;
         }
 
         const whipService = (server) => ({

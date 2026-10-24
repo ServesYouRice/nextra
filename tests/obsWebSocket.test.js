@@ -2107,9 +2107,11 @@ test('a WHIP URL with no probe address next to it gets no test stream at all, on
 // ── Rollback after the encoder-reset test stream, or after a stale stream was stopped (section-955d4948143d2e807b437925/Q-2, VAL-141) ──
 //
 // Failures that come after the test stream ran and was stopped cleanly (ones
-// that stop it badly are tested above). Open question Q-2 pins only what a
-// rollback does here: OBS ends not streaming, and the rollback starts nothing.
-// What it does after stopping a stream that was healthy and live is left open.
+// that stop it badly are tested above). Open question Q-2 pins what a rollback
+// does here: OBS ends not streaming, and the rollback starts nothing. It left
+// open what a rollback does after the setup stopped a stream that was healthy
+// and live; that stream was the host's output, and the rollback starts it again
+// (as the transaction journals a StopStream: TASK-079), tested after these.
 
 // `order` is the log of the requests that change something (scriptedObs's
 // `order`), from the first to the restore of the service OBS had before, for an
@@ -2132,13 +2134,14 @@ const failuresAfterTestStream = [
     },
 ];
 
-async function failAfterTestStream(failure, status) {
+// `wrap` may replace the fake OBS socket class with one built on it.
+async function failAfterTestStream(failure, status, wrap = (WebSocketImpl) => WebSocketImpl) {
     const obs = scriptedObs({
         profile: new Map([['Output/Mode', 'Advanced'], ['AdvOut/Encoder', 'obs_nvenc_h264_tex']]),
         status,
         reject: failure.reject,
     });
-    const observed = observeStreamTargets(obs.WebSocketImpl);
+    const observed = observeStreamTargets(wrap(obs.WebSocketImpl));
     const result = await configureWith({ WebSocketImpl: observed.WebSocketImpl }, {
         ...failure.setup,
         transactionOptions: { videoSettleMs: 1, stopPollIntervalMs: 1, stopPollAttempts: 3 },
@@ -2191,15 +2194,10 @@ test('a setup that fails after it stopped a stream stuck retrying a dead room pu
     }
 });
 
-// Today a setup that stopped a retrying stream journals that stop like any
-// other, so its rollback undoes it with a StartStream after the previous
-// service is back: OBS ends retrying the room that no longer exists, in a
-// result that says its settings were restored. Open question Q-2 pins this case
-// to "ends not streaming". The fix is in src/lib/obsWebSocket.js (stopActiveStream
-// should not journal the stop of a stream that was only retrying), outside this
-// item, so the assertion is a todo until it lands. C-2e1af7e99156 is the plan
-// issue for the rollback of that StopStream.
-test('a setup that fails after it stopped a stream stuck retrying a dead room leaves OBS not streaming, and the rollback starts nothing', { todo: 'C-2e1af7e99156' }, async () => {
+// A rollback that undid the stop of a stream that was only retrying would start
+// it again once the previous service is back: OBS would end retrying the room
+// that no longer exists. Open question Q-2 pins this case to "ends not streaming".
+test('a setup that fails after it stopped a stream stuck retrying a dead room leaves OBS not streaming, and the rollback starts nothing', async () => {
     for (const failure of failuresAfterTestStream) {
         const stale = { outputActive: true, outputReconnecting: true };
         const { obs, observed, result } = await failAfterTestStream(failure, stale);
@@ -2209,6 +2207,91 @@ test('a setup that fails after it stopped a stream stuck retrying a dead room le
         assert.deepEqual(obs.order.slice(restored), [], `${failure.name}: the rollback sent ${obs.order.slice(restored).join(', ')} after it restored the previous service`);
         assert.deepEqual(observed.starts, [ROOM_PROBE_URL], failure.name);
         assert.deepEqual(obs.status, { outputActive: false, outputReconnecting: false }, failure.name);
+    }
+});
+
+test('a failed setup that stopped a stream stuck retrying a dead room says that stream was left stopped', async () => {
+    for (const failure of failuresAfterTestStream) {
+        const stale = { outputActive: true, outputReconnecting: true };
+        const { result } = await failAfterTestStream(failure, stale);
+
+        assert.match(result.message, failure.message, failure.name);
+        assert.match(result.message, /OBS was retrying a stream whose target did not answer when the setup began; that stream was left stopped\./, failure.name);
+        assert.doesNotMatch(result.message, /started again/, failure.name);
+    }
+});
+
+// What a rollback does after the setup stopped a stream OBS reported live and
+// not retrying: that was the host's output, and its target answered, so the
+// rollback puts the service it streamed to back and starts it again, after the
+// video settle time. No test stream runs for it (stopping it released the
+// encoder), so the requests are those of an idle OBS without the probe and its
+// test stream, with the start at the end.
+test('a setup that fails after it stopped a healthy live stream puts the previous service back and starts that stream again, and says so (section-955d4948143d2e807b437925/Q-2)', async () => {
+    for (const failure of failuresAfterTestStream) {
+        const live = { outputActive: true, outputReconnecting: false };
+        const { obs, observed, result } = await failAfterTestStream(failure, live);
+
+        assert.equal(result.success, false, failure.name);
+        assert.match(result.message, failure.message, failure.name);
+        assert.doesNotMatch(result.message, /Rollback incomplete/, failure.name);
+        assert.deepEqual(obs.order, ['StopStream', ...failure.order.slice(3), 'StartStream'], failure.name);
+        assert.deepEqual(observed.serviceWrites, SERVICE_WRITES_THROUGH_RESTORE.slice(1), failure.name);
+        assert.deepEqual(observed.starts, ['http://old.example/whip'], failure.name);
+        assert.deepEqual(obs.status, { outputActive: true, outputReconnecting: false }, failure.name);
+        assert.match(result.message, /The stream OBS was running when the setup began was started again\./, failure.name);
+        assert.doesNotMatch(result.message, /left stopped/, failure.name);
+    }
+});
+
+// Refuses the first GetStreamStatus a setup sends, as an OBS that cannot read
+// its stream output at that moment would, and answers the later ones.
+function refuseFirstStreamStatus(WebSocketImpl) {
+    let refused = false;
+    return class FirstStatusRefusedSocket extends WebSocketImpl {
+        send(payload) {
+            const message = JSON.parse(payload);
+            if (!refused && message.op === 6 && message.d.requestType === 'GetStreamStatus') {
+                refused = true;
+                queueMicrotask(() => this.respond(message.d, {}, { result: false, comment: 'not ready' }));
+                return;
+            }
+            super.send(payload);
+        }
+    };
+}
+
+// A stream the rollback cannot know was live is not started again: starting it
+// puts what OBS shows on the wire to whatever the restored service names, and
+// if that is a target that is gone OBS retries it and sets its encoder up once
+// more. Left stopped, it is one click in OBS, and the result says so.
+test('a setup that fails after it stopped a stream OBS did not report as live leaves OBS not streaming, and the rollback starts nothing', async () => {
+    for (const failure of failuresAfterTestStream) {
+        // OBS says the output is up but not whether it is retrying: it is
+        // stopped, the encoder reset runs as for a retrying stream, and nothing
+        // follows the restore of the previous service.
+        const partial = { outputActive: true };
+        const fromPartial = await failAfterTestStream(failure, partial);
+        const restored = ['StopStream', ...failure.order];
+        assert.equal(fromPartial.result.success, false, failure.name);
+        assert.doesNotMatch(fromPartial.result.message, /Rollback incomplete/, failure.name);
+        assert.deepEqual(fromPartial.obs.order, restored, `${failure.name}, partial status`);
+        assert.deepEqual(fromPartial.observed.starts, [ROOM_PROBE_URL], `${failure.name}, partial status`);
+        assert.deepEqual(fromPartial.obs.status, { outputActive: false, outputReconnecting: false }, `${failure.name}, partial status`);
+        assert.match(fromPartial.result.message, /OBS did not report whether the stream it had when the setup began was live, so that stream was left stopped\./, failure.name);
+        assert.doesNotMatch(fromPartial.result.message, /started again/, failure.name);
+
+        // The first status cannot be read, while OBS is in fact live. The setup
+        // stops nothing itself; the encoder reset's test stream (which the fake
+        // OBS accepts on a running output, where OBS refuses it) is stopped as
+        // always, and the rollback starts nothing.
+        const live = { outputActive: true, outputReconnecting: false };
+        const unreadable = await failAfterTestStream(failure, live, refuseFirstStreamStatus);
+        assert.equal(unreadable.result.success, false, failure.name);
+        assert.deepEqual(unreadable.obs.order, failure.order, `${failure.name}, unreadable status`);
+        assert.deepEqual(unreadable.observed.starts, [ROOM_PROBE_URL], `${failure.name}, unreadable status`);
+        assert.deepEqual(unreadable.obs.status, { outputActive: false, outputReconnecting: false }, `${failure.name}, unreadable status`);
+        assert.doesNotMatch(unreadable.result.message, /started again/, failure.name);
     }
 });
 
