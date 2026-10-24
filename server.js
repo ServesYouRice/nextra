@@ -35,7 +35,7 @@ const {
     emitHostMetrics,
 } = require('./lib/socket');
 const { createRelayCapacityProbe } = require('./lib/relayCapacityProbe');
-const { listObsVideoEncoders, writeStreamEncoderSettings } = require('./lib/obsProfile');
+const { listObsVideoEncoders, restoreStreamEncoderSettings, writeStreamEncoderSettings } = require('./lib/obsProfile');
 const { startRoomCleanup, stopRoomCleanup, getAllRoomStats } = require('./lib/rooms');
 const { getOrCreateCert } = require('./lib/https');
 const { startCloudflareTunnel } = require('./lib/tunnel');
@@ -1600,6 +1600,13 @@ async function startWhipHttpServer(whipRouter) {
             if (getSocketClientClassification(socket).kind !== 'loopback') return { ok: false, reason: 'not-local' };
             const result = writeStreamEncoderSettings(payload);
             if (result.ok) console.log(`[OBS] Wrote stream encoder settings to ${result.path}`);
+            return result;
+        },
+        // Putting the file back is as local as writing it.
+        restoreObsEncoderSettings: (socket, payload) => {
+            if (getSocketClientClassification(socket).kind !== 'loopback') return { ok: false, reason: 'not-local' };
+            const result = restoreStreamEncoderSettings(payload);
+            if (result.ok) console.log(`[OBS] Put stream encoder settings back at ${result.path}`);
             return result;
         },
         listObsEncoders: (socket) => (getSocketClientClassification(socket).kind === 'loopback' ? listObsVideoEncoders() : null),
