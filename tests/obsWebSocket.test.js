@@ -951,6 +951,94 @@ test('a stop held for a stream started outside the transaction is rolled back on
     assert.deepEqual(released.requestTypes(releasedForward), ['SetStreamServiceSettings']);
 });
 
+test('registerUndo journals a step that is not an OBS request and undoes it in reverse order (VAL-118)', async () => {
+    const clock = fakeRollbackClock();
+    const obs = rollbackObs(clock);
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(obs.sendRequest, { delay: clock.delay, now: clock.now });
+    await transaction.request('SetStreamServiceSettings', { streamServiceType: 'whip_custom' });
+    transaction.registerUndo('encoder settings file', async () => {
+        obs.log.push({ requestType: 'file restored', at: clock.time });
+    });
+    await transaction.request('SetVideoSettings', { outputWidth: 1280, outputHeight: 720 });
+    const forward = obs.log.length;
+
+    assert.deepEqual(await transaction.rollback(), []);
+
+    // Newest first, whatever kind of step: the video, then the file, then the service.
+    assert.deepEqual(obs.requestTypes(forward), ['SetVideoSettings', 'file restored', 'SetStreamServiceSettings']);
+});
+
+test('a registered undo that fails is named in the rollback failures, and the other steps still run (VAL-118)', async () => {
+    const clock = fakeRollbackClock();
+    const obs = rollbackObs(clock);
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(obs.sendRequest, { delay: clock.delay, now: clock.now });
+    await transaction.request('SetStreamServiceSettings', { streamServiceType: 'whip_custom' });
+    transaction.registerUndo('encoder settings file', async () => { throw new Error('disk full'); });
+    transaction.registerUndo('another file', () => { throw 'plain text'; });
+    await transaction.request('SetVideoSettings', { outputWidth: 1280, outputHeight: 720 });
+    const forward = obs.log.length;
+
+    const failures = await transaction.rollback();
+
+    assert.deepEqual(failures, ['another file: plain text', 'encoder settings file: disk full']);
+    assert.deepEqual(obs.requestTypes(forward), ['SetVideoSettings', 'SetStreamServiceSettings']);
+});
+
+test('a registered undo is dropped when it is released or the transaction commits, and cannot be added once it ended (VAL-118)', async () => {
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const undone = [];
+
+    const released = createObsConfigurationTransaction(rollbackObs(fakeRollbackClock()).sendRequest);
+    released.registerUndo('released', async () => { undone.push('released'); })();
+    released.registerUndo('kept', async () => { undone.push('kept'); });
+    assert.deepEqual(await released.rollback(), []);
+    assert.deepEqual(undone, ['kept']);
+    assert.throws(() => released.registerUndo('late', async () => { undone.push('late'); }), /already complete/);
+
+    const committed = createObsConfigurationTransaction(rollbackObs(fakeRollbackClock()).sendRequest);
+    committed.registerUndo('committed', async () => { undone.push('committed'); });
+    committed.commit();
+    assert.deepEqual(await committed.rollback(), []);
+    assert.throws(() => committed.registerUndo('late', async () => { undone.push('late'); }), /already complete/);
+    assert.deepEqual(undone, ['kept']);
+});
+
+test('a registered undo still runs after the rollback could not confirm the stream stopped, while OBS requests are skipped (VAL-118)', async () => {
+    // The stop gate protects OBS from changes under a live output; a file is no
+    // OBS request, so leaving it changed gains nothing.
+    const clock = fakeRollbackClock();
+    const obs = rollbackObs(clock, { status: () => ({ outputActive: true, outputReconnecting: false }) });
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(obs.sendRequest, {
+        delay: clock.delay,
+        now: clock.now,
+        stopPollIntervalMs: 100,
+        stopPollAttempts: 2,
+    });
+    await transaction.request('StopStream');
+    await transaction.request('SetStreamServiceSettings', { streamServiceType: 'whip_custom' });
+    transaction.registerUndo('encoder settings file', async () => {
+        obs.log.push({ requestType: 'file restored', at: clock.time });
+    });
+    transaction.registerUndo('stuck file', async () => { throw new Error('read-only'); });
+    await transaction.request('SetVideoSettings', { outputWidth: 1280, outputHeight: 720 });
+    await transaction.request('StartStream');
+    const forward = obs.log.length;
+
+    const failures = await transaction.rollback();
+
+    assert.deepEqual(obs.requestTypes(forward), ['StopStream', 'GetStreamStatus', 'GetStreamStatus', 'file restored']);
+    assert.deepEqual(failures, [
+        'StopStream: output still active after 200ms',
+        'skipped SetVideoSettings',
+        'stuck file: read-only',
+        'skipped SetStreamServiceSettings',
+        'skipped StartStream',
+    ]);
+});
+
 test('a setup whose stream cannot be confirmed stopped says its rollback is incomplete and restores nothing', async () => {
     // OBS is live when the setup begins and stops when asked. The new stream
     // starts and is then reported stopped, which fails the setup. The rollback's
@@ -1654,7 +1742,9 @@ test('a stream that was simply live is stopped once, with no extra start', async
 // nth StopStream: `refuse` is the comment OBS refuses it with, `staysActive`
 // keeps the output up, `activePolls` is how many polls still see it up before
 // it is down. `refuseStart` is the comment OBS refuses every StartStream with.
-function testStreamObs({ stallStatus = () => false, stop = () => ({}), refuseStart = null } = {}) {
+// `stallRequest(requestType, requestData)` leaves any request unanswered when
+// it returns true.
+function testStreamObs({ stallStatus = () => false, stop = () => ({}), refuseStart = null, stallRequest = () => false } = {}) {
     const log = [];
     const status = { outputActive: false, outputReconnecting: false };
     const profile = new Map([['Output/Mode', 'Advanced'], ['AdvOut/Encoder', 'obs_nvenc_h264_tex']]);
@@ -1664,6 +1754,7 @@ function testStreamObs({ stallStatus = () => false, stop = () => ({}), refuseSta
         const { requestType, requestData = {} } = request;
         const key = `${requestData.parameterCategory}/${requestData.parameterName}`;
         log.push(requestType);
+        if (stallRequest(requestType, requestData)) return undefined;
         const reply = (data, requestStatus) => queueMicrotask(() => ws.respond(request, data, requestStatus));
         switch (requestType) {
         case 'GetProfileParameter':
@@ -1856,6 +1947,163 @@ test('without auto-start an idle OBS still runs the encoder-reset test stream on
         'SetVideoSettings',
     ]);
     assert.equal(obs.status.outputActive, false);
+});
+
+// A setup that fails after the encoder settings file was written. The first
+// run has the auto-start refused, as the issue has it; the others leave the
+// colour space write unanswered, which ends the setup at once, a request
+// timeout later.
+const av1FileSetup = {
+    encoderSettings: { videoCodec: 'av1', obsEncoderIds: ['obs_nvenc_av1_tex'], bitrateKbps: 18_000, keyframeIntervalSec: 1 },
+    transactionOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+    encoderResetOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+};
+// What the encoder file held before the setup wrote it, as a server that can
+// restore it would report.
+const encoderFileBefore = { rate_control: 'CBR', bitrate: 6000, keyint_sec: 2, bf: 2, lookahead: true };
+
+function stallFirstColorSpaceWrite() {
+    let stalled = false;
+    return (requestType, requestData) => {
+        if (stalled || requestType !== 'SetProfileParameter' || requestData?.parameterName !== 'ColorSpace') return false;
+        stalled = true;
+        return true;
+    };
+}
+
+test('a failed auto-start writes the previous encoder settings file back before it says OBS was restored (VAL-118)', async () => {
+    const obs = testStreamObs({ refuseStart: 'output busy' });
+    const calls = [];
+
+    const result = await configureWith(obs, {
+        ...av1FileSetup,
+        autoStart: true,
+        writeEncoderSettings: async (payload) => {
+            calls.push({ ...payload, startsSoFar: obs.log.filter((requestType) => requestType === 'StartStream').length });
+            return calls.length === 1 ? { applied: true, previous: encoderFileBefore } : { applied: true };
+        },
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.message, /^OBS configured, but auto-start failed: output busy /);
+    assert.equal(calls.length, 2, 'the file is written once and restored once');
+    assert.equal(calls[0].settings.bitrate, 18_000);
+    // Two starts were sent by then: the encoder-reset test stream and the refused auto-start.
+    assert.deepEqual(calls[1], { profileName: 'Streaming', settings: encoderFileBefore, startsSoFar: 2 });
+    assert.match(result.message, /OBS settings were restored\. Disable AV1 mode/);
+    assert.doesNotMatch(result.message, /Rollback incomplete/);
+});
+
+test('a setup that ends after the encoder settings file was written says when the file could not be put back (VAL-118)', async () => {
+    const cases = [
+        {
+            name: 'the server reports no previous contents',
+            first: { applied: true },
+            restores: 0,
+            failure: 'encoder settings file: not restored (its previous contents are not known)',
+        },
+        {
+            name: 'the previous contents are empty',
+            first: { applied: true, previous: {} },
+            restores: 0,
+            failure: 'encoder settings file: not restored (its previous contents are not known)',
+        },
+        {
+            name: 'the previous contents are not settings',
+            first: { applied: true, previous: 'bitrate=6000' },
+            restores: 0,
+            failure: 'encoder settings file: not restored (its previous contents are not known)',
+        },
+        {
+            name: 'the server refuses the restore',
+            first: { applied: true, previous: encoderFileBefore },
+            restore: async () => ({ applied: false, reason: 'write-failed' }),
+            restores: 1,
+            failure: 'encoder settings file: not restored (write-failed)',
+        },
+        {
+            name: 'the restore gets no answer',
+            first: { applied: true, previous: encoderFileBefore },
+            restore: async () => { throw new Error('Request "obs-encoder-settings" timed out after 5s'); },
+            restores: 1,
+            failure: 'encoder settings file: not restored (Request "obs-encoder-settings" timed out after 5s)',
+        },
+    ];
+    for (const { name, first, restore, restores, failure } of cases) {
+        const obs = testStreamObs({ stallRequest: stallFirstColorSpaceWrite() });
+        const calls = [];
+
+        const result = await configureWith(obs, {
+            ...av1FileSetup,
+            connectionOptions: connectionOptions(obs.WebSocketImpl, { requestTimeoutMs: 50, transactionTimeoutMs: 5000 }),
+            writeEncoderSettings: async (payload) => {
+                calls.push(payload);
+                return calls.length === 1 ? first : restore(payload);
+            },
+        });
+
+        assert.equal(result.success, false, name);
+        assert.match(result.message, /^OBS request SetProfileParameter timed out after 50ms\./, name);
+        assert.equal(calls.length, 1 + restores, name);
+        if (restores) assert.deepEqual(calls[1], { profileName: 'Streaming', settings: encoderFileBefore }, name);
+        assert.ok(result.message.includes(`Rollback incomplete: ${failure}`), `${name}: ${result.message}`);
+        assert.doesNotMatch(result.message, /were restored/, name);
+    }
+});
+
+test('a file write the server did not apply leaves nothing to put back (VAL-118)', async () => {
+    const answers = [
+        async () => ({ applied: false, reason: 'not-local' }),
+        async () => { throw new Error('socket timeout'); },
+    ];
+    for (const answer of answers) {
+        const obs = testStreamObs({ stallRequest: stallFirstColorSpaceWrite() });
+        const calls = [];
+
+        const result = await configureWith(obs, {
+            ...av1FileSetup,
+            connectionOptions: connectionOptions(obs.WebSocketImpl, { requestTimeoutMs: 50, transactionTimeoutMs: 5000 }),
+            writeEncoderSettings: async (payload) => {
+                calls.push(payload);
+                return answer();
+            },
+        });
+
+        assert.equal(result.success, false);
+        assert.equal(calls.length, 1);
+        assert.doesNotMatch(result.message, /Rollback incomplete/);
+        assert.match(result.message, /OBS settings were restored\. Disable AV1 mode/);
+    }
+});
+
+test('a rollback that begins while the encoder settings file is being written does not claim it was restored (VAL-118)', async () => {
+    // OBS is live, so the setup goes straight on to the file; the server's
+    // answer comes only after the deadline has rolled the setup back.
+    const obs = scriptedObs({
+        profile: new Map([['Output/Mode', 'Advanced'], ['AdvOut/Encoder', 'obs_nvenc_h264_tex']]),
+        status: { outputActive: true, outputReconnecting: false },
+    });
+    const calls = [];
+    let answerWrite = null;
+
+    const result = await configureWith(obs, {
+        ...av1FileSetup,
+        connectionOptions: connectionOptions(obs.WebSocketImpl, { requestTimeoutMs: 5000, transactionTimeoutMs: 300, deadlineGraceMs: 3000 }),
+        writeEncoderSettings: (payload) => {
+            calls.push(payload);
+            return new Promise((resolve) => { answerWrite = () => resolve({ applied: true, previous: encoderFileBefore }); });
+        },
+    });
+    answerWrite?.();
+
+    assert.equal(result.success, false);
+    assert.match(result.message, /^OBS setup timed out after 300ms\./);
+    assert.ok(
+        result.message.includes('Rollback incomplete: encoder settings file: not restored (a write of it was still under way'),
+        result.message,
+    );
+    assert.doesNotMatch(result.message, /were restored/);
+    assert.equal(calls.length, 1, 'nothing is written back for contents that were never reported');
 });
 
 test('a changed encoder or output mode is reported as needing an OBS restart', async () => {
