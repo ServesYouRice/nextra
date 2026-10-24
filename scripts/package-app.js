@@ -340,7 +340,9 @@ function getFileSha256(filePath) {
     return hash.digest('hex');
 }
 
-function verifyCloudflared(filePath, expectedSha256) {
+// The pinned digest, plus the Authenticode signature on Windows. On macOS the
+// digest covers the .tgz archive, so a bare Mach-O binary can never pass here.
+function verifyCloudflared(filePath, expectedSha256, platform = process.platform) {
     const actualSha256 = getFileSha256(filePath);
     if (actualSha256 !== expectedSha256) {
         return {
@@ -348,7 +350,7 @@ function verifyCloudflared(filePath, expectedSha256) {
             reason: `SHA-256 mismatch (expected ${expectedSha256}, got ${actualSha256})`,
         };
     }
-    if (process.platform !== 'win32') return { valid: true, reason: '' };
+    if (platform !== 'win32') return { valid: true, reason: '' };
 
     const escapedPath = filePath.replace(/'/g, "''");
     const signature = spawnSync('powershell.exe', [
@@ -568,95 +570,205 @@ function extractCloudflaredFromArchive(archivePath, destinationDir) {
     return extractedPath;
 }
 
-async function bundleCloudflared() {
-    const bundledName = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
-    const stageCloudflaredPath = path.join(stageDir, bundledName);
-    const stageLibCloudflaredPath = path.join(stageDir, 'lib', bundledName);
-    const stageBinCloudflaredPath = path.join(stageDir, 'node_modules', '.bin', bundledName);
-    const allowLocalCloudflared = process.env.ALLOW_LOCAL_CLOUDFLARED === '1';
-    const explicitCloudflaredPath = (process.env.CLOUDFLARED_PATH || '').trim();
-    const assetName = getCloudflaredAssetName();
-    const expectedSha256 = cloudflaredManifest.assets[assetName];
-    if (!expectedSha256) throw new Error(`No pinned cloudflared checksum for ${assetName}.`);
+function isCloudflaredArchiveAsset(assetName) {
+    return assetName.endsWith('.tgz');
+}
+
+// What to do with one cloudflared candidate (CLOUDFLARED_PATH, a project-root
+// file, or the one on PATH). `verified` is whether it passed verifyCloudflared
+// against the pinned digest of `assetName`. Pure, so every platform's decision
+// can be tested on any host.
+//   stage-direct      copy the file as it is (the pinned asset is the bare binary)
+//   stage-via-extract the file is the pinned archive: extract it, stage the entry
+//   reject            an explicit candidate that cannot be staged: fail loudly
+//   skip              an implicit candidate that cannot be staged: log, try the next
+// On macOS the pinned asset is the .tgz, so a file is never staged as it is: the
+// archive digest says nothing about a bare Mach-O, and a copied archive is not
+// an executable.
+function decideCloudflaredCandidate({ platform, assetName, verified, explicit }) {
+    const unusable = explicit ? 'reject' : 'skip';
+    if (!verified) return unusable;
+    if (isCloudflaredArchiveAsset(assetName)) return 'stage-via-extract';
+    return platform === 'darwin' ? unusable : 'stage-direct';
+}
+
+// Stages cloudflared out of the pinned archive. The archive is first copied into
+// a private scratch directory and the copy is what gets hashed and extracted, so
+// the bytes that matched the digest are the bytes unpacked, and nothing is
+// unpacked next to the caller's file. The extracted binary is staged and made
+// executable; on any failure the staged copies are removed again, and the scratch
+// directory goes either way, so a rejected archive cannot leave a binary behind
+// for a later run to pick up.
+function stageVerifiedCloudflaredArchive(archivePath, expectedSha256, stagePaths, options = {}) {
+    const {
+        platform = process.platform,
+        description = 'cloudflared archive',
+        verify = verifyCloudflared,
+        extract = extractCloudflaredFromArchive,
+        copy = copyCloudflaredToStage,
+        chmod = fs.chmodSync,
+    } = options;
+    const stagedPaths = [stagePaths.primary, stagePaths.lib, stagePaths.bin];
+    const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nextra-cloudflared-'));
+    try {
+        // A fixed name: the candidate may itself be called `cloudflared`, which is
+        // also the name of the entry extracted from it.
+        const snapshotPath = path.join(scratchDir, 'cloudflared-archive.tgz');
+        fs.copyFileSync(archivePath, snapshotPath);
+        const verification = verify(snapshotPath, expectedSha256, platform);
+        if (!verification.valid) {
+            throw new Error(`${description} failed pinned verification: ${verification.reason}.`);
+        }
+        const extractDir = path.join(scratchDir, 'extracted');
+        fs.mkdirSync(extractDir);
+        const extractedPath = extract(snapshotPath, extractDir);
+        copy(extractedPath, stagePaths.primary, stagePaths.lib, stagePaths.bin);
+        stagedPaths.forEach((stagedPath) => chmod(stagedPath, 0o755));
+    } catch (err) {
+        stagedPaths.forEach((stagedPath) => { try { fs.rmSync(stagedPath, { force: true }); } catch { } });
+        throw err;
+    } finally {
+        fs.rmSync(scratchDir, { recursive: true, force: true });
+    }
+}
+
+// Verifies one candidate and acts on decideCloudflaredCandidate's answer.
+// Returns true when cloudflared was staged and false when the candidate was
+// skipped; throws for an explicit candidate that cannot be used. `label` names
+// the candidate in log lines.
+function stageCloudflaredCandidate(candidatePath, options) {
+    const {
+        explicit,
+        label,
+        platform = process.platform,
+        assetName,
+        expectedSha256,
+        stagePaths,
+        version = cloudflaredManifest.version,
+        verify = verifyCloudflared,
+        copy = copyCloudflaredToStage,
+        log = console.log,
+    } = options;
+    const verification = verify(candidatePath, expectedSha256, platform);
+    const outcome = decideCloudflaredCandidate({ platform, assetName, verified: verification.valid, explicit });
+    const archive = isCloudflaredArchiveAsset(assetName);
+
+    switch (outcome) {
+        case 'stage-direct':
+            copy(candidatePath, stagePaths.primary, stagePaths.lib, stagePaths.bin);
+            return true;
+        case 'stage-via-extract':
+            stageVerifiedCloudflaredArchive(candidatePath, expectedSha256, stagePaths, options);
+            return true;
+        case 'reject':
+            if (archive) {
+                throw new Error(`${label} must be the pinned cloudflared ${version} archive ${assetName} on ${platform === 'darwin' ? 'macOS' : platform}, `
+                    + `not a bare cloudflared binary or any other file: ${verification.reason}.`);
+            }
+            throw new Error(`${label} is not the signed, pinned cloudflared ${version} asset: ${verification.reason}.`);
+        default:
+            log(`Skipping ${label}: it is not the pinned cloudflared ${version} ${archive ? 'archive ' : 'asset '}${assetName} (${verification.reason}).`);
+            return false;
+    }
+}
+
+// Looks for a cloudflared to stage without downloading: CLOUDFLARED_PATH first,
+// then project-root files (only with ALLOW_LOCAL_CLOUDFLARED=1), then the one on
+// PATH. Returns true when one was staged and false when the verified download
+// has to supply it. On macOS every candidate has to be the pinned archive.
+function stageLocalCloudflared(options) {
+    const {
+        env = process.env,
+        platform = process.platform,
+        root = projectRoot,
+        findOnPath = findCloudflaredOnPath,
+        log = console.log,
+        ...stageOptions
+    } = options;
+    const bundledName = platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
+    const candidateOptions = { ...stageOptions, platform, log };
+    const explicitCloudflaredPath = (env.CLOUDFLARED_PATH || '').trim();
 
     if (explicitCloudflaredPath) {
         if (!fs.existsSync(explicitCloudflaredPath)) {
             throw new Error(`CLOUDFLARED_PATH does not exist: ${explicitCloudflaredPath}`);
         }
-        const verification = verifyCloudflared(explicitCloudflaredPath, expectedSha256);
-        if (!verification.valid) {
-            throw new Error(`CLOUDFLARED_PATH is not the signed, pinned cloudflared ${cloudflaredManifest.version} asset: ${verification.reason}.`);
-        }
-        copyCloudflaredToStage(explicitCloudflaredPath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
-        console.log(`Bundled cloudflared from CLOUDFLARED_PATH: ${explicitCloudflaredPath}`);
-        return;
+        stageCloudflaredCandidate(explicitCloudflaredPath, { ...candidateOptions, explicit: true, label: 'CLOUDFLARED_PATH' });
+        log(`Bundled cloudflared from CLOUDFLARED_PATH: ${explicitCloudflaredPath}`);
+        return true;
     }
 
-    const localCandidates = [
-        path.join(projectRoot, bundledName),
-        path.join(projectRoot, 'cloudflared'),
-        path.join(projectRoot, 'cloudflared.exe'),
-    ];
+    const localCandidates = [...new Set([
+        path.join(root, bundledName),
+        path.join(root, 'cloudflared'),
+        path.join(root, 'cloudflared.exe'),
+    ])];
 
-    if (allowLocalCloudflared) {
+    if (env.ALLOW_LOCAL_CLOUDFLARED === '1') {
         for (const candidate of localCandidates) {
             if (!fs.existsSync(candidate)) continue;
-            if (!verifyCloudflared(candidate, expectedSha256).valid) continue;
-            copyCloudflaredToStage(candidate, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
-            console.log(`Bundled cloudflared from project file: ${path.basename(candidate)}`);
-            return;
+            const label = `project file ${path.basename(candidate)}`;
+            if (!stageCloudflaredCandidate(candidate, { ...candidateOptions, explicit: false, label })) continue;
+            log(`Bundled cloudflared from project file: ${path.basename(candidate)}`);
+            return true;
         }
     } else {
         const localPresent = localCandidates.some((candidate) => fs.existsSync(candidate));
         if (localPresent) {
-            console.log('Ignoring local cloudflared binary for security. Set ALLOW_LOCAL_CLOUDFLARED=1 to override.');
+            log('Ignoring local cloudflared binary for security. Set ALLOW_LOCAL_CLOUDFLARED=1 to override.');
         }
     }
 
-    const pathCandidate = findCloudflaredOnPath();
-    if (pathCandidate && fs.existsSync(pathCandidate) && verifyCloudflared(pathCandidate, expectedSha256).valid) {
-        copyCloudflaredToStage(pathCandidate, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
-        console.log(`Bundled cloudflared from PATH: ${pathCandidate}`);
-        return;
+    const pathCandidate = findOnPath();
+    if (pathCandidate && fs.existsSync(pathCandidate)) {
+        const label = `cloudflared on PATH (${pathCandidate})`;
+        if (stageCloudflaredCandidate(pathCandidate, { ...candidateOptions, explicit: false, label })) {
+            log(`Bundled cloudflared from PATH: ${pathCandidate}`);
+            return true;
+        }
     }
+
+    return false;
+}
+
+async function bundleCloudflared() {
+    const bundledName = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
+    const stagePaths = {
+        primary: path.join(stageDir, bundledName),
+        lib: path.join(stageDir, 'lib', bundledName),
+        bin: path.join(stageDir, 'node_modules', '.bin', bundledName),
+    };
+    const assetName = getCloudflaredAssetName();
+    const expectedSha256 = cloudflaredManifest.assets[assetName];
+    if (!expectedSha256) throw new Error(`No pinned cloudflared checksum for ${assetName}.`);
+
+    if (stageLocalCloudflared({ assetName, expectedSha256, stagePaths })) return;
 
     const downloadUrl = `https://github.com/cloudflare/cloudflared/releases/download/${cloudflaredManifest.version}/${assetName}`;
     console.log(`Downloading cloudflared for packaging: ${downloadUrl}`);
 
-    if (assetName.endsWith('.tgz')) {
-        // Download and unpack inside a scratch directory that is removed either way,
-        // so an archive that fails verification cannot leave an extracted binary
-        // behind for a later run to pick up off the project root.
-        const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nextra-cloudflared-'));
+    if (isCloudflaredArchiveAsset(assetName)) {
+        // The archive is downloaded into a scratch directory that is removed either
+        // way; stageVerifiedCloudflaredArchive then verifies and extracts it.
+        const downloadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nextra-cloudflared-download-'));
         try {
-            const archivePath = path.join(scratchDir, assetName);
+            const archivePath = path.join(downloadDir, assetName);
             await downloadFileWithRedirects(downloadUrl, archivePath);
-            const archiveVerification = verifyCloudflared(archivePath, expectedSha256);
-            if (!archiveVerification.valid) {
-                throw new Error(`Downloaded cloudflared failed pinned verification: ${archiveVerification.reason}.`);
-            }
-            const extractedPath = extractCloudflaredFromArchive(archivePath, scratchDir);
-            copyCloudflaredToStage(extractedPath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
-            [stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath]
-                .forEach((stagedPath) => fs.chmodSync(stagedPath, 0o755));
-        } catch (err) {
-            [stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath]
-                .forEach((stagedPath) => { try { fs.rmSync(stagedPath, { force: true }); } catch { } });
-            throw err;
+            stageVerifiedCloudflaredArchive(archivePath, expectedSha256, stagePaths, { description: 'Downloaded cloudflared' });
         } finally {
-            fs.rmSync(scratchDir, { recursive: true, force: true });
+            fs.rmSync(downloadDir, { recursive: true, force: true });
         }
         console.log('Bundled cloudflared via verified download.');
         return;
     }
 
-    await downloadFileWithRedirects(downloadUrl, stageCloudflaredPath);
-    const verification = verifyCloudflared(stageCloudflaredPath, expectedSha256);
+    await downloadFileWithRedirects(downloadUrl, stagePaths.primary);
+    const verification = verifyCloudflared(stagePaths.primary, expectedSha256);
     if (!verification.valid) {
-        try { fs.unlinkSync(stageCloudflaredPath); } catch { }
+        try { fs.unlinkSync(stagePaths.primary); } catch { }
         throw new Error(`Downloaded cloudflared failed pinned verification: ${verification.reason}.`);
     }
-    copyCloudflaredToStage(stageCloudflaredPath, stageCloudflaredPath, stageLibCloudflaredPath, stageBinCloudflaredPath);
+    copyCloudflaredToStage(stagePaths.primary, stagePaths.primary, stagePaths.lib, stagePaths.bin);
     console.log('Bundled cloudflared via verified download.');
 }
 
@@ -787,7 +899,13 @@ if (require.main === module) {
 }
 
 module.exports = {
+    copyCloudflaredToStage,
+    decideCloudflaredCandidate,
     downloadFileWithRedirects,
     getCloudflaredAssetName,
     getFfmpegAsset,
+    stageCloudflaredCandidate,
+    stageLocalCloudflared,
+    stageVerifiedCloudflaredArchive,
+    verifyCloudflared,
 };
