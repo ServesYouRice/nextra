@@ -124,6 +124,47 @@ async function installViewerSocketControl(page) {
     });
 }
 
+// Lets a test drop the viewer's Socket.IO WebSocket (socket.io-client then
+// reconnects under a new socket.id), log the events the page sends, and hold the
+// next outgoing request of one event back, as a slow network does, until the
+// test lets it go. A held request counts as sent when it is released.
+async function installViewerRequestControl(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const control = { sockets: [], sent: [], holdNext: '', held: [] };
+        window.__nextraRequestControl = control;
+        control.releaseHeld = () => control.held.splice(0).map((send) => send()).length;
+        window.WebSocket = class RequestControlWebSocket extends NativeWebSocket {
+            constructor(...args) {
+                super(...args);
+                control.sockets.push(this);
+            }
+
+            send(data) {
+                const event = typeof data === 'string' ? /^42\d*\["([^"]+)"/.exec(data)?.[1] : undefined;
+                const transmit = () => {
+                    if (event) control.sent.push(event);
+                    super.send(data);
+                };
+                if (event && event === control.holdNext) {
+                    control.holdNext = '';
+                    control.held.push(transmit);
+                    return;
+                }
+                transmit();
+            }
+        };
+    });
+}
+
+// Drops a watching viewer's connection with the room join of its reconnect held
+// back, so Leave Room can be pressed while the rejoin is still on its way.
+async function dropWatchingViewerWithRejoinHeld(viewerPage) {
+    await viewerPage.evaluate(() => { window.__nextraRequestControl.holdNext = 'join-room'; });
+    await viewerPage.evaluate(() => window.__nextraRequestControl.sockets.at(-1).close());
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraRequestControl.held.length)).toBe(1);
+}
+
 // Lets a test make a viewer's WebRTC start stall the way an unreachable
 // connection does, from the moment it switches the flags on: ICE finds no usable
 // candidate (the peer connection may only use relay candidates, and the test
@@ -1103,6 +1144,122 @@ test('a viewer whose WebRTC recovery after a reconnect stalls in video.play() fa
     await expect.poll(async () => (await request.get('/api/metrics')).json()).toMatchObject({
         rooms: { active: 0, totalRelayViewers: 0, totalMediasoupConsumers: 0 },
     });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// A reconnect rejoins the room and resumes playback while the joined view, Leave
+// Room included, stays usable. A Leave Room pressed during that wait used to be
+// undone when the rejoin finished: it put the viewer back in the joined view and
+// started playback again.
+const PLAYBACK_REQUESTS = ['get-rtp-capabilities', 'create-recv-transport', 'consume', 'relay-consume-start', 'fallback-consume-start'];
+
+test('Leave Room pressed while a reconnect is rejoining the room stays left, starts no playback and leaves no viewer behind', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerRequestControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+    await dropWatchingViewerWithRejoinHeld(viewerPage);
+
+    // The joined view is still up while the rejoin waits.
+    const leaveButton = viewerPage.getByRole('button', { name: 'Leave Room' });
+    await expect(leaveButton).toBeVisible();
+    await leaveButton.click();
+    const joinButton = viewerPage.getByRole('button', { name: 'Join Room' });
+    await expect(joinButton).toBeVisible();
+    // The leave reached the server ahead of the held join-room.
+    expect(await getOnlyRoom(request)).toMatchObject({ viewerCount: 0 });
+
+    // The join-room now reaches the server, which puts the viewer back in the
+    // room (it came after the leave) and answers the rejoin that was left behind.
+    const sentBeforeRelease = await viewerPage.evaluate(() => window.__nextraRequestControl.sent.length);
+    expect(await viewerPage.evaluate(() => window.__nextraRequestControl.releaseHeld())).toBe(1);
+
+    // The answer is stale: the client asks the server to drop that viewer again.
+    await expect.poll(() => viewerPage.evaluate(
+        (from) => window.__nextraRequestControl.sent.slice(from),
+        sentBeforeRelease,
+    )).toContain('leave-room');
+    await expect.poll(async () => (await getOnlyRoom(request))?.viewerCount).toBe(0);
+    await viewerPage.waitForTimeout(1500);
+
+    // The viewer stays on the join form, with no error and no playback of any kind.
+    await expect(joinButton).toBeVisible();
+    await expect(leaveButton).toHaveCount(0);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect(viewerPage.getByText(/WebRTC mode active|relay mode active/i)).toHaveCount(0);
+    const sentAfterRelease = await viewerPage.evaluate(
+        (from) => window.__nextraRequestControl.sent.slice(from),
+        sentBeforeRelease,
+    );
+    for (const requestName of PLAYBACK_REQUESTS) {
+        expect(sentAfterRelease, `${requestName} was not sent after the leave`).not.toContain(requestName);
+    }
+    expect(await getOnlyRoom(request)).toMatchObject({ viewerCount: 0, relayViewerCount: 0, mediasoupConsumerCount: 0 });
+
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The server keeps one room per socket, so a leave sent for the rejoin that was
+// left behind would remove the viewer from the room it joined afterwards.
+test('a rejoin left behind by Leave Room finishes without undoing the join made after it', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerRequestControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+    await dropWatchingViewerWithRejoinHeld(viewerPage);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    const joinButton = viewerPage.getByRole('button', { name: 'Join Room' });
+    await expect(joinButton).toBeVisible();
+
+    // Join again while the first rejoin's join-room is still held back.
+    await joinButton.click();
+    const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
+    await expect(watchButton).toBeEnabled();
+    await expect.poll(async () => (await getOnlyRoom(request))?.viewerCount).toBe(1);
+
+    // The held join-room reaches the server (which already has this viewer in the room) and is answered.
+    expect(await viewerPage.evaluate(() => window.__nextraRequestControl.releaseHeld())).toBe(1);
+    const sentAtRelease = await viewerPage.evaluate(() => window.__nextraRequestControl.sent.length);
+    await viewerPage.waitForTimeout(2000);
+
+    // The old rejoin ended without a word: the newer join is untouched.
+    await expect(viewerPage.getByRole('button', { name: 'Leave Room' })).toBeVisible();
+    await expect(watchButton).toBeEnabled();
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect(viewerPage.getByText(/WebRTC mode active|relay mode active/i)).toHaveCount(0);
+    const sentAfterRelease = await viewerPage.evaluate(
+        (from) => window.__nextraRequestControl.sent.slice(from).filter((event) => event !== 'heartbeat'),
+        sentAtRelease,
+    );
+    expect(sentAfterRelease, 'the old rejoin sent nothing more').toEqual([]);
+    expect(await getOnlyRoom(request)).toMatchObject({ viewerCount: 1, relayViewerCount: 0, mediasoupConsumerCount: 0 });
+
+    // The newer join works.
+    await watchButton.click();
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
 
     await viewerContext.close();
     await hostContext.close();

@@ -29,6 +29,7 @@ import {
 } from './lib/playbackAttempt.mjs';
 import { createSubscriptionLedger, emitClaimedStart, releaseSubscription } from './lib/subscriptionLedger.mjs';
 import { createRelayAppendQueue } from './lib/relayAppendQueue.mjs';
+import { abandonStaleJoin, createViewerSession, isStaleViewerSessionError } from './lib/viewerSession.mjs';
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
@@ -154,6 +155,10 @@ export default function WatchView({ initialCode = '' }) {
     const [subscriptionLedger] = useState(createSubscriptionLedger);
     // transport-failed and reconnect recoveries run one at a time.
     const [recoveryGuard] = useState(createRecoveryGuard);
+    // Which room join is the viewer's current session. Leave Room and the other
+    // resets that end the session move it on at once, so a join or rejoin still
+    // on its way commits nothing and starts no playback (see viewerSession.mjs).
+    const [viewerSession] = useState(createViewerSession);
     const joiningRef = useRef(false);
     const terminalRoomEndedRef = useRef(false);
     // Latches a rejected fallback-consume-start so the auto-enter effect stops
@@ -833,7 +838,9 @@ export default function WatchView({ initialCode = '' }) {
     useEffect(() => {
         const onRoomEnded = ({ reason } = {}) => {
             terminalRoomEndedRef.current = true;
-            // No queued recovery may resume a room that has ended.
+            // A join still on its way must not bring the ended room back, and no
+            // queued recovery may resume it.
+            viewerSession.invalidate();
             recoveryGuard.clearFollowUp();
             setHostReconnectingReason('');
             cleanupPlayback();
@@ -922,7 +929,7 @@ export default function WatchView({ initialCode = '' }) {
             socket.off('room-ended', onRoomEnded);
             socket.off('server-restarting', onRoomEnded);
         };
-    }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback, recoveryGuard]);
+    }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback, recoveryGuard, viewerSession]);
 
     useEffect(() => {
         const recoverTransport = async (reason, { wasWatching, previousPlaybackMode }) => {
@@ -981,6 +988,8 @@ export default function WatchView({ initialCode = '' }) {
                 return;
             }
 
+            // The session ends here: a join still on its way must not restore it.
+            viewerSession.invalidate();
             recoveryGuard.clearFollowUp();
             cleanupPlayback();
             resetDevice();
@@ -988,6 +997,7 @@ export default function WatchView({ initialCode = '' }) {
             setJoinedRoomCode('');
             setJoined(false);
             setWatching(false);
+            setWatchLoading(false);
             setHasProducer(false);
             setHostDisconnected(false);
             setHostReconnectingReason('');
@@ -1016,42 +1026,76 @@ export default function WatchView({ initialCode = '' }) {
         roomHasTurnServer,
         startMediasoupPlayback,
         startRelayPlayback,
+        viewerSession,
     ]);
 
-    const joinRoomAndLoadDevice = useCallback(async (roomCode) => {
+    // Joins the room as the viewer session `session` (see viewerSession.mjs) and
+    // loads the mediasoup device. The session is checked after every await and
+    // before anything is committed to a ref or to state: once it has ended (Leave
+    // Room, a room that ended, a newer join) the join commits nothing and throws
+    // a StaleViewerSessionError, after undoing its join-room on the server where
+    // that is safe (abandonStaleJoin).
+    const joinRoomAndLoadDevice = useCallback(async (roomCode, session) => {
         const cleanCode = normalizeRoomCode(roomCode);
-        const response = await socketRequest(socket, 'join-room', { code: cleanCode, passphrase });
-        const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
-        const device = await getDevice();
-        if (!device.loaded) {
-            await device.load({ routerRtpCapabilities: rtpCapabilities });
-        }
-        deviceRef.current = device;
-        const av1ReceiveSupported = hasWebRtcReceiveCodec(device.rtpCapabilities, 'video/AV1');
-        const av1Unsupported = isAv1PlaybackUnsupported({
-            obsVideoCodec: response.obsVideoCodec,
-            receiveCapabilitiesLoaded: device.loaded,
-            av1ReceiveSupported,
-        });
-        if (av1Unsupported) {
-            console.warn('[WatchView] WebRTC receive capabilities do not include video/AV1');
-        }
-        setCodecUnsupported(av1Unsupported);
+        // From the moment join-room is sent the server may hold this viewer in the room.
+        let mayBeInRoom = true;
+        try {
+            let response;
+            try {
+                response = await socketRequest(socket, 'join-room', { code: cleanCode, passphrase });
+            } catch (err) {
+                // An answer that refuses the join, or a request that never left, put no viewer in the room.
+                if (err?.phase === 'server' || err?.phase === 'connect') mayBeInRoom = false;
+                throw err;
+            }
+            session.assertCurrent();
+            const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
+            session.assertCurrent();
+            const device = await getDevice();
+            session.assertCurrent();
+            if (!device.loaded) {
+                await device.load({ routerRtpCapabilities: rtpCapabilities });
+                session.assertCurrent();
+            }
 
-        joinedRoomCodeRef.current = cleanCode;
-        setJoinedRoomCode(cleanCode);
-        terminalRoomEndedRef.current = false;
-        fallbackStartRejectedRef.current = false;
-        setJoined(true);
-        setHasProducer(response.hasProducer || false);
-        setAllowMediaControl(response.allowMediaControl === true);
-        if (response.ingestMode) setIngestMode(response.ingestMode);
-        if (typeof response.relayAllowed === 'boolean') setRelayAllowed(response.relayAllowed);
-        if (typeof response.hasRoomTurnServer === 'boolean') setRoomHasTurnServer(response.hasRoomTurnServer);
-        if (typeof response.obsVideoCodec === 'string') setObsVideoCodec(response.obsVideoCodec);
-        if (response.fallbackCodec) setFallbackCodec(response.fallbackCodec);
-        setWhipReconnecting(!!response.whipReconnecting);
-        return response;
+            // Nothing below awaits: the session cannot end between the last check and the commit.
+            deviceRef.current = device;
+            const av1ReceiveSupported = hasWebRtcReceiveCodec(device.rtpCapabilities, 'video/AV1');
+            const av1Unsupported = isAv1PlaybackUnsupported({
+                obsVideoCodec: response.obsVideoCodec,
+                receiveCapabilitiesLoaded: device.loaded,
+                av1ReceiveSupported,
+            });
+            if (av1Unsupported) {
+                console.warn('[WatchView] WebRTC receive capabilities do not include video/AV1');
+            }
+            setCodecUnsupported(av1Unsupported);
+
+            joinedRoomCodeRef.current = cleanCode;
+            setJoinedRoomCode(cleanCode);
+            terminalRoomEndedRef.current = false;
+            fallbackStartRejectedRef.current = false;
+            setJoined(true);
+            setHasProducer(response.hasProducer || false);
+            setAllowMediaControl(response.allowMediaControl === true);
+            if (response.ingestMode) setIngestMode(response.ingestMode);
+            if (typeof response.relayAllowed === 'boolean') setRelayAllowed(response.relayAllowed);
+            if (typeof response.hasRoomTurnServer === 'boolean') setRoomHasTurnServer(response.hasRoomTurnServer);
+            if (typeof response.obsVideoCodec === 'string') setObsVideoCodec(response.obsVideoCodec);
+            if (response.fallbackCodec) setFallbackCodec(response.fallbackCodec);
+            setWhipReconnecting(!!response.whipReconnecting);
+            return response;
+        } catch (err) {
+            // Whatever went wrong, a join whose session has ended reports only that.
+            if (session.isCurrent()) throw err;
+            // The device module keeps what a stale join loaded; the session's end
+            // reset it (unless a newer join is using it).
+            if (!session.hasNewerJoin()) resetDevice();
+            throw abandonStaleJoin(session, {
+                mayBeInRoom,
+                leaveRoom: () => { if (socket.connected) socket.emit('leave-room', {}, () => { }); },
+            });
+        }
     }, [socket, passphrase]);
 
     const handleJoin = useCallback(async () => {
@@ -1085,9 +1129,15 @@ export default function WatchView({ initialCode = '' }) {
         // synchronously, while the joining state drives the disabled/label UI.
         joiningRef.current = true;
         setJoining(true);
+        // After the double-submit guard: a second click must not end the join in flight.
+        const session = viewerSession.begin();
         try {
-            await joinRoomAndLoadDevice(code);
+            await joinRoomAndLoadDevice(code, session);
         } catch (err) {
+            // The session ended while the join ran (a room that ended, a transport
+            // failure, the view unmounting): whatever ended it has reset the view.
+            if (isStaleViewerSessionError(err) || !session.isCurrent()) return;
+            viewerSession.invalidate();
             try {
                 await socketRequest(socket, 'leave-room', {}, { timeoutMs: 3000, maxAttempts: 1 });
             } catch { }
@@ -1104,7 +1154,7 @@ export default function WatchView({ initialCode = '' }) {
             joiningRef.current = false;
             setJoining(false);
         }
-    }, [codeInput, joinRoomAndLoadDevice, socket]);
+    }, [codeInput, joinRoomAndLoadDevice, socket, viewerSession]);
 
     const enterFallbackMode = useCallback(() => {
         if (fmp4PlayerRef.current || isEnteringFallbackRef.current) return;
@@ -1306,6 +1356,12 @@ export default function WatchView({ initialCode = '' }) {
     }, [socket]);
 
     const handleLeave = useCallback(async () => {
+        // Before the first await: a join or rejoin still on its way (a reconnect
+        // can be rejoining while this view stays usable) must find its session
+        // over when it finishes, not restore the room this leaves, and no queued
+        // recovery may resume it either.
+        viewerSession.invalidate();
+        recoveryGuard.clearFollowUp();
         try {
             await socketRequest(socket, 'leave-room', {}, { timeoutMs: 5000, maxAttempts: 1 });
         } catch (err) {
@@ -1319,6 +1375,8 @@ export default function WatchView({ initialCode = '' }) {
         setJoinedRoomCode('');
         setJoined(false);
         setWatching(false);
+        // A rejoin that this leave outlived sets it and, being stale, never clears it.
+        setWatchLoading(false);
         setHasProducer(false);
         setHostDisconnected(false);
         setHostReconnectingReason('');
@@ -1334,15 +1392,19 @@ export default function WatchView({ initialCode = '' }) {
         setFallbackCodec(null);
         setCodecUnsupported(false);
         setWhipReconnecting(false);
-    }, [cleanupPlayback, socket]);
+    }, [cleanupPlayback, recoveryGuard, socket, viewerSession]);
 
     useEffect(() => {
         const rejoinAfterReconnect = async ({ wasWatching, previousPlaybackMode, wasFallbackMode }) => {
             if (!joinedRef.current || terminalRoomEndedRef.current) return;
+            // The session was ended (Leave Room is waiting for its answer, ...):
+            // there is nothing left to rejoin.
+            if (!viewerSession.active) return;
             const roomCode = joinedRoomCodeRef.current || normalizeRoomCode(codeInput);
             if (!roomCode) return;
 
             console.warn('[Nextra] Socket reconnected while in a room - rejoining viewer session.');
+            const session = viewerSession.begin();
 
             cleanupPlayback();
             resetDevice();
@@ -1359,7 +1421,9 @@ export default function WatchView({ initialCode = '' }) {
             }
 
             try {
-                const response = await joinRoomAndLoadDevice(roomCode);
+                // Throws a StaleViewerSessionError, with nothing committed, when the
+                // session ended meanwhile; then there is nothing to resume.
+                const response = await joinRoomAndLoadDevice(roomCode, session);
                 setError('');
 
                 if ((wasWatching || wasFallbackMode) && response.hasProducer) {
@@ -1376,15 +1440,16 @@ export default function WatchView({ initialCode = '' }) {
                                     attempt,
                                 }));
                             } catch (err) {
-                                if (isSupersededAttemptError(err) || response.relayAllowed === false) throw err;
+                                // A session that ended meanwhile starts no relay either.
+                                if (isSupersededAttemptError(err) || !session.isCurrent() || response.relayAllowed === false) throw err;
                                 console.warn('[Nextra] Reconnected WebRTC playback failed; trying relay:', err.message);
                                 cleanupPlayback();
                                 await startRelayPlayback();
                             }
                         }
                     } catch (err) {
-                        // Whoever superseded the attempt owns the session now.
-                        if (isSupersededAttemptError(err)) return;
+                        // Whoever superseded the attempt, or ended the session, owns the view now.
+                        if (isSupersededAttemptError(err) || !session.isCurrent()) return;
                         console.warn('[Nextra] Rejoined room but could not resume playback:', err.message);
                         cleanupPlayback();
                         setWatching(false);
@@ -1395,13 +1460,19 @@ export default function WatchView({ initialCode = '' }) {
                     }
                 }
             } catch (err) {
+                // The session ended while the join ran (Leave Room, a room that
+                // ended, ...): whatever ended it has reset the view, and a newer
+                // join may be using it now.
+                if (isStaleViewerSessionError(err) || !session.isCurrent()) return;
                 console.warn('[Nextra] Failed to rejoin viewer session after reconnect:', err.message);
+                viewerSession.invalidate();
                 cleanupPlayback();
                 resetDevice();
                 joinedRoomCodeRef.current = '';
                 setJoinedRoomCode('');
                 setJoined(false);
                 setWatching(false);
+                setWatchLoading(false);
                 setHasProducer(false);
                 setHostDisconnected(false);
                 setHostReconnectingReason('');
@@ -1418,7 +1489,8 @@ export default function WatchView({ initialCode = '' }) {
                 setWhipReconnecting(false);
                 setError('Connection was lost. Please rejoin the room.');
             } finally {
-                setWatchLoading(false);
+                // A session that ended meanwhile cleared this itself.
+                if (session.isCurrent()) setWatchLoading(false);
             }
         };
 
@@ -1443,9 +1515,13 @@ export default function WatchView({ initialCode = '' }) {
         recoveryGuard,
         startMediasoupPlayback,
         startRelayPlayback,
+        viewerSession,
     ]);
 
     useEffect(() => () => {
+        // Closed, not just ended: the socket belongs to whichever view comes next,
+        // so a join still on its way must not send a leave for it afterwards.
+        viewerSession.close();
         if (fmp4PlayerRef.current) {
             fmp4PlayerRef.current.stop();
             fmp4PlayerRef.current = null;
@@ -1453,7 +1529,7 @@ export default function WatchView({ initialCode = '' }) {
         socket.emit('leave-room');
         cleanupPlayback();
         resetDevice();
-    }, [cleanupPlayback, socket]);
+    }, [cleanupPlayback, socket, viewerSession]);
 
     const playbackStatus = fallbackMode
         ? `Relay Mode (${fallbackCodec || 'unknown'}) - ${fallbackState || 'initializing'}`
