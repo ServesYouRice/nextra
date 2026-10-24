@@ -4,7 +4,7 @@ const express = require('express');
 const http = require('node:http');
 const { EventEmitter } = require('node:events');
 
-const { createWhipRouter, setIo, setMediaLifecycle } = require('../lib/whipRoutes');
+const { createWhipRouter, closeWhipSession, setIo, setMediaLifecycle } = require('../lib/whipRoutes');
 const { createRoom, destroyRoom } = require('../lib/rooms');
 const { sessionRegistry } = require('../lib/sessionRegistry');
 const config = require('../config');
@@ -392,6 +392,7 @@ function createFakeTransport(id, plan = {}) {
     transport.close = () => {
         transport.closed = true;
         transport.removeAllListeners('dtlsstatechange');
+        transport.removeAllListeners('icestatechange');
     };
     transport.connect = async () => {
         if (plan.connect) await plan.connect();
@@ -465,6 +466,7 @@ async function startWhipHarness(hostId, transportPlans = []) {
             body,
             signal,
         }),
+        delete: (resourceId) => fetch(`${baseUrl}/whip/broadcast/${resourceId}`, { method: 'DELETE' }),
         resourceIdOf: (response) => response.headers.get('location').split('/').pop(),
         resourcesForRoom: () => [...sessionRegistry.whipResources]
             .filter(([, roomCode]) => roomCode === room.code)
@@ -773,6 +775,322 @@ test('DTLS failing while produce() is pending leaves the session disconnected, a
     } finally {
         t.mock.timers.reset();
         pendingVideo.resolve();
+        await h.close();
+    }
+});
+
+// ── ICE liveness and the establishment timeout ──
+
+// POSTs, brings DTLS up and waits for the session to go live. The session is the newest transport's.
+async function startLiveSession(h) {
+    const response = await h.post();
+    assert.equal(response.status, 201);
+    const transport = h.transports.at(-1);
+    transport.emit('dtlsstatechange', 'connected');
+    await flush();
+    assert.equal(h.room.whipConnected, true);
+    return { resourceId: h.resourceIdOf(response), transport };
+}
+
+function assertSessionLive(h, transport, resourceId) {
+    assert.equal(transport.closed, false, 'the transport is open');
+    assert.equal(h.room.whipTransport, transport);
+    assert.equal(h.room.whipResourceId, resourceId);
+    assert.equal(sessionRegistry.roomCodeForWhipResource(resourceId), h.room.code);
+    assert.equal(h.room.whipConnected, true);
+    assert.equal(h.room.whipReconnecting, false);
+    assert.equal(h.room.whipGraceTimer, null);
+    for (const producer of transport.producers) assert.equal(producer.closed, false, `${producer.kind} producer is open`);
+}
+
+test('ICE disconnecting while DTLS stays connected starts the grace period, and the grace timer then closes the session', { concurrency: false }, async (t) => {
+    const h = await startWhipHarness('whip-ice-disconnect-teardown', [{}]);
+    try {
+        const { resourceId, transport } = await startLiveSession(h);
+        const metricsBefore = h.hostMetrics.length;
+
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        transport.emit('icestatechange', 'disconnected');
+        assert.equal(h.room.whipConnected, false);
+        assert.equal(h.room.whipReconnecting, true);
+        assert.notEqual(h.room.whipGraceTimer, null);
+        assert.equal(h.hostMetrics.length, metricsBefore + 1, 'the host is told at once');
+        assert.deepEqual(h.hostMetrics.at(-1), {
+            roomCode: h.room.code, whipConnected: false, whipReconnecting: true, whipSessionId: h.room.whipSessionId,
+        });
+
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS - 1);
+        assert.equal(transport.closed, false, 'the session is kept for the whole grace period');
+        t.mock.timers.tick(2);
+        assertSessionTornDown(h, transport, resourceId);
+    } finally {
+        t.mock.timers.reset();
+        await h.close();
+    }
+});
+
+for (const recovered of ['connected', 'completed']) {
+    test(`ICE returning to '${recovered}' within the grace period cancels the teardown and restores the connected state`, { concurrency: false }, async (t) => {
+        const h = await startWhipHarness(`whip-ice-recovers-${recovered}`, [{}]);
+        try {
+            const { resourceId, transport } = await startLiveSession(h);
+
+            t.mock.timers.enable({ apis: ['setTimeout'] });
+            transport.emit('icestatechange', 'disconnected');
+            assert.equal(h.room.whipConnected, false);
+            t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS - 1000);
+            const metricsBefore = h.hostMetrics.length;
+
+            transport.emit('icestatechange', recovered);
+            assert.equal(h.room.whipConnected, true);
+            assert.equal(h.room.whipReconnecting, false);
+            assert.equal(h.room.whipGraceTimer, null);
+            assert.equal(h.hostMetrics.length, metricsBefore + 1, 'the host is told it is back');
+            assert.deepEqual(h.hostMetrics.at(-1), {
+                roomCode: h.room.code, whipConnected: true, whipReconnecting: false, whipSessionId: h.room.whipSessionId,
+            });
+
+            t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS * 2);
+            assertSessionLive(h, transport, resourceId);
+        } finally {
+            t.mock.timers.reset();
+            await h.close();
+        }
+    });
+}
+
+test('a second ICE outage after a recovery starts a new grace period', { concurrency: false }, async (t) => {
+    const h = await startWhipHarness('whip-ice-second-outage', [{}]);
+    try {
+        const { resourceId, transport } = await startLiveSession(h);
+
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        transport.emit('icestatechange', 'disconnected');
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS - 1000);
+        transport.emit('icestatechange', 'connected');
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS - 1000);
+        assertSessionLive(h, transport, resourceId);
+
+        transport.emit('icestatechange', 'disconnected');
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS - 1000);
+        assert.equal(transport.closed, false, 'the first outage\'s deadline is gone');
+        t.mock.timers.tick(1001);
+        assertSessionTornDown(h, transport, resourceId);
+    } finally {
+        t.mock.timers.reset();
+        await h.close();
+    }
+});
+
+test('ICE disconnecting while produce() is pending still lets the session go live, but disconnected until ICE returns', { concurrency: false }, async (t) => {
+    const pendingVideo = deferred();
+    const h = await startWhipHarness('whip-ice-disconnect-mid-produce', [
+        { produce: { video: () => pendingVideo.promise } },
+    ]);
+    try {
+        const response = await h.post();
+        assert.equal(response.status, 201);
+        const resourceId = h.resourceIdOf(response);
+        const [transport] = h.transports;
+        transport.emit('dtlsstatechange', 'connected');
+        await flush();
+
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        transport.emit('icestatechange', 'disconnected');
+        pendingVideo.resolve();
+        await flush();
+        assert.equal(h.room.whipProducer, transport.producers[0], 'the producers are committed');
+        assert.equal(h.room.whipConnected, false, 'a session whose ICE is down is not marked connected');
+        assert.equal(h.room.whipReconnecting, true);
+        assert.notEqual(h.room.whipGraceTimer, null);
+
+        transport.emit('icestatechange', 'connected');
+        assert.equal(h.room.whipConnected, true);
+        assert.equal(h.room.whipReconnecting, false);
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS * 2);
+        assertSessionLive(h, transport, resourceId);
+    } finally {
+        t.mock.timers.reset();
+        pendingVideo.resolve();
+        await h.close();
+    }
+});
+
+test('ICE recovery does not undo a DTLS failure: the grace period still closes the session', { concurrency: false }, async (t) => {
+    const h = await startWhipHarness('whip-ice-recovery-after-dtls-failed', [{}]);
+    try {
+        const { resourceId, transport } = await startLiveSession(h);
+
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        transport.emit('dtlsstatechange', 'failed');
+        transport.emit('icestatechange', 'connected');
+        assert.equal(h.room.whipConnected, false);
+        assert.equal(h.room.whipReconnecting, true);
+        assert.notEqual(h.room.whipGraceTimer, null);
+
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS + 1);
+        assertSessionTornDown(h, transport, resourceId);
+    } finally {
+        t.mock.timers.reset();
+        await h.close();
+    }
+});
+
+test('a WHIP session whose DTLS never connects after the 201 is closed when the establishment timeout expires', { concurrency: false }, async (t) => {
+    const h = await startWhipHarness('whip-establish-timeout', [{}]);
+    try {
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const response = await h.post();
+        assert.equal(response.status, 201);
+        const resourceId = h.resourceIdOf(response);
+        const [transport] = h.transports;
+        assert.ok(h.room.whipEstablishTimer, 'the timer runs once the 201 is out');
+        const metricsBefore = h.hostMetrics.length;
+
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS - 1);
+        assert.equal(transport.closed, false, 'the session has the whole timeout to establish');
+        assert.equal(sessionRegistry.roomCodeForWhipResource(resourceId), h.room.code);
+        t.mock.timers.tick(2);
+
+        assertSessionTornDown(h, transport, resourceId);
+        assert.equal(h.room.whipEstablishTimer, null);
+        assert.equal(h.hostMetrics.length, metricsBefore + 1, 'the host is told once');
+        assert.deepEqual(transport.producers, []);
+        assert.deepEqual(h.relayStarts, []);
+    } finally {
+        t.mock.timers.reset();
+        await h.close();
+    }
+});
+
+test('DTLS connecting stops the establishment timer, so a session that went live is not closed by it', { concurrency: false }, async (t) => {
+    const h = await startWhipHarness('whip-establish-timer-cleared-by-dtls', [{}]);
+    try {
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const response = await h.post();
+        assert.equal(response.status, 201);
+        const resourceId = h.resourceIdOf(response);
+        const [transport] = h.transports;
+        assert.ok(h.room.whipEstablishTimer);
+
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS - 1000);
+        transport.emit('dtlsstatechange', 'connected');
+        await flush();
+        assert.equal(h.room.whipEstablishTimer, null);
+        assert.equal(h.room.whipConnected, true);
+
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS * 2);
+        assertSessionLive(h, transport, resourceId);
+    } finally {
+        t.mock.timers.reset();
+        await h.close();
+    }
+});
+
+test('the establishment timer does not outlive the session: closeWhipSession and the OBS DELETE clear it', { concurrency: false }, async (t) => {
+    const h = await startWhipHarness('whip-establish-timer-cleared-by-close', [{}, {}]);
+    try {
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+
+        const first = await h.post();
+        assert.equal(first.status, 201);
+        assert.ok(h.room.whipEstablishTimer);
+        closeWhipSession(h.room);
+        assert.equal(h.room.whipEstablishTimer, null);
+
+        const second = await h.post();
+        assert.equal(second.status, 201);
+        assert.ok(h.room.whipEstablishTimer);
+        const deleted = await h.delete(h.resourceIdOf(second));
+        assert.equal(deleted.status, 200);
+        assert.equal(h.room.whipEstablishTimer, null);
+        assert.equal(h.room.whipSessionId, null);
+        assert.deepEqual(h.resourcesForRoom(), []);
+        assert.equal(h.transports[1].closed, true);
+
+        const metricsBefore = h.hostMetrics.length;
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS * 2);
+        assert.equal(h.hostMetrics.length, metricsBefore, 'no timer fires for a session that is gone');
+    } finally {
+        t.mock.timers.reset();
+        await h.close();
+    }
+});
+
+test('a replaced session\'s establishment timer never closes the session that replaced it', { concurrency: false }, async (t) => {
+    const h = await startWhipHarness('whip-establish-timer-replaced', [{}, {}]);
+    try {
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const first = await h.post();
+        assert.equal(first.status, 201);
+        const [staleTransport] = h.transports;
+
+        // OBS retries before the first offer ever connected
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS - 1000);
+        const { resourceId, transport } = await startLiveSession(h);
+        assert.equal(staleTransport.closed, true);
+        assert.notEqual(transport, staleTransport);
+
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS * 2);
+        assertSessionLive(h, transport, resourceId);
+    } finally {
+        t.mock.timers.reset();
+        await h.close();
+    }
+});
+
+test('a replaced session\'s grace timer never closes the session that replaced it', { concurrency: false }, async (t) => {
+    const h = await startWhipHarness('whip-grace-timer-replaced', [{}, {}]);
+    try {
+        const { transport: staleTransport } = await startLiveSession(h);
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        staleTransport.emit('icestatechange', 'disconnected');
+        assert.notEqual(h.room.whipGraceTimer, null);
+
+        // OBS reconnects with a new POST while the old session is in its grace period
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS - 1000);
+        const replacement = await h.post();
+        assert.equal(replacement.status, 201);
+        const liveTransport = h.transports.at(-1);
+        liveTransport.emit('dtlsstatechange', 'connected');
+        await flush();
+        assert.equal(staleTransport.closed, true);
+        assert.equal(h.room.whipGraceTimer, null);
+
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS * 2);
+        assertSessionLive(h, liveTransport, h.resourceIdOf(replacement));
+    } finally {
+        t.mock.timers.reset();
+        await h.close();
+    }
+});
+
+test('ICE flapping before DTLS connects leaves no grace period or reconnecting flag behind once ICE is back', { concurrency: false }, async (t) => {
+    const h = await startWhipHarness('whip-ice-flap-before-dtls', [{}]);
+    try {
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const response = await h.post();
+        assert.equal(response.status, 201);
+        const resourceId = h.resourceIdOf(response);
+        const [transport] = h.transports;
+
+        transport.emit('icestatechange', 'connected');
+        t.mock.timers.tick(5000);
+        transport.emit('icestatechange', 'disconnected');
+        assert.equal(h.room.whipReconnecting, true);
+        t.mock.timers.tick(3000);
+        transport.emit('icestatechange', 'connected');
+        assert.equal(h.room.whipReconnecting, false);
+        assert.equal(h.room.whipGraceTimer, null);
+
+        // DTLS completes inside the establishment timeout, and the flap leaves nothing behind
+        t.mock.timers.tick(2000);
+        transport.emit('dtlsstatechange', 'connected');
+        await flush();
+        t.mock.timers.tick(config.WHIP_GRACE_TIMEOUT_MS * 2);
+        assertSessionLive(h, transport, resourceId);
+    } finally {
+        t.mock.timers.reset();
         await h.close();
     }
 });
