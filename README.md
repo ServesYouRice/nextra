@@ -340,6 +340,8 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 | `WHEP_RATE_LIMIT_WINDOW_MS` | `60000` | WHEP rate-limit window in ms |
 | `WHEP_MAX_GLOBAL_SESSIONS` | `30` | Max concurrent WHEP sessions across the server |
 
+A WHEP player decodes only the payload type numbers of its own offer. When a player numbers the room's codecs differently from the server's media router (Chromium and Firefox both do), the server serves it from a router made for that numbering, with the room's media piped into it over loopback UDP (a port pair on `127.0.0.1` from 49152-65535, not from the RTC range). Players that number codecs alike, such as all Chromium-based browsers, share that router; it closes with its last player. A room serves at most 4 such numberings at once and the server 16; another player then gets HTTP 503.
+
 ### TURN / AV1
 
 | Variable | Default | Description |
