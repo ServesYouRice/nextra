@@ -114,8 +114,18 @@ function completeChurnMetrics() {
 // A stand-in server: it acknowledges the room operations the churn cycle uses and
 // serves /api/metrics. `metricsFor(requestNumber)` builds each metrics payload; the
 // first request is the baseline and the last one the settled sample.
-async function startChurnFixture(metricsFor) {
+// `metricsStatus(requestNumber)` can make a metrics request fail with that HTTP status
+// and `acceptConnection(attemptNumber)` can refuse a socket handshake, like the
+// server's per-IP connection limiter. The fixture also records how many sockets
+// connected, how many are still connected and why each one went away, so a test can
+// tell a client that closed its sockets from one that was only killed.
+async function startChurnFixture(metricsFor, {
+    metricsStatus = () => 200,
+    acceptConnection = () => true,
+} = {}) {
     let requestNumber = 0;
+    let handshakeAttempts = 0;
+    const connections = { connected: 0, disconnectReasons: [] };
     const server = http.createServer((req, res) => {
         if (req.url.split('?')[0] !== '/api/metrics') {
             res.writeHead(404);
@@ -123,11 +133,23 @@ async function startChurnFixture(metricsFor) {
             return;
         }
         requestNumber += 1;
+        const status = metricsStatus(requestNumber);
+        if (status !== 200) {
+            res.writeHead(status);
+            res.end();
+            return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(metricsFor(requestNumber)));
     });
     const io = new SocketServer(server);
+    io.use((_socket, next) => {
+        handshakeAttempts += 1;
+        next(acceptConnection(handshakeAttempts) ? undefined : new Error('connection limit'));
+    });
     io.on('connection', (socket) => {
+        connections.connected += 1;
+        socket.on('disconnect', (reason) => connections.disconnectReasons.push(reason));
         for (const event of ['create-room', 'create-send-transport', 'join-room', 'create-recv-transport', 'leave-room']) {
             socket.on(event, (_payload, ack) => ack({ success: true, code: 'ROOM' }));
         }
@@ -135,11 +157,21 @@ async function startChurnFixture(metricsFor) {
     const port = await new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
     return {
         baseUrl: `http://127.0.0.1:${port}`,
+        connections,
+        liveSockets: () => io.of('/').sockets.size,
         async close() {
             await io.close();
             if (server.listening) await new Promise((resolve) => server.close(resolve));
         },
     };
+}
+
+async function waitForNoLiveSockets(fixture, timeoutMs = 2_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (fixture.liveSockets() > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return fixture.liveSockets();
 }
 
 function runChurnHarness(baseUrl) {
@@ -246,6 +278,90 @@ test('churn harness fails when the settled sample lacks the resource count and a
         assert.equal(summary.observed.socketGrowth, 0);
         assert.equal(summary.observed.peakHeapUsed, 50_000_000);
         assert.equal(summary.observed.peakResources, null);
+    } finally {
+        await fixture.close();
+    }
+});
+
+// --- A failed run must close every socket it opened and exit with code 1 ---
+
+// Runs the harness for a case that fails before it can print a summary. `killed` is
+// true when the process had to be stopped because it did not exit by itself.
+function runFailingChurnHarness(baseUrl, { concurrency = 2, timeoutMs = 10_000 } = {}) {
+    return new Promise((resolve) => {
+        execFile(process.execPath, [
+            'scripts/churn-runtime.js',
+            `--url=${baseUrl}`,
+            '--duration-ms=400',
+            '--sample-ms=100',
+            '--settle-ms=100',
+            `--concurrency=${concurrency}`,
+            '--cycle-delay-ms=5',
+        ], { cwd: projectRoot, timeout: timeoutMs }, (err, stdout, stderr) => {
+            resolve({
+                exitCode: err ? err.code : 0,
+                killed: Boolean(err?.killed),
+                stdout,
+                stderr,
+            });
+        });
+    });
+}
+
+function assertClosedByTheClient(fixture, expectedConnected) {
+    assert.equal(fixture.connections.connected, expectedConnected);
+    assert.equal(fixture.connections.disconnectReasons.length, expectedConnected);
+    assert.deepEqual(
+        [...new Set(fixture.connections.disconnectReasons)],
+        ['client namespace disconnect'],
+        'every connected socket should have been closed by the harness, not dropped with the process',
+    );
+}
+
+test('churn harness closes its whole pool and exits 1 when the baseline metrics request fails', async () => {
+    const fixture = await startChurnFixture(() => completeChurnMetrics(), { metricsStatus: () => 500 });
+    try {
+        const result = await runFailingChurnHarness(fixture.baseUrl);
+        assert.equal(result.killed, false, 'the harness should exit by itself');
+        assert.equal(result.exitCode, 1);
+        assert.match(result.stderr, /Churn suite failed: \/api\/metrics returned 500/);
+        assert.equal(await waitForNoLiveSockets(fixture), 0);
+        assertClosedByTheClient(fixture, 4);
+    } finally {
+        await fixture.close();
+    }
+});
+
+test('churn harness closes the host that connected before a refused viewer and exits 1', async () => {
+    // Handshakes are host 1, viewer 1, host 2, viewer 2: the fourth is refused, so the
+    // second pair never completes and its host is connected but in no pair.
+    const fixture = await startChurnFixture(() => completeChurnMetrics(), {
+        acceptConnection: (attemptNumber) => attemptNumber !== 4,
+    });
+    try {
+        const result = await runFailingChurnHarness(fixture.baseUrl);
+        assert.equal(result.killed, false, 'the harness should exit by itself');
+        assert.equal(result.exitCode, 1);
+        assert.match(result.stderr, /Churn suite failed: connection limit/);
+        assert.equal(await waitForNoLiveSockets(fixture), 0);
+        assertClosedByTheClient(fixture, 3);
+    } finally {
+        await fixture.close();
+    }
+});
+
+test('churn harness still closes its pool and exits 1 when only the settled metrics request fails', async () => {
+    // The baseline (request 1) succeeds; the sampler's and the settled requests fail.
+    const fixture = await startChurnFixture(() => completeChurnMetrics(), {
+        metricsStatus: (requestNumber) => (requestNumber === 1 ? 200 : 500),
+    });
+    try {
+        const result = await runFailingChurnHarness(fixture.baseUrl);
+        assert.equal(result.killed, false, 'the harness should exit by itself');
+        assert.equal(result.exitCode, 1);
+        assert.match(result.stderr, /Could not read settled metrics: \/api\/metrics returned 500/);
+        assert.equal(await waitForNoLiveSockets(fixture), 0);
+        assertClosedByTheClient(fixture, 4);
     } finally {
         await fixture.close();
     }
