@@ -797,6 +797,19 @@ input.select-input {
   background: rgba(255, 255, 255, 0.035);
 }
 
+/* Three 6.4rem cells (the OBS tuning profiles, or the live resolution toggle)
+   are 315.5px wide, which the 1rem page padding leaves room for from 347.5px
+   up. The host column is as wide as its widest content, so on a narrower
+   viewport the toggle dragged the stage, the start button and the capture rows
+   past the right edge: 12px of sideways scroll at 320px. Below that width the
+   cells size to their labels instead. em in a media query follows the browser's
+   default font size, as the rem cell width and padding do. */
+@media (max-width: 21.7em) {
+  .controls .mode-toggle button {
+    min-width: 0;
+  }
+}
+
 /* ========== ALERTS, PILLS, CALLOUTS ========== */
 .alert {
   display: flex;

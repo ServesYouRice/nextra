@@ -186,6 +186,44 @@ for (const width of REFLOW_WIDTHS) {
     });
 }
 
+// Selecting OBS ingest adds the OBS card and the tuning-profile toggle to the
+// host page. The loop above never selects it, so a layout that only overflows
+// with OBS on went unnoticed: at 320px the three-cell toggle was wider than the
+// column and took the stage, the start button and the capture rows with it, so
+// the page ran 12px past the viewport. The bound is the layout viewport
+// (clientWidth), not innerWidth: a mobile browser widens innerWidth to fit
+// overflowing content, which hid the overflow from the mobile project.
+for (const width of REFLOW_WIDTHS) {
+    test(`the host page reflows without horizontal scrolling at ${width}px with OBS ingest selected`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 800 });
+        await remountHost(page);
+
+        await page.locator('#obsMode').check();
+        await expect(page.locator('.settings-wrapper')).toHaveClass(/settings-expanded/);
+        await expect(page.locator('.obs-config-panel')).toBeVisible();
+        await settledBox(page, '.video-container');
+
+        const metrics = await page.evaluate(() => {
+            const right = (selector) => {
+                const el = document.querySelector(selector);
+                return el ? Math.round(el.getBoundingClientRect().right * 10) / 10 : null;
+            };
+            return {
+                documentScrollWidth: document.documentElement.scrollWidth,
+                bodyScrollWidth: document.body.scrollWidth,
+                viewportWidth: document.documentElement.clientWidth,
+                stageRight: right('.video-container'),
+                tuningRight: right('.controls .mode-toggle'),
+            };
+        });
+        const label = `host with OBS on at ${width}px (stage right edge ${metrics.stageRight}, tuning toggle ${metrics.tuningRight})`;
+        expect(metrics.documentScrollWidth, label).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+        expect(metrics.bodyScrollWidth, label).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+        expect(metrics.stageRight, label).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+        expect(metrics.tuningRight, label).toBeLessThanOrEqual(metrics.viewportWidth + 1);
+    });
+}
+
 // A laptop-height viewport has to show the host controls without the page
 // scrolling: the settings cards are the tallest thing on the page and used to
 // keep their full height no matter how short the viewport was.
