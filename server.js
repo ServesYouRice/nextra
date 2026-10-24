@@ -55,6 +55,12 @@ const { createWhipRouter, setIo: setWhipIo, setMediaLifecycle: setWhipMediaLifec
 const { createWhepRouter } = require('./lib/whepRoutes');
 const { warmNvencProbe, getNvencProbeStatus } = require('./lib/ffmpegRelay');
 const { findAvailablePort } = require('./lib/portResolver');
+const {
+    clientHostForBoundAddress,
+    formatHostForUrl,
+    isBoundToIpv6Loopback,
+    probeHostsForBindHost,
+} = require('./lib/listenerHost');
 const { resolveExecutablePath } = require('./lib/executable');
 const { renderOpenMetrics } = require('./lib/openMetrics');
 const { decideWorkerDeathAction } = require('./lib/workerRecovery');
@@ -96,6 +102,10 @@ let runtimeWhipHttpPort = config.WHIP_HTTP_PORT;
 let whipHttpStatus = config.WHIP_ENABLED ? 'starting' : 'disabled';
 let whipHttpError = '';
 let whipHttpServer = null;
+// What server.address() reported once each listener was up. URLs for clients on
+// this machine follow it, because 'localhost' may have bound ::1 or 127.0.0.1.
+let boundAppAddress = null;
+let boundWhipAddress = null;
 let serviceReady = false;
 let requestGracefulShutdown = null;
 const RELAY_PROBE_PATH = '/api/relay-probe';
@@ -159,8 +169,13 @@ function getLocalProtocol() {
     return config.LOCAL_HTTPS ? 'https' : 'http';
 }
 
-function getHostPageUrl(protocol = getLocalProtocol()) {
-    return `${protocol}://127.0.0.1:${config.PORT}/#host`;
+// The address a client on this machine uses to reach the app listener.
+function getAppClientHost() {
+    return clientHostForBoundAddress(config.BIND_HOST, boundAppAddress);
+}
+
+function getHostPageUrl(protocol = getLocalProtocol(), host = getAppClientHost()) {
+    return `${protocol}://${formatHostForUrl(host)}:${config.PORT}/#host`;
 }
 
 function openBrowser(url) {
@@ -426,6 +441,12 @@ function getAllowedOrigins() {
         `${localProtocol}://127.0.0.1:${config.PORT}`,
     ]);
 
+    // A listener on the IPv6 loopback is reached, and its host page opened,
+    // through [::1] only.
+    if (isBoundToIpv6Loopback(config.BIND_HOST, boundAppAddress)) {
+        origins.add(`${localProtocol}://${formatHostForUrl('::1')}:${config.PORT}`);
+    }
+
     if (config.LAN_IP) {
         origins.add(`${localProtocol}://${config.LAN_IP}:${config.PORT}`);
     }
@@ -493,20 +514,20 @@ function getLocalBaseUrl() {
         return `${localProtocol}://localhost:${config.PORT}`;
     }
     if (bindHost && bindHost !== '0.0.0.0' && bindHost !== '::') {
-        return `${localProtocol}://${config.BIND_HOST}:${config.PORT}`;
+        return `${localProtocol}://${formatHostForUrl(config.BIND_HOST)}:${config.PORT}`;
     }
     return `${localProtocol}://${config.LAN_IP}:${config.PORT}`;
 }
 
-function getLoopbackBaseUrl(protocol = getLocalProtocol()) {
-    return `${protocol}://127.0.0.1:${config.PORT}`;
+function getLoopbackBaseUrl(protocol = getLocalProtocol(), host = getAppClientHost()) {
+    return `${protocol}://${formatHostForUrl(host)}:${config.PORT}`;
 }
 
-async function probeExistingNextraInstance(protocol = getLocalProtocol()) {
+async function probeExistingNextraInstance(protocol = getLocalProtocol(), host = getAppClientHost()) {
     return new Promise((resolve) => {
         const client = protocol === 'https' ? https : http;
         const requestOptions = {
-            hostname: '127.0.0.1',
+            hostname: host,
             port: config.PORT,
             path: '/api/config',
             timeout: 1500,
@@ -555,27 +576,31 @@ async function probeExistingNextraInstance(protocol = getLocalProtocol()) {
     });
 }
 
-async function findRunningNextraProtocol() {
+// Another Nextra on this port, as { protocol, host } (host being what a client on
+// this machine puts in the URL), or null. A Nextra bound to the other loopback
+// family does not hold our address, so each protocol tries every candidate host.
+// The candidates are probed together, so the wait stays one probe timeout per
+// protocol however many there are.
+async function findRunningNextraInstance() {
     const primaryProtocol = getLocalProtocol();
     const alternateProtocol = primaryProtocol === 'https' ? 'http' : 'https';
+    const hosts = probeHostsForBindHost(config.BIND_HOST, boundAppAddress);
 
-    if (await probeExistingNextraInstance(primaryProtocol)) {
-        return primaryProtocol;
+    for (const protocol of [primaryProtocol, alternateProtocol]) {
+        const results = await Promise.all(hosts.map((host) => probeExistingNextraInstance(protocol, host)));
+        const index = results.findIndex(Boolean);
+        if (index !== -1) return { protocol, host: hosts[index] };
     }
 
-    if (await probeExistingNextraInstance(alternateProtocol)) {
-        return alternateProtocol;
-    }
-
-    return '';
+    return null;
 }
 
 async function exitIfAlreadyRunning() {
-    const runningProtocol = await findRunningNextraProtocol();
-    if (!runningProtocol) return false;
+    const running = await findRunningNextraInstance();
+    if (!running) return false;
 
-    console.log(`Nextra is already running at ${getLoopbackBaseUrl(runningProtocol)}.`);
-    openBrowser(getHostPageUrl(runningProtocol));
+    console.log(`Nextra is already running at ${getLoopbackBaseUrl(running.protocol, running.host)}.`);
+    openBrowser(getHostPageUrl(running.protocol, running.host));
     process.exit(0);
     return true;
 }
@@ -634,20 +659,9 @@ function shouldExposeLanForSocket(socket) {
     return isLocalClientIp(getSocketHandshakeIp(socket));
 }
 
+// The address a client on this machine (OBS, the host page) uses to reach the WHIP listener.
 function getWhipHttpClientHost() {
-    const host = (config.WHIP_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1';
-    if (host === '0.0.0.0' || host === '::' || host === '[::]' || host === 'localhost' || host === '::1' || host === '[::1]') {
-        return '127.0.0.1';
-    }
-    return host;
-}
-
-function formatHostForUrl(host) {
-    if (!host) return '127.0.0.1';
-    if (host.includes(':') && !host.startsWith('[')) {
-        return `[${host}]`;
-    }
-    return host;
+    return clientHostForBoundAddress(config.WHIP_BIND_HOST, boundWhipAddress);
 }
 
 function getWhipHttpBaseUrl() {
@@ -1205,6 +1219,7 @@ function cleanupGlobalResources() {
         try { whipHttpServer.close(); } catch { }
         whipHttpServer = null;
     }
+    boundWhipAddress = null;
 
     if (worker) {
         try { worker.close(); } catch { }
@@ -1220,10 +1235,10 @@ function cleanupGlobalResources() {
 async function handleAppServerError(err) {
     console.error(`${getLocalProtocol().toUpperCase()} server error: ${err.message}`);
     if (err.code === 'EADDRINUSE') {
-        const runningProtocol = await findRunningNextraProtocol();
-        if (runningProtocol) {
-            console.log(`Nextra is already running at ${getLoopbackBaseUrl(runningProtocol)}.`);
-            openBrowser(getHostPageUrl(runningProtocol));
+        const running = await findRunningNextraInstance();
+        if (running) {
+            console.log(`Nextra is already running at ${getLoopbackBaseUrl(running.protocol, running.host)}.`);
+            openBrowser(getHostPageUrl(running.protocol, running.host));
             cleanupGlobalResources();
             process.exit(0);
             return;
@@ -1294,6 +1309,7 @@ async function startWhipHttpServer(whipRouter) {
         const server = http.createServer(whipApp);
         await listenServer(server, resolvedPort, config.WHIP_BIND_HOST);
         whipHttpServer = server;
+        boundWhipAddress = server.address();
         runtimeWhipHttpPort = resolvedPort;
         if (resolvedPort !== config.WHIP_HTTP_PORT) {
             console.warn(`[Startup] WHIP HTTP port ${config.WHIP_HTTP_PORT} was unavailable; using ${resolvedPort}.`);
@@ -1590,12 +1606,13 @@ async function startWhipHttpServer(whipRouter) {
     });
 
     appServer.listen(config.PORT, config.BIND_HOST, () => {
+        boundAppAddress = appServer.address();
         serviceReady = true;
         console.log(`\nNextra running (${getLocalProtocol().toUpperCase()}):`);
         console.log(`   Bind:    ${config.BIND_HOST}:${config.PORT}`);
         console.log(`   Mode:    ${isDevMode ? 'development (Vite dev origins enabled)' : 'production'}`);
         console.log(`   Media:   RTC listen ${config.RTC_LISTEN_IP}${config.RTC_LISTEN_IP === '127.0.0.1' ? ' (local only)' : `, announce ${config.PUBLIC_IP || config.LAN_IP}`}`);
-        console.log(`   Local:   ${getLocalProtocol()}://127.0.0.1:${config.PORT}`);
+        console.log(`   Local:   ${getLoopbackBaseUrl()}`);
         console.log(`   Access:  ${getLocalBaseUrl()}`);
         const manualShareBase = normalizeBaseUrl(config.SHARE_BASE_URL);
         if (config.CLOUDFLARED_TUNNEL_TOKEN) {

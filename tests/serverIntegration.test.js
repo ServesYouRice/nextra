@@ -709,3 +709,242 @@ test('CSP asks browsers to upgrade requests to HTTPS only when the listener serv
         assert.deepEqual(other, others[0], 'every CSP directive except the upgrade directive is the same in each mode');
     }
 });
+
+// ── Advertised addresses follow the address family the servers really bound ──
+
+function reserveTcpPortOn(host) {
+    return new Promise((resolve, reject) => {
+        const server = net.createServer();
+        server.once('error', reject);
+        server.listen(0, host, () => {
+            const { port } = server.address();
+            server.close((err) => (err ? reject(err) : resolve(port)));
+        });
+    });
+}
+
+async function canBindIpv6Loopback() {
+    try {
+        await reserveTcpPortOn('::1');
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// Starts the real server with WHIP on, binding the given hosts. `getOutput`
+// returns what it printed so far; `stop` asks it to shut down and cleans up.
+async function startAddressFamilyServer({ bindHost, whipBindHost, port, whipPort, t }) {
+    let rtcPort = await reserveTcpPort();
+    while (rtcPort === port || rtcPort === whipPort) rtcPort = await reserveTcpPort();
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-address-family-'));
+    await fs.writeFile(path.join(tempDir, 'index.html'), '<!doctype html><div id="root"></div>');
+    let output = '';
+    const child = spawn(process.execPath, ['server.js'], {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+            ...createServerTestEnv({ port, rtcPort, distDir: tempDir }),
+            BIND_HOST: bindHost,
+            WHIP_ENABLED: 'true',
+            WHIP_BIND_HOST: whipBindHost,
+            WHIP_HTTP_PORT: String(whipPort),
+            // The test reads the advertised URLs from the startup banner, which is info-level.
+            LOG_LEVEL: 'info',
+        },
+    });
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+
+    let shutdownRequested = false;
+    const stop = async (shutdownUrl) => {
+        if (child.exitCode === null && !shutdownRequested && shutdownUrl) {
+            shutdownRequested = true;
+            try {
+                await fetch(`${shutdownUrl}/api/test/shutdown`, { method: 'POST' });
+            } catch {
+                child.kill();
+            }
+        } else if (child.exitCode === null && !shutdownRequested) {
+            child.kill();
+        }
+        if (child.exitCode === null) {
+            try {
+                await waitForExit(child, 7_000);
+            } catch {
+                child.kill();
+            }
+        }
+        await fs.rm(tempDir, { recursive: true, force: true });
+    };
+    t.after(() => stop(null));
+
+    // The WHIP line is printed once its listener is up, after the app listener.
+    const deadline = Date.now() + 30_000;
+    while (!/WHIP:\s+\S+\/whip\/broadcast\//.test(output)) {
+        if (child.exitCode !== null) throw new Error(`server exited before WHIP startup (code ${child.exitCode})\n${output}`);
+        if (Date.now() > deadline) throw new Error(`server did not announce its WHIP listener\n${output}`);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return { child, getOutput: () => output, stop };
+}
+
+// fetch that names the URL and the connection error, so an unreachable advertised URL reads as such.
+async function fetchAdvertised(url, options) {
+    try {
+        return await fetch(url, options);
+    } catch (err) {
+        throw new Error(`${options?.method || 'GET'} ${url} did not connect: ${err.cause?.code || err.message}`, { cause: err });
+    }
+}
+
+function advertisedUrls(output) {
+    const local = /Local:\s+(\S+)/.exec(output)?.[1] || '';
+    const whip = /WHIP:\s+(\S+?)\/whip\/broadcast\//.exec(output)?.[1] || '';
+    return { local, whip };
+}
+
+test('BIND_HOST=::1 and WHIP_BIND_HOST=::1 advertise bracketed IPv6 URLs that reach the listeners and are accepted as socket origins', { concurrency: false, timeout: 60_000 }, async (t) => {
+    if (!(await canBindIpv6Loopback())) {
+        t.skip('IPv6 loopback is not available on this machine');
+        return;
+    }
+    const port = await reserveTcpPortOn('::1');
+    let whipPort = await reserveTcpPortOn('::1');
+    while (whipPort === port) whipPort = await reserveTcpPortOn('::1');
+    const baseUrl = `http://[::1]:${port}`;
+    const { getOutput, stop } = await startAddressFamilyServer({ bindHost: '::1', whipBindHost: '::1', port, whipPort, t });
+    let socket = null;
+    t.after(() => socket?.close());
+
+    try {
+        const urls = advertisedUrls(getOutput());
+        assert.equal(urls.local, baseUrl, `Local: line\n${getOutput()}`);
+        assert.equal(urls.whip, `http://[::1]:${whipPort}`, `WHIP: line\n${getOutput()}`);
+
+        // The advertised host-page URL is reachable: it is the one the browser is opened on.
+        const health = await fetchAdvertised(`${urls.local}/healthz`);
+        assert.equal(health.status, 200);
+
+        const publicConfig = await (await fetchAdvertised(`${baseUrl}/api/config`)).json();
+        assert.equal(publicConfig.whipHttpHost, '::1');
+        assert.equal(publicConfig.whipHttpPort, whipPort);
+        assert.equal(publicConfig.whipHttpUrl, `http://[::1]:${whipPort}`);
+        assert.equal(publicConfig.whipHttpStatus, 'ready');
+
+        // An HTTP request to the advertised WHIP URL reaches the WHIP listener.
+        const preflight = await fetchAdvertised(`${publicConfig.whipHttpUrl}/whip/broadcast/ABC123`, { method: 'OPTIONS' });
+        assert.equal(preflight.status, 204);
+
+        // A host page opened on the advertised URL can open its socket.
+        socket = await connectSocket(baseUrl, baseUrl);
+        const serverConfig = await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('server-config event timed out')), 5_000);
+            socket.once('server-config', (payload) => {
+                clearTimeout(timeout);
+                resolve(payload);
+            });
+            socket.emit('request-server-config');
+        });
+        assert.equal(serverConfig.whipHttpHost, '::1');
+        assert.equal(serverConfig.whipHttpUrl, `http://[::1]:${whipPort}`);
+
+        // The other loopback spellings stay allowed for the same port, and an
+        // unrelated IPv6 origin is still refused.
+        socket.close();
+        socket = await connectSocket(baseUrl, `http://localhost:${port}`);
+        socket.close();
+        socket = await connectSocket(baseUrl, `http://127.0.0.1:${port}`);
+        await assert.rejects(connectSocket(baseUrl, `http://[::2]:${port}`));
+    } finally {
+        await stop(baseUrl);
+    }
+});
+
+test('a second Nextra on the same IPv6 loopback port finds the running one instead of failing on the port', { concurrency: false, timeout: 60_000 }, async (t) => {
+    if (!(await canBindIpv6Loopback())) {
+        t.skip('IPv6 loopback is not available on this machine');
+        return;
+    }
+    const port = await reserveTcpPortOn('::1');
+    let whipPort = await reserveTcpPortOn('::1');
+    while (whipPort === port) whipPort = await reserveTcpPortOn('::1');
+    const baseUrl = `http://[::1]:${port}`;
+    const first = await startAddressFamilyServer({ bindHost: '::1', whipBindHost: '::1', port, whipPort, t });
+
+    let secondRtcPort = await reserveTcpPort();
+    while (secondRtcPort === port || secondRtcPort === whipPort) secondRtcPort = await reserveTcpPort();
+    let secondOutput = '';
+    const second = spawn(process.execPath, ['server.js'], {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+            ...createServerTestEnv({ port, rtcPort: secondRtcPort, distDir: os.tmpdir() }),
+            BIND_HOST: '::1',
+            WHIP_ENABLED: 'false',
+            LOG_LEVEL: 'info',
+        },
+    });
+    second.stdout.on('data', (chunk) => { secondOutput += chunk.toString(); });
+    second.stderr.on('data', (chunk) => { secondOutput += chunk.toString(); });
+    t.after(() => { if (second.exitCode === null) second.kill(); });
+
+    try {
+        const exit = await waitForExit(second, 20_000);
+        assert.equal(exit.code, 0, secondOutput);
+        assert.match(secondOutput, new RegExp(`Nextra is already running at http://\\[::1\\]:${port}\\.`), secondOutput);
+    } finally {
+        await first.stop(baseUrl);
+    }
+});
+
+test('BIND_HOST=localhost and WHIP_BIND_HOST=localhost advertise the loopback address the listeners really bound', { concurrency: false, timeout: 60_000 }, async (t) => {
+    const port = await reserveTcpPort();
+    let whipPort = await reserveTcpPort();
+    while (whipPort === port) whipPort = await reserveTcpPort();
+    const { getOutput, stop } = await startAddressFamilyServer({ bindHost: 'localhost', whipBindHost: 'localhost', port, whipPort, t });
+    let shutdownUrl = null;
+
+    try {
+        const urls = advertisedUrls(getOutput());
+        // 'localhost' resolves to ::1 on some machines and 127.0.0.1 on others.
+        // Either way the advertised URLs must be the family that was bound.
+        assert.match(urls.local, new RegExp(`^http://(127\\.0\\.0\\.1|\\[::1\\]):${port}$`), getOutput());
+        assert.match(urls.whip, new RegExp(`^http://(127\\.0\\.0\\.1|\\[::1\\]):${whipPort}$`), getOutput());
+        shutdownUrl = urls.local;
+
+        const health = await fetchAdvertised(`${urls.local}/healthz`);
+        assert.equal(health.status, 200, `host page URL ${urls.local} must reach the app listener`);
+        const publicConfig = await (await fetchAdvertised(`${urls.local}/api/config`)).json();
+        assert.equal(publicConfig.whipHttpUrl, urls.whip);
+        const preflight = await fetchAdvertised(`${publicConfig.whipHttpUrl}/whip/broadcast/ABC123`, { method: 'OPTIONS' });
+        assert.equal(preflight.status, 204, `WHIP URL ${publicConfig.whipHttpUrl} must reach the WHIP listener`);
+    } finally {
+        await stop(shutdownUrl);
+    }
+});
+
+test('the default IPv4 binding still advertises 127.0.0.1 for the host page and WHIP', { concurrency: false, timeout: 60_000 }, async (t) => {
+    const port = await reserveTcpPort();
+    let whipPort = await reserveTcpPort();
+    while (whipPort === port) whipPort = await reserveTcpPort();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const { getOutput, stop } = await startAddressFamilyServer({ bindHost: '127.0.0.1', whipBindHost: '127.0.0.1', port, whipPort, t });
+
+    try {
+        const urls = advertisedUrls(getOutput());
+        assert.equal(urls.local, baseUrl);
+        assert.equal(urls.whip, `http://127.0.0.1:${whipPort}`);
+        const publicConfig = await (await fetch(`${baseUrl}/api/config`)).json();
+        assert.equal(publicConfig.whipHttpHost, '127.0.0.1');
+        assert.equal(publicConfig.whipHttpUrl, `http://127.0.0.1:${whipPort}`);
+        const socket = await connectSocket(baseUrl, baseUrl);
+        socket.close();
+        // The IPv6 loopback origin is not added when only IPv4 is bound.
+        await assert.rejects(connectSocket(baseUrl, `http://[::1]:${port}`));
+    } finally {
+        await stop(baseUrl);
+    }
+});
