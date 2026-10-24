@@ -495,6 +495,124 @@ test('real server composition enforces HTTP and Socket.IO operational contracts'
     assert.equal(exit.code, 0, output);
 });
 
+// C-bfcdc67f6dce / VAL-142: a proxy appends to the X-Forwarded-For a client sends, so the entries on the left are the
+// client's own words and only the rightmost one, written by the loopback proxy, says who connected. The server runs
+// with the same environment as the main test (loopback peer, TRUST_X_FORWARDED_HEADERS=true, no TRUST_PROXY, so one
+// trusted hop). Every address here differs from the main test's. CREATE_ROOM_RATE_LIMIT_MAX is 1, so each room
+// creation that succeeds comes from its own address (a refused attempt does not count), and MAX_VIEWERS_PER_ROOM is 1,
+// so each viewer leaves before the next one joins.
+test('a spoofed leftmost X-Forwarded-For entry never grants loopback or trusted-LAN privilege to a remote rightmost hop', { concurrency: false, timeout: 40_000 }, async (t) => {
+    const { port, rtcPort } = await claimServerPorts();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const operatorToken = 'integration-operator-token-0123456789abcdef';
+    let output = '';
+    let shutdownRequested = false;
+    const sockets = [];
+    const testDistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-integration-dist-'));
+    await fs.writeFile(
+        path.join(testDistDir, 'index.html'),
+        '<!doctype html><html><body><div id="root"></div><script src="/assets/test.js"></script></body></html>',
+    );
+    t.after(() => fs.rm(testDistDir, { recursive: true, force: true }));
+
+    const child = spawn(process.execPath, ['server.js'], {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: createServerTestEnv({ port, rtcPort, distDir: testDistDir, metricsToken: 'integration-metrics-token' }),
+    });
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+
+    t.after(async () => {
+        for (const openSocket of sockets) openSocket.close();
+        if (child.exitCode === null && !shutdownRequested) {
+            try {
+                shutdownRequested = true;
+                await fetch(`${baseUrl}/api/test/shutdown`, { method: 'POST' });
+            } catch {
+                child.kill();
+            }
+        }
+        if (child.exitCode === null) {
+            try {
+                await waitForExit(child, 7_000);
+            } catch {
+                child.kill();
+            }
+        }
+    });
+
+    const connect = async (forwardedFor) => {
+        const connected = await connectSocket(baseUrl, baseUrl, forwardedFor ? { 'x-forwarded-for': forwardedFor } : {});
+        sockets.push(connected);
+        return connected;
+    };
+
+    await waitForReady(baseUrl, child, () => output);
+
+    // /api/metrics: the sensitive JSON is for loopback or an operator token. A remote rightmost hop is neither,
+    // whatever the client wrote to its left; a loopback rightmost hop is a local client behind the proxy.
+    for (const spoofedLoopback of ['127.0.0.1, 203.0.113.140', '::1, 203.0.113.140', '127.0.0.1, 10.0.0.1, 203.0.113.140']) {
+        const response = await fetch(`${baseUrl}/api/metrics`, { headers: { 'x-forwarded-for': spoofedLoopback } });
+        assert.equal(response.status, 403, `X-Forwarded-For: ${spoofedLoopback}`);
+    }
+    const chainWithOperatorToken = await fetch(`${baseUrl}/api/metrics`, {
+        headers: { 'x-forwarded-for': '127.0.0.1, 203.0.113.140', 'x-nextra-operator-token': operatorToken },
+    });
+    assert.equal(chainWithOperatorToken.status, 200);
+    const remoteLeftmostLoopbackRightmost = await fetch(`${baseUrl}/api/metrics`, {
+        headers: { 'x-forwarded-for': '203.0.113.141, 127.0.0.1' },
+    });
+    assert.equal(remoteLeftmostLoopbackRightmost.status, 200);
+
+    // create-room: without a token a remote client is refused, and a forged loopback entry does not change that.
+    const spoofedHost = await connect('127.0.0.1, 203.0.113.151');
+    const spoofedCreate = await socketRequest(spoofedHost, 'create-room', { ingestMode: 'browser' });
+    assert.equal(spoofedCreate.success, false);
+    assert.match(spoofedCreate.error, /Operator authorization/);
+    const spoofedLanCreate = await connect('192.168.50.125, 203.0.113.152');
+    const spoofedLanCreateResult = await socketRequest(spoofedLanCreate, 'create-room', { ingestMode: 'browser' });
+    assert.equal(spoofedLanCreateResult.success, false);
+    assert.match(spoofedLanCreateResult.error, /Operator authorization/);
+    const tokenHost = await connect('127.0.0.1, 203.0.113.151');
+    const tokenCreate = await socketRequest(tokenHost, 'create-room', { ingestMode: 'browser', operatorToken });
+    assert.equal(tokenCreate.success, true);
+    assert.deepEqual(await socketRequest(tokenHost, 'leave-room'), { success: true });
+
+    // join-room relay policy: plaintext relay is for loopback and the trusted LAN, picked by the rightmost hop.
+    const host = await connect();
+    const created = await socketRequest(host, 'create-room', { ingestMode: 'browser' });
+    assert.equal(created.success, true);
+
+    const joinWithChain = async (forwardedFor) => {
+        const viewer = await connect(forwardedFor);
+        const joined = await socketRequest(viewer, 'join-room', { code: created.code });
+        assert.equal(joined.success, true, `X-Forwarded-For: ${forwardedFor}`);
+        const relay = await socketRequest(viewer, 'relay-consume-start');
+        assert.deepEqual(await socketRequest(viewer, 'leave-room'), { success: true });
+        viewer.close();
+        return { relayAllowed: joined.relayAllowed, relay };
+    };
+
+    for (const spoofed of ['192.168.50.125, 203.0.113.161', '127.0.0.1, 203.0.113.162', '192.168.50.125, 127.0.0.1, 203.0.113.163']) {
+        const { relayAllowed, relay } = await joinWithChain(spoofed);
+        assert.equal(relayAllowed, false, `X-Forwarded-For: ${spoofed}`);
+        assert.equal(relay.success, false, `X-Forwarded-For: ${spoofed}`);
+        assert.match(relay.error, /HTTPS or an explicitly trusted LAN/);
+    }
+    // The other way round, the rightmost hop is what counts: a remote entry on the left does not take LAN trust away.
+    assert.equal((await joinWithChain('203.0.113.164, 192.168.50.126')).relayAllowed, true);
+
+    assert.deepEqual(await socketRequest(host, 'leave-room'), { success: true });
+
+    shutdownRequested = true;
+    const shutdownResponse = await fetch(`${baseUrl}/api/test/shutdown`, { method: 'POST' });
+    assert.equal(shutdownResponse.status, 202);
+    const exit = await waitForExit(child);
+    assert.equal(exit.code, 0, output);
+});
+
 test('missing production SPA keeps readiness at 503 while liveness and build guidance remain available', { concurrency: false, timeout: 30_000 }, async (t) => {
     const { port, rtcPort } = await claimServerPorts();
     const baseUrl = `http://127.0.0.1:${port}`;
