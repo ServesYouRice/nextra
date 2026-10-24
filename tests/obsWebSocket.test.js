@@ -182,6 +182,12 @@ test('a live OBS output is stopped before its settings are rewritten, without au
             }));
             return;
         }
+        if (requestType === 'StartStream') {
+            outputActive = true;
+            order.push('StartStream');
+            queueMicrotask(() => ws.respond(request));
+            return;
+        }
         if (requestType === 'SetStreamServiceSettings' || requestType === 'SetVideoSettings') {
             order.push(requestType);
         }
@@ -207,6 +213,9 @@ test('a live OBS output is stopped before its settings are rewritten, without au
         assert.match(result.message, /previous stream stopped/);
         // The stale stream must be down before anything it depends on changes.
         assert.deepEqual(order, ['StopStream', 'SetStreamServiceSettings', 'SetVideoSettings']);
+        // Without auto-start nothing may start the output, at any point.
+        assert.equal(outputActive, false);
+        assert.ok(!order.includes('StartStream'));
     } finally {
         globalThis.WebSocket = previousWebSocket;
     }
