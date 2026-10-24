@@ -1351,3 +1351,203 @@ test('WHIP DELETE answers 404 for an unknown or stale resource without asking fo
         await h.close();
     }
 });
+
+// ── Public WHIP rate limiting keeps bounded state and buckets by the trusted client ──
+
+const { createClientRateLimiter, rateLimitBucketKey, MAX_TRACKED_RATE_LIMIT_CLIENTS } = require('../lib/whipRoutes');
+
+/** A clock the test moves by hand, in place of Date.now. */
+function manualClock(start = 1_000_000) {
+    const clock = { value: start, now: () => clock.value, advance: (ms) => { clock.value += ms; } };
+    return clock;
+}
+
+function overridePublicWhipConfig(t, values) {
+    const previous = Object.fromEntries(Object.keys(values).map((key) => [key, config[key]]));
+    Object.assign(config, values);
+    t.after(() => Object.assign(config, previous));
+}
+
+function makeLimiter(clock, { max = 2, windowMs = 100, maxTracked = 3 } = {}) {
+    return createClientRateLimiter({
+        getMax: () => max,
+        getWindowMs: () => windowMs,
+        maxTracked,
+        now: clock.now,
+    });
+}
+
+test('the client rate limiter limits one address after max attempts in a window and counts a new window afresh', () => {
+    const clock = manualClock();
+    const limiter = makeLimiter(clock, { max: 2, windowMs: 100, maxTracked: 10 });
+    assert.equal(limiter.isLimited('198.51.100.1'), false);
+    assert.equal(limiter.isLimited('198.51.100.1'), false);
+    assert.equal(limiter.isLimited('198.51.100.1'), true);
+    assert.equal(limiter.isLimited('198.51.100.2'), false, 'another address has its own budget');
+    clock.advance(100);
+    assert.equal(limiter.isLimited('198.51.100.1'), true, 'the window ends after resetAt, not at it');
+    clock.advance(1);
+    assert.equal(limiter.isLimited('198.51.100.1'), false, 'a new window starts with a fresh count');
+});
+
+test('a flood of distinct addresses never leaves the limiter holding more than its cap', () => {
+    const clock = manualClock();
+    const limiter = makeLimiter(clock, { max: 5, windowMs: 60_000, maxTracked: 50 });
+    for (let i = 0; i < 500; i += 1) {
+        limiter.isLimited(`2001:db8:${i.toString(16)}::1`);
+        clock.advance(1);
+        assert.ok(limiter.size <= 50, `after ${i + 1} distinct addresses the limiter held ${limiter.size}`);
+    }
+    assert.equal(limiter.size, 50);
+
+    // The default cap is a named constant of about ten thousand.
+    assert.equal(MAX_TRACKED_RATE_LIMIT_CLIENTS, 10_000);
+    const defaulted = createClientRateLimiter({ getMax: () => 1, getWindowMs: () => 60_000, now: clock.now });
+    for (let i = 0; i < MAX_TRACKED_RATE_LIMIT_CLIENTS + 25; i += 1) defaulted.isLimited(`ip-${i}`);
+    assert.equal(defaulted.size, MAX_TRACKED_RATE_LIMIT_CLIENTS);
+});
+
+test('expired entries are pruned after the window without their addresses returning', () => {
+    const clock = manualClock();
+    const limiter = makeLimiter(clock, { max: 2, windowMs: 100, maxTracked: 1000 });
+    for (let i = 0; i < 20; i += 1) limiter.isLimited(`198.51.100.${i}`);
+    assert.equal(limiter.size, 20);
+
+    clock.advance(50);
+    limiter.isLimited('203.0.113.1');
+    assert.equal(limiter.size, 21, 'nothing has expired yet');
+
+    clock.advance(51);
+    limiter.isLimited('203.0.113.2');
+    assert.equal(limiter.size, 2, 'the 20 expired addresses went; the two live ones stayed');
+});
+
+test('at the cap the limiter evicts an expired entry before a live one', () => {
+    const clock = manualClock();
+    const limiter = makeLimiter(clock, { max: 1, windowMs: 100, maxTracked: 2 });
+    limiter.isLimited('a');       // t+0, window to t+100
+    clock.advance(40);
+    limiter.isLimited('b');       // t+40, window to t+140
+    clock.advance(60);
+    limiter.isLimited('b');       // t+100: the periodic sweep runs here and finds nothing expired
+    clock.advance(1);
+    limiter.isLimited('c');       // t+101: full, and a has expired; only the cap can make room, so a goes and b stays
+    assert.equal(limiter.size, 2);
+    assert.equal(limiter.isLimited('b'), true, 'the live entry kept its count');
+    assert.equal(limiter.isLimited('c'), true, 'the new entry counted its first attempt');
+});
+
+test('at the cap with every entry live the limiter evicts the oldest, and a window reset makes an entry the newest', () => {
+    const clock = manualClock();
+    const limiter = makeLimiter(clock, { max: 1, windowMs: 100, maxTracked: 2 });
+    limiter.isLimited('a');     // t+0, window to t+100
+    clock.advance(10);
+    limiter.isLimited('b');     // t+10, window to t+110
+    clock.advance(95);          // a expired, b still live
+    assert.equal(limiter.isLimited('a'), false, 'a returned after its window: reset, and now the newest entry');
+    clock.advance(1);
+    limiter.isLimited('c');     // full with b (live until t+110) and a (reset): b is the oldest
+    assert.equal(limiter.size, 2);
+    assert.equal(limiter.isLimited('a'), true, 'a, reset after b, was kept');
+    assert.equal(limiter.isLimited('b'), false, 'b was the oldest and was evicted, so it counts afresh');
+});
+
+test('the limiter buckets IPv6 clients by their /64 and leaves other identities as they are', () => {
+    assert.equal(rateLimitBucketKey('2001:db8:1:2:3:4:5:6'), rateLimitBucketKey('2001:db8:1:2::ffff'));
+    assert.equal(rateLimitBucketKey('2001:DB8:1:2:aaaa:bbbb:cccc:dddd'), rateLimitBucketKey('2001:db8:1:2::1'));
+    assert.notEqual(rateLimitBucketKey('2001:db8:1:2::1'), rateLimitBucketKey('2001:db8:1:3::1'));
+    assert.equal(rateLimitBucketKey('2001:db8::1'), rateLimitBucketKey('2001:db8:0:0:9::1'));
+    assert.equal(rateLimitBucketKey('fe80::1%eth0'), rateLimitBucketKey('fe80::2'));
+    assert.equal(rateLimitBucketKey('64:ff9b::198.51.100.7'), rateLimitBucketKey('64:ff9b::1'));
+    assert.equal(rateLimitBucketKey('::ffff:198.51.100.7'), '198.51.100.7', 'an IPv4-mapped address is that IPv4 address, not one shared /64');
+    assert.equal(rateLimitBucketKey('::ffff:c633:6407'), '198.51.100.7');
+    for (const other of ['198.51.100.7', 'unknown', 'public-share-proxy', 'public-share:203.0.113.9', '']) {
+        assert.equal(rateLimitBucketKey(other), other);
+    }
+
+    const clock = manualClock();
+    const limiter = makeLimiter(clock, { max: 1, windowMs: 100, maxTracked: 10 });
+    assert.equal(limiter.isLimited('2001:db8:1:2::1'), false);
+    assert.equal(limiter.isLimited('2001:db8:1:2:dead:beef::7'), true, 'a second address of the same /64 shares the first one\'s budget');
+    assert.equal(limiter.size, 1);
+    assert.equal(limiter.isLimited('2001:db8:1:3::1'), false, 'another /64 has its own');
+});
+
+test('the public WHIP router drops the oldest tracked address at its cap and keeps limiting the others', { concurrency: false }, async (t) => {
+    overridePublicWhipConfig(t, {
+        WHIP_ENABLED: true,
+        PUBLIC_WHIP_ENABLED: true,
+        PUBLIC_WHIP_RATE_LIMIT_MAX: 1,
+        PUBLIC_WHIP_RATE_LIMIT_WINDOW_MS: 600_000,
+    });
+    const app = express();
+    app.use('/whip', createWhipRouter({}, {
+        publicEndpoint: true,
+        getClientIp: (req) => req.headers['x-test-ip'] || 'unknown',
+        maxTrackedClients: 2,
+    }));
+    const { server, baseUrl } = await listen(app);
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    // No room has this code: 404 is past the limit (and before authentication), 429 is the per-IP limit.
+    const post = (ip) => fetch(`${baseUrl}/whip/broadcast/ZZZZZZ`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp', Authorization: 'Bearer unused-token', 'x-test-ip': ip },
+        body: VIDEO_OFFER,
+    }).then((response) => response.status);
+
+    assert.equal(await post('198.51.100.1'), 404);
+    assert.equal(await post('198.51.100.1'), 429, 'the second attempt inside the window is limited');
+    assert.equal(await post('198.51.100.2'), 404);
+    assert.equal(await post('198.51.100.3'), 404, 'a third address pushes the cap, so the oldest (198.51.100.1) is dropped');
+    assert.equal(await post('198.51.100.1'), 404, 'the dropped address counts afresh: the map holds at most two addresses');
+    assert.equal(await post('198.51.100.3'), 429, 'an address that stayed tracked is still limited');
+});
+
+async function startFallbackPublicRouter(t) {
+    const app = express();
+    // No getClientIp option: the router resolves the client itself.
+    app.use('/whip', createWhipRouter({}, { publicEndpoint: true }));
+    const { server, baseUrl } = await listen(app);
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    // 404 is a missing room, past the limit; 429 is the per-IP limit.
+    return (headers) => fetch(`${baseUrl}/whip/broadcast/ZZZZZZ`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp', Authorization: 'Bearer unused-token', ...headers },
+        body: VIDEO_OFFER,
+    }).then((response) => response.status);
+}
+
+test('the public WHIP router\'s own IP fallback buckets by the client behind TRUST_PROXY proxies, not by the proxy', { concurrency: false }, async (t) => {
+    overridePublicWhipConfig(t, {
+        WHIP_ENABLED: true,
+        PUBLIC_WHIP_ENABLED: true,
+        PUBLIC_WHIP_RATE_LIMIT_MAX: 1,
+        PUBLIC_WHIP_RATE_LIMIT_WINDOW_MS: 600_000,
+        TRUST_X_FORWARDED_HEADERS: true,
+        TRUST_PROXY: 2,
+        TRUST_CLOUDFLARE_CONNECTING_IP: false,
+    });
+    const post = await startFallbackPublicRouter(t);
+
+    assert.equal(await post({ 'x-forwarded-for': '198.51.100.41, 10.0.0.2' }), 404);
+    assert.equal(await post({ 'x-forwarded-for': '198.51.100.42, 10.0.0.2' }), 404, 'a second client behind the same proxies shared the first one\'s bucket');
+    assert.equal(await post({ 'x-forwarded-for': '203.0.113.98, 198.51.100.41, 10.0.0.3' }), 429, 'a spoofed leftmost entry gave the first client a fresh bucket');
+    assert.equal(await post({ 'x-forwarded-for': '198.51.100.41, 10.0.0.2', 'cf-connecting-ip': '198.51.100.43' }), 429, 'CF-Connecting-IP chose the client with the flag off');
+    config.TRUST_CLOUDFLARE_CONNECTING_IP = true;
+    assert.equal(await post({ 'x-forwarded-for': '198.51.100.41, 10.0.0.2', 'cf-connecting-ip': '198.51.100.44' }), 404, 'CF-Connecting-IP was ignored with the flag on');
+});
+
+test('the public WHIP router\'s own IP fallback uses the connecting address when no proxy is trusted', { concurrency: false }, async (t) => {
+    overridePublicWhipConfig(t, {
+        WHIP_ENABLED: true,
+        PUBLIC_WHIP_ENABLED: true,
+        PUBLIC_WHIP_RATE_LIMIT_MAX: 1,
+        PUBLIC_WHIP_RATE_LIMIT_WINDOW_MS: 600_000,
+        TRUST_X_FORWARDED_HEADERS: false,
+        TRUST_CLOUDFLARE_CONNECTING_IP: true,
+    });
+    const post = await startFallbackPublicRouter(t);
+
+    assert.equal(await post({ 'x-forwarded-for': '198.51.100.41' }), 404);
+    assert.equal(await post({ 'x-forwarded-for': '198.51.100.42', 'cf-connecting-ip': '198.51.100.43' }), 429, 'forwarded headers named the client although they are not trusted');
+});

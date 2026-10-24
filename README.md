@@ -319,7 +319,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 |---|---|---|
 | `WHIP_ENABLED` | `true` | Enable WHIP ingest endpoint |
 | `PUBLIC_WHIP_ENABLED` | `false` | Also mount WHIP on the main/public server; the dedicated loopback endpoint remains available when this is off |
-| `PUBLIC_WHIP_RATE_LIMIT_MAX` | `5` | Public WHIP start attempts per IP per window |
+| `PUBLIC_WHIP_RATE_LIMIT_MAX` | `5` | Public WHIP start attempts per IP per window (an IPv6 client counts by its /64; at most 10,000 clients are tracked, oldest dropped first) |
 | `PUBLIC_WHIP_MAX_PENDING_STARTS` | `2` | Global cap on concurrent public WHIP startups before SDP/media allocation |
 | `WHIP_HTTP_PORT` | `3001` | HTTP port for WHIP endpoint |
 | `WHIP_BIND_HOST` | `127.0.0.1` | Bind address for the plaintext OBS-compatible WHIP endpoint |
