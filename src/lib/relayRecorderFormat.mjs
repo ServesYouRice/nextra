@@ -34,3 +34,51 @@ export function raiseRelayBitrate(limitBitsPerSecond, targetBitsPerSecond) {
     const next = Math.round(limitBitsPerSecond * 1.25);
     return next >= targetBitsPerSecond ? null : next;
 }
+
+// A relay recorder that errors or stops by itself is restarted, but one that
+// fails every time must not restart in a tight loop. Three restarts per minute;
+// after that the relay stays down until something else (a viewer joining or
+// leaving, a new share) starts a recorder.
+export const RELAY_RECORDER_RESTART_BUDGET = Object.freeze({ max: 3, windowMs: 60_000 });
+
+// `history` holds the times of the restarts already made. Returns whether one
+// more is allowed at `now` and the history to keep: restarts older than the
+// window drop out, a denied request is not recorded, and the input is not changed.
+export function allowRelayRecorderRestart(
+    history,
+    now,
+    {
+        max = RELAY_RECORDER_RESTART_BUDGET.max,
+        windowMs = RELAY_RECORDER_RESTART_BUDGET.windowMs,
+    } = {},
+) {
+    const recent = history.filter((restartedAt) => now - restartedAt < windowMs);
+    if (recent.length >= max) return { allowed: false, history: recent };
+    return { allowed: true, history: [...recent, now] };
+}
+
+// The budget as HostView holds it. request() answers 'restart' when the
+// recorder may be restarted, 'exhausted' for the first refusal after that (the
+// caller logs its one warning), and 'denied' for later refusals until a restart
+// is allowed again. reset() starts over when sharing ends.
+export function createRelayRecorderRestartBudget({ now = Date.now, max, windowMs } = {}) {
+    let history = [];
+    let exhaustedReported = false;
+    return {
+        request() {
+            const decision = allowRelayRecorderRestart(history, now(), { max, windowMs });
+            history = decision.history;
+            if (decision.allowed) {
+                exhaustedReported = false;
+                return 'restart';
+            }
+            if (exhaustedReported) return 'denied';
+            exhaustedReported = true;
+            return 'exhausted';
+        },
+        reset() {
+            history = [];
+            exhaustedReported = false;
+        },
+    };
+}

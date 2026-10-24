@@ -24,6 +24,8 @@ import {
 import {
     RELAY_BITRATE_STEP_UP_AFTER_MS,
     RELAY_MP4_MIME_TYPE,
+    RELAY_RECORDER_RESTART_BUDGET,
+    createRelayRecorderRestartBudget,
     lowerRelayBitrate,
     raiseRelayBitrate,
     selectRelayRecorderFormat,
@@ -450,6 +452,9 @@ export default function HostView() {
     // Latched when this browser's MP4 relay recorder fails, so the relay falls
     // back to VP8 for the rest of the page session.
     const [relayMp4Failed, setRelayMp4Failed] = useState(false);
+    // Bumped when the current relay recorder errors or stops by itself, so the
+    // membership effect runs again and starts a new one.
+    const [relayRecorderRestartToken, setRelayRecorderRestartToken] = useState(0);
     // Lowered when the server reports that every relay viewer is falling behind
     // (the host uplink cannot carry the recording); null means no limit.
     const [relayBitrateLimit, setRelayBitrateLimit] = useState(null);
@@ -521,6 +526,10 @@ export default function HostView() {
     const hostUnmountTimerRef = useRef(null);
     const prevRelayViewerCountRef = useRef(0);
     const relayGenerationRef = useRef(0);
+    const relayRestartBudgetRef = useRef(null);
+    if (relayRestartBudgetRef.current === null) {
+        relayRestartBudgetRef.current = createRelayRecorderRestartBudget();
+    }
     const obsPasswordRef = useRef('');
     const obsControlChannelRef = useRef(null);
     // One per socket, so a start left pending by an unmounted host view still
@@ -748,7 +757,10 @@ export default function HostView() {
             safetyFlushIntervalRef.current = null;
         }
 
+        // The ref is cleared before the stop: the recorder's own onstop then
+        // sees it is no longer the current one and does not restart it.
         const recorder = mediaRecorderRef.current;
+        mediaRecorderRef.current = null;
         if (recorder) {
             try {
                 if (recorder.state !== 'inactive') {
@@ -756,7 +768,6 @@ export default function HostView() {
                 }
             } catch { }
         }
-        mediaRecorderRef.current = null;
 
         if (silentAudioTrackRef.current) {
             try {
@@ -866,15 +877,43 @@ export default function HostView() {
                 emitRelayChunk(evt.data, generation);
             }
         };
+        // An error or stop that nobody asked for. stopRelayRecorder clears the
+        // ref before it stops a recorder, so a recorder that is still the current
+        // one here ended by itself; one the host replaced is not acted on.
+        const isCurrentRecorder = () => (
+            mediaRecorderRef.current === recorder && relayGenerationRef.current === generation
+        );
+        const restartEndedRecorder = () => {
+            // Same release as an intentional stop: safety-flush interval, silent
+            // audio track and context. The new recorder makes its own.
+            stopRelayRecorder();
+            const hasLiveCapture = streamRef.current?.getVideoTracks?.()
+                .some((track) => track.readyState === 'live');
+            // A capture that has ended is torn down by its own handler.
+            if (!hasLiveCapture) return;
+            const decision = relayRestartBudgetRef.current.request();
+            if (decision === 'exhausted') {
+                console.warn(
+                    `[Nextra-Host] Relay recorder restart budget exhausted (${RELAY_RECORDER_RESTART_BUDGET.max} in ${RELAY_RECORDER_RESTART_BUDGET.windowMs / 1000} s); not restarting it again until relay viewers change or sharing restarts.`,
+                );
+            }
+            if (decision !== 'restart') return;
+            setRelayRecorderRestartToken((token) => token + 1);
+        };
         recorder.onerror = (evt) => {
             const message = evt?.error?.message || evt?.error?.name || 'unknown recorder error';
+            if (!isCurrentRecorder()) {
+                mediaDebugLog('[Nextra-Host] Ignored an error from a replaced relay recorder:', message);
+                return;
+            }
             console.error('[Nextra-Host] Relay recorder error:', message);
             if (isMp4) setRelayMp4Failed(true);
+            restartEndedRecorder();
         };
         recorder.onstop = () => {
-            if (mediaRecorderRef.current === recorder) {
-                mediaRecorderRef.current = null;
-            }
+            if (!isCurrentRecorder()) return;
+            console.warn('[Nextra-Host] Relay recorder stopped unexpectedly.');
+            restartEndedRecorder();
         };
 
         try {
@@ -901,6 +940,7 @@ export default function HostView() {
     }, [
         socket,
         emitRelayChunk,
+        stopRelayRecorder,
         effectiveRelayBitsPerSecond,
         relayMp4Failed,
         relayFlushPollIntervalMs,
@@ -1314,10 +1354,13 @@ export default function HostView() {
 
     // Keep one recorder generation alive while relay is needed. The server caches
     // initialization/media for late joiners, so viewer churn does not restart the
-    // encoder or disrupt viewers already watching.
+    // encoder or disrupt viewers already watching. A recorder that errors or stops
+    // by itself bumps relayRecorderRestartToken, which runs this effect again with
+    // no recorder, so it starts a new one.
     useEffect(() => {
         if (!isSharing) {
             prevRelayViewerCountRef.current = 0;
+            relayRestartBudgetRef.current.reset();
             return;
         }
 
@@ -1334,7 +1377,14 @@ export default function HostView() {
         } else {
             stopRelayRecorder();
         }
-    }, [isSharing, relayViewerCount, shouldPrewarmRelay, startRelayRecorder, stopRelayRecorder]);
+    }, [
+        isSharing,
+        relayViewerCount,
+        shouldPrewarmRelay,
+        relayRecorderRestartToken,
+        startRelayRecorder,
+        stopRelayRecorder,
+    ]);
 
     // Recorder parameter changes (quality tier, fps, flush interval, bitrate)
     // need a restart with the new settings — but only if it is already running;

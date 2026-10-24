@@ -534,6 +534,89 @@ test('a playing relay viewer follows the host recorder from MP4 to VP8', async (
     await hostContext.close();
 });
 
+// A relay recorder that errors, or stops by itself, while the host already
+// records VP8 changes no state the host view depends on, so it used to stay
+// down with its safety-flush interval and silent-audio context still running.
+// The host restarts the current recorder, at most three times a minute, and
+// ignores events from recorders it has already replaced.
+test('the host restarts a VP8 relay recorder that errors or stops on its own, within a budget', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await trackHostRecorders(hostPage, { recordMp4: false });
+    await hostPage.addInitScript(() => {
+        const NativeAudioContext = window.AudioContext;
+        window.__nextraAudioContexts = [];
+        window.AudioContext = class TrackedAudioContext extends NativeAudioContext {
+            constructor(...args) {
+                super(...args);
+                window.__nextraAudioContexts.push(this);
+            }
+        };
+    });
+    const budgetWarnings = [];
+    hostPage.on('console', (message) => {
+        if (/restart budget/i.test(message.text())) budgetWarnings.push(message.text());
+    });
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(viewerPage, code);
+    expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1)?.mimeType || '')).toMatch(/^video\/webm/);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
+
+    const recorderCount = () => hostPage.evaluate(() => window.__nextraRecorders.length);
+    const openAudioContexts = () => hostPage.evaluate(() => (
+        window.__nextraAudioContexts.filter((context) => context.state !== 'closed').length
+    ));
+    const failCurrentRecorder = (how) => hostPage.evaluate((kind) => {
+        const recorder = window.__nextraRecorders.at(-1);
+        if (kind === 'error') recorder.dispatchEvent(new Event('error'));
+        else recorder.stop();
+    }, how);
+    const started = await recorderCount();
+    expect(await openAudioContexts()).toBe(1);
+
+    // A recorder error that no state change follows: restarted, one recorder
+    // and one silent-audio context left, and the viewer keeps playing.
+    const generationBefore = (await getRoomByCode(request, code)).mediaGeneration;
+    await failCurrentRecorder('error');
+    await expect.poll(recorderCount).toBe(started + 1);
+    await expect.poll(async () => (await getRoomByCode(request, code))?.mediaGeneration || 0).toBeGreaterThan(generationBefore);
+    await expect.poll(openAudioContexts).toBe(1);
+    expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1).state)).toBe('recording');
+    const atRestart = await videoTime(viewerPage);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atRestart + 2);
+
+    // The recorder stopping without the host asking for it.
+    await failCurrentRecorder('stop');
+    await expect.poll(recorderCount).toBe(started + 2);
+    await expect.poll(openAudioContexts).toBe(1);
+
+    // An error event from a recorder the host replaced long ago is ignored.
+    await hostPage.evaluate(() => window.__nextraRecorders[0].dispatchEvent(new Event('error')));
+    await hostPage.waitForTimeout(1_000);
+    expect(await recorderCount()).toBe(started + 2);
+
+    // The third restart of the minute is still allowed; the fourth is not, and
+    // the host says so once.
+    await failCurrentRecorder('error');
+    await expect.poll(recorderCount).toBe(started + 3);
+    await failCurrentRecorder('error');
+    await expect.poll(() => budgetWarnings.length).toBe(1);
+    await hostPage.waitForTimeout(1_000);
+    expect(await recorderCount()).toBe(started + 3);
+    expect(await openAudioContexts()).toBe(0);
+    expect(budgetWarnings).toHaveLength(1);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
 // MediaRecorder timeslices end inside a WebM element, so the chunk after one
 // finishes it. A viewer that is behind still holds old-generation chunks when
 // the new generation's init arrives, and drops them.
