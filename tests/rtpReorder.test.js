@@ -77,3 +77,86 @@ test('anything that is not an RTP packet is ignored', () => {
     assert.deepEqual(reorder.push(Buffer.alloc(4)), []);
     assert.deepEqual(reorder.push(null), []);
 });
+
+test('held packets are released by poll() once the wait is over, without another packet', () => {
+    let now = 1000;
+    const reorder = new RtpReorderBuffer({ maxWaitMs: 120, now: () => now });
+    reorder.push(packet(1));
+    assert.deepEqual(reorder.push(packet(3)), []);
+    assert.deepEqual(reorder.push(packet(4)), []);
+    // The burst ended and nothing else is coming.
+    now += 121;
+    assert.deepEqual(sequences(reorder.poll()), [3, 4]);
+    assert.equal(reorder.lostPackets, 1);
+    assert.equal(reorder.recoveredPackets, 0);
+    // Nothing is left to release, and the late original is no use any more.
+    assert.deepEqual(reorder.poll(), []);
+    assert.deepEqual(reorder.push(packet(2)), []);
+    assert.deepEqual(sequences(reorder.push(packet(5))), [5]);
+    assert.equal(reorder.lostPackets, 1);
+});
+
+test('poll() before the wait is over returns nothing and keeps the packets for the missing one', () => {
+    let now = 1000;
+    const reorder = new RtpReorderBuffer({ maxWaitMs: 120, now: () => now });
+    reorder.push(packet(1));
+    reorder.push(packet(3));
+    reorder.push(packet(4));
+    now += 50;
+    assert.deepEqual(reorder.poll(), []);
+    // Exactly maxWaitMs is not yet over: push() gives up only after more than that.
+    now += 70;
+    assert.deepEqual(reorder.poll(), []);
+    assert.equal(reorder.lostPackets, 0);
+    // The held packets are still there for a retransmission.
+    assert.deepEqual(sequences(reorder.push(packet(2))), [2, 3, 4]);
+    assert.equal(reorder.lostPackets, 0);
+    assert.equal(reorder.recoveredPackets, 1);
+});
+
+test('poll() with nothing held returns nothing, however long it has been', () => {
+    let now = 1000;
+    const reorder = new RtpReorderBuffer({ maxWaitMs: 120, now: () => now });
+    assert.deepEqual(reorder.poll(), []);
+    reorder.push(packet(1));
+    reorder.push(packet(2));
+    now += 10_000;
+    assert.deepEqual(reorder.poll(), []);
+    assert.equal(reorder.lostPackets, 0);
+});
+
+test('poll() releases every held run in order, across a second gap, and counts each gap once', () => {
+    let now = 1000;
+    const reorder = new RtpReorderBuffer({ maxWaitMs: 120, now: () => now });
+    reorder.push(packet(65533));
+    // 65534 and 65535 and 1 and 2 are missing; the wrap sits between the runs.
+    for (const sequence of [65535, 0, 3, 4]) assert.deepEqual(reorder.push(packet(sequence)), []);
+    now += 121;
+    // The first gap is given up on; the run after it is delivered.
+    assert.deepEqual(sequences(reorder.poll()), [65535, 0]);
+    assert.equal(reorder.lostPackets, 1);
+    // The second gap starts its own wait.
+    assert.deepEqual(reorder.poll(), []);
+    now += 121;
+    assert.deepEqual(sequences(reorder.poll()), [3, 4]);
+    assert.equal(reorder.lostPackets, 3);
+    assert.deepEqual(reorder.poll(), []);
+    // Nothing already delivered or given up on comes out again.
+    assert.deepEqual(reorder.push(packet(0)), []);
+    assert.deepEqual(reorder.push(packet(4)), []);
+    assert.deepEqual(sequences(reorder.push(packet(5))), [5]);
+});
+
+test('poll() leaves in-order delivery and the counters as push() has them', () => {
+    let now = 1000;
+    const reorder = new RtpReorderBuffer({ maxWaitMs: 120, now: () => now });
+    const out = [];
+    for (let sequence = 10; sequence < 20; sequence++) {
+        out.push(...reorder.push(packet(sequence)));
+        now += 40;
+        out.push(...reorder.poll());
+    }
+    assert.deepEqual(sequences(out), [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+    assert.equal(reorder.lostPackets, 0);
+    assert.equal(reorder.recoveredPackets, 0);
+});
