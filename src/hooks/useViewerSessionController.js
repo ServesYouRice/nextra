@@ -21,8 +21,6 @@ export function useViewerSessionController({ socket, refs, setPlaybackMode, subs
         mediaStreamRef,
         mediaSourceRef,
         sourceBufferRef,
-        chunkQueueRef,
-        queuedBytesRef,
         userPausedRef,
         relayUnsupportedWarnedRef,
     } = refs;
@@ -33,8 +31,6 @@ export function useViewerSessionController({ socket, refs, setPlaybackMode, subs
         lifecycle.own('state', () => {
             mediaSourceRef.current = null;
             sourceBufferRef.current = null;
-            chunkQueueRef.current = [];
-            queuedBytesRef.current = 0;
             userPausedRef.current = false;
             relayUnsupportedWarnedRef.current = false;
             setPlaybackMode('');
@@ -102,8 +98,6 @@ export function useViewerSessionController({ socket, refs, setPlaybackMode, subs
         mediaStreamRef,
         mediaSourceRef,
         sourceBufferRef,
-        chunkQueueRef,
-        queuedBytesRef,
         userPausedRef,
         relayUnsupportedWarnedRef,
     ]);

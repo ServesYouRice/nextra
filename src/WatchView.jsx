@@ -28,6 +28,7 @@ import {
     withDeadline,
 } from './lib/playbackAttempt.mjs';
 import { createSubscriptionLedger, emitClaimedStart, releaseSubscription } from './lib/subscriptionLedger.mjs';
+import { createRelayAppendQueue } from './lib/relayAppendQueue.mjs';
 
 const MAX_QUEUE_CHUNKS = 240;
 const MAX_QUEUE_BYTES = 24 * 1024 * 1024;
@@ -134,8 +135,6 @@ export default function WatchView({ initialCode = '' }) {
     const objectUrlRef = useRef(null);
     const mediaSourceRef = useRef(null);
     const sourceBufferRef = useRef(null);
-    const chunkQueueRef = useRef([]);
-    const queuedBytesRef = useRef(0);
     const userPausedRef = useRef(false);
     const relayCleanupRef = useRef(null);
     const relaySubscribedRef = useRef(false);
@@ -196,8 +195,6 @@ export default function WatchView({ initialCode = '' }) {
             mediaStreamRef,
             mediaSourceRef,
             sourceBufferRef,
-            chunkQueueRef,
-            queuedBytesRef,
             userPausedRef,
             relayUnsupportedWarnedRef,
         },
@@ -457,13 +454,17 @@ export default function WatchView({ initialCode = '' }) {
     // object URL, never touches the video element or the shared refs, and
     // stops the subscription only if it still owns a claim the ledger lets it
     // release.
+    //
+    // A relay failure (the append queue falling behind, an append the
+    // SourceBuffer refuses or cannot parse, the MediaSource ending or closing, a
+    // recorder generation it cannot follow) goes through failRelayGeneration.
+    // Before playback is established the start rejects with that failure, so
+    // its caller can fall back or report it; afterwards playback ends there, the
+    // viewer sees why and gets Watch Stream back.
     const startRelayPlayback = useCallback(async () => {
         const attempt = beginPlaybackAttempt(activePlaybackAttemptRef);
         if (!videoRef.current) throw new Error('Video element not found');
 
-        chunkQueueRef.current = [];
-        queuedBytesRef.current = 0;
-        let appendingLock = false;
         let mimeType = 'video/webm;codecs=vp8,opus';
         let initResultData;
         let liveInitPayload = null;
@@ -507,9 +508,39 @@ export default function WatchView({ initialCode = '' }) {
         let enqueueCount = 0;
         let failRelayGeneration = null;
         let relayCleanupDone = false;
-        // The listeners below write the shared queue and video element; a cleaned-up
+        // Set once the viewer is watching this relay; a failure before that is
+        // the start's to report, after it failRelayGeneration ends playback.
+        let relayEstablished = false;
+        // The failure that ended this attempt.
+        let relayFailure = null;
+        // The listeners below write the queue and the video element; a cleaned-up
         // or superseded attempt leaves them to the newer owner.
         const ownsPlayback = () => !relayCleanupDone && attempt.isCurrent();
+        // After an await: a superseded attempt stops as such, a failed one with its failure.
+        const assertRelayRunning = () => {
+            attempt.assertCurrent();
+            if (relayFailure) throw relayFailure;
+        };
+        // This attempt's chunks, each kept until the SourceBuffer has taken it.
+        const appendQueue = createRelayAppendQueue({
+            maxChunks: MAX_QUEUE_CHUNKS,
+            maxBytes: MAX_QUEUE_BYTES,
+            isActive: ownsPlayback,
+            getCurrentTime: () => videoRef.current?.currentTime ?? 0,
+            onUpdateEnd: () => {
+                const video = videoRef.current;
+                if (!video || !relaySourceBuffer || relaySourceBuffer.buffered.length === 0) return;
+                settleFirstBuffered();
+                const bufferedEnd = relaySourceBuffer.buffered.end(relaySourceBuffer.buffered.length - 1);
+                if (!userPausedRef.current && bufferedEnd - video.currentTime > 2.5) {
+                    video.currentTime = bufferedEnd - 0.35;
+                }
+                if (video.paused && !userPausedRef.current) {
+                    video.play().catch(() => { });
+                }
+            },
+            onFailure: (failure) => failRelayGeneration?.(failure),
+        });
         const enqueueChunk = (buf) => {
             if (!ownsPlayback()) return;
             const uint = toUint8ArraySync(buf);
@@ -522,31 +553,10 @@ export default function WatchView({ initialCode = '' }) {
             }
             enqueueCount += 1;
             if (enqueueCount <= 3) {
-                mediaDebugLog(`[Nextra] enqueueChunk #${enqueueCount}: ${uint.byteLength} bytes, queue=${chunkQueueRef.current.length}`);
+                mediaDebugLog(`[Nextra] enqueueChunk #${enqueueCount}: ${uint.byteLength} bytes, queue=${appendQueue.length}`);
             }
-
-            chunkQueueRef.current.push(uint);
-            queuedBytesRef.current += uint.byteLength;
-
-            if (
-                chunkQueueRef.current.length > MAX_QUEUE_CHUNKS
-                || queuedBytesRef.current > MAX_QUEUE_BYTES
-            ) {
-                const failure = new Error('Relay playback fell behind and must be restarted.');
-                chunkQueueRef.current.length = 0;
-                queuedBytesRef.current = 0;
-                failRelayGeneration?.(failure);
-                return;
-            }
-
-            if (
-                sourceBufferRef.current
-                && mediaSourceRef.current?.readyState === 'open'
-                && !appendingLock
-                && !sourceBufferRef.current.updating
-            ) {
-                processQueue();
-            }
+            // Past MAX_QUEUE_CHUNKS or MAX_QUEUE_BYTES the queue fails this attempt.
+            appendQueue.enqueue(uint);
         };
 
         let chunkArrivalCount = 0;
@@ -580,11 +590,10 @@ export default function WatchView({ initialCode = '' }) {
             if (!payload?.mimeType || !Number.isSafeInteger(payload.generation) || payload.generation <= 0) return;
             // A new recorder session started — discard any stale chunks from
             // the previous session so the fresh init segment is appended first.
-            if (chunkQueueRef.current.length > 0) {
-                mediaDebugLog(`[Nextra] media-init received, flushing ${chunkQueueRef.current.length} stale chunks`);
-                chunkQueueRef.current.length = 0;
-                queuedBytesRef.current = 0;
+            if (appendQueue.length > 0) {
+                mediaDebugLog(`[Nextra] media-init received, flushing ${appendQueue.length} stale chunks`);
             }
+            appendQueue.clear();
             // Playing already: the SourceBuffer must start over at the new init.
             if (relaySourceBuffer && !prepareSourceBufferForGeneration(relaySourceBuffer, mediaSourceRef.current, {
                 fromMimeType: mimeType,
@@ -604,33 +613,13 @@ export default function WatchView({ initialCode = '' }) {
             }
         };
 
-        const processQueue = () => {
-            if (!ownsPlayback()) return;
-            if (appendingLock || !sourceBufferRef.current || sourceBufferRef.current.updating) return;
-            if (!chunkQueueRef.current.length) return;
-            if (mediaSourceRef.current?.readyState !== 'open') return;
-
-            try {
-                appendingLock = true;
-                const nextChunk = chunkQueueRef.current.shift();
-                if (!nextChunk) {
-                    appendingLock = false;
-                    return;
-                }
-
-                queuedBytesRef.current = Math.max(0, queuedBytesRef.current - nextChunk.byteLength);
-                sourceBufferRef.current.appendBuffer(nextChunk);
-            } catch (appendErr) {
-                console.warn('[Nextra] appendBuffer error:', appendErr.message);
-                appendingLock = false;
-            }
-        };
-
         socket.on('media-init', onMediaInit);
         socket.on('media-chunk', onChunk);
 
         let safetyInterval = null;
-        const cleanupRelayAttempt = () => {
+        // Without a failure (cleanupPlayback, the start's catch) the attempt's
+        // waits end with the generic cleanup errors; a failure ends them with itself.
+        const cleanupRelayAttempt = (failure = null) => {
             if (relayCleanupDone) return;
             relayCleanupDone = true;
             socket.off('media-init', onMediaInit);
@@ -639,8 +628,10 @@ export default function WatchView({ initialCode = '' }) {
                 clearInterval(safetyInterval);
                 safetyInterval = null;
             }
-            settleFirstBuffered(new Error('Relay playback was cleaned up before media buffered.'));
-            rejectCleanedUp(new Error('Relay playback was cleaned up.'));
+            // Before the MediaSource is torn down, so its sourceclose reports nothing.
+            appendQueue.close();
+            settleFirstBuffered(failure || new Error('Relay playback was cleaned up before media buffered.'));
+            rejectCleanedUp(failure || new Error('Relay playback was cleaned up.'));
         };
         // Stops this attempt's subscription, through the ledger, if this attempt
         // still answers for it: the claim it owns, or the one it committed while
@@ -656,14 +647,24 @@ export default function WatchView({ initialCode = '' }) {
             }
         };
         failRelayGeneration = (failure) => {
-            cleanupRelayAttempt();
-            // A superseded attempt reports nothing; its claim is released in its catch.
-            if (attempt.isCurrent()) {
-                releaseOwnRelayClaim();
-                setFallbackState('error');
-                setError(failure.message);
-            }
+            if (relayCleanupDone) return;
+            relayFailure = failure;
+            // First, so the start's first-buffered wait ends with this failure and
+            // not with the cleanup's generic one.
             settleFirstBuffered(failure);
+            cleanupRelayAttempt(failure);
+            // A superseded attempt reports nothing; its claim is released in its catch.
+            if (!attempt.isCurrent()) return;
+            console.warn('[Nextra] Relay playback failed:', failure.message, failure.cause ?? '');
+            releaseOwnRelayClaim();
+            // Still starting: startRelayPlayback rejects with the failure, and its
+            // caller (handleWatch's fallback, a recovery) decides what the viewer sees.
+            if (!relayEstablished) return;
+            // Playing: tear the relay down and say why; Watch Stream starts it again.
+            cleanupPlayback();
+            setWatching(false);
+            setPlaybackMode('');
+            setError(failure.message);
         };
         relayCleanupRef.current = cleanupRelayAttempt;
 
@@ -680,7 +681,7 @@ export default function WatchView({ initialCode = '' }) {
                 ownedClaim = null;
                 throw ackFailure('relay-consume-start', relayStart);
             }
-            attempt.assertCurrent();
+            assertRelayRunning();
             console.log('[Nextra] relay-consume-start OK');
             committedClaim = ownedClaim;
             ownedClaim = null;
@@ -696,7 +697,7 @@ export default function WatchView({ initialCode = '' }) {
             } catch {
                 initResultData = null;
             }
-            attempt.assertCurrent();
+            assertRelayRunning();
             if (initResultData) {
                 mediaDebugLog('[Nextra] get-media-init OK:', initResultData?.init?.mimeType || 'no mime');
                 if (initResultData.init?.mimeType) {
@@ -735,7 +736,7 @@ export default function WatchView({ initialCode = '' }) {
                         resolve(payload);
                     };
                 }));
-                attempt.assertCurrent();
+                assertRelayRunning();
 
                 if (liveInit?.mimeType) {
                     mimeType = liveInit.mimeType;
@@ -760,7 +761,7 @@ export default function WatchView({ initialCode = '' }) {
                 mediaSource.addEventListener('sourceopen', resolve, { once: true });
                 setTimeout(() => reject(new Error('MediaSource did not open')), 5000);
             }));
-            attempt.assertCurrent();
+            assertRelayRunning();
 
             const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
             sourceBufferRef.current = sourceBuffer;
@@ -773,59 +774,23 @@ export default function WatchView({ initialCode = '' }) {
                 console.warn('[Nextra] Could not switch SourceBuffer to sequence mode:', err.message);
             }
 
-            sourceBuffer.addEventListener('error', (e) => {
-                console.error('[Nextra] SourceBuffer error event:', e);
-                appendingLock = false;
-            });
-
-            sourceBuffer.addEventListener('updateend', () => {
-                appendingLock = false;
-                // After cleanup this SourceBuffer is detached and the video element
-                // belongs to the next attempt.
-                if (!ownsPlayback()) return;
-
-                if (videoRef.current && sourceBuffer.buffered.length > 0) {
-                    settleFirstBuffered();
-                    const bufferedEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-                    const currentTime = videoRef.current.currentTime;
-
-                    if (!userPausedRef.current && bufferedEnd - currentTime > 2.5) {
-                        videoRef.current.currentTime = bufferedEnd - 0.35;
-                    }
-
-                    if (videoRef.current.paused && !userPausedRef.current) {
-                        videoRef.current.play().catch(() => { });
-                    }
-                }
-
-                processQueue();
-            });
+            // From here on the SourceBuffer's 'error' and the MediaSource's
+            // 'sourceended'/'sourceclose' fail this attempt (see relayAppendQueue.mjs).
+            appendQueue.attach(sourceBuffer, mediaSource);
 
             // The relay-start acknowledgement is ordered before subsequent live
             // chunks. Prepend its bounded snapshot so a later viewer sees the
             // active WebM generation from byte zero without restarting it.
             if (relayStart.relayViewerCount > 1 && relayStart.bootstrapChunks?.length) {
-                const bootstrapChunks = relayStart.bootstrapChunks
+                appendQueue.prepend(relayStart.bootstrapChunks
                     .map(toUint8ArraySync)
-                    .filter((chunk) => chunk?.byteLength);
-                const bootstrapBytes = bootstrapChunks.reduce((total, chunk) => total + chunk.byteLength, 0);
-                chunkQueueRef.current.unshift(...bootstrapChunks);
-                queuedBytesRef.current += bootstrapBytes;
+                    .filter((chunk) => chunk?.byteLength));
             }
 
-            safetyInterval = setInterval(() => {
-                if (
-                    mediaSourceRef.current?.readyState === 'open'
-                    && !appendingLock
-                    && !sourceBufferRef.current?.updating
-                    && chunkQueueRef.current.length > 0
-                ) {
-                    processQueue();
-                }
-            }, 200);
+            safetyInterval = setInterval(() => appendQueue.pump(), 200);
 
             mediaDebugLog('[Nextra] MediaSource ready, waiting for first buffered media...');
-            processQueue();
+            appendQueue.pump();
             // Do not await here: with MSE the play() promise can stay pending
             // until enough media is buffered, which races the outer watch timeout.
             void playVideoElement(null, attempt.isCurrent).catch(() => { });
@@ -835,8 +800,11 @@ export default function WatchView({ initialCode = '' }) {
                     setTimeout(() => reject(new Error('Relay connected but no playable media buffered.')), 18000);
                 }),
             ]);
-            attempt.assertCurrent();
+            // The updateend that buffered the first media can fail the next append
+            // before this runs.
+            assertRelayRunning();
 
+            relayEstablished = true;
             setPlaybackMode('relay');
             setWatching(true);
             setHostDisconnected(false);
@@ -854,7 +822,7 @@ export default function WatchView({ initialCode = '' }) {
             }
             throw attempt.settleFailure(err);
         }
-    }, [socket, playVideoElement, isTunnelOrigin, subscriptionLedger]);
+    }, [socket, playVideoElement, isTunnelOrigin, subscriptionLedger, cleanupPlayback]);
 
     useEffect(() => {
         if (!joined) return undefined;
