@@ -266,6 +266,7 @@ const {
 } = createRequestIdentity({
     getKnownPublicShareOrigins,
     getTrustForwardedHeaders: () => config.TRUST_X_FORWARDED_HEADERS,
+    getTrustProxy: () => config.TRUST_PROXY,
 });
 
 function getRequestClientIp(req) {

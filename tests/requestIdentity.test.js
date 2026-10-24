@@ -70,3 +70,56 @@ test('configured forwarded-header trust is unchanged', () => {
     assert.equal(ids.shouldTrustRequestForwardedHeaders({}, '192.168.1.20'), false);
     assert.equal(ids.getClientIpFromHeaders({ 'x-forwarded-for': '203.0.113.40' }, '127.0.0.1'), '203.0.113.40');
 });
+
+// C-70eb68e12178 / VAL-145 through the request identity server.js uses: with forwarded-header trust configured, a
+// loopback proxy vouches only for the rightmost X-Forwarded-For entry, and CF-Connecting-IP does not choose the client.
+test('VAL-145: with forwarded-header trust the client is the rightmost X-Forwarded-For entry, never a spoofed one', () => {
+    const ids = identity({ origins: [], trustForwarded: true });
+    const spoofed = { 'x-forwarded-for': '127.0.0.1, 203.0.113.5' };
+    assert.equal(ids.getClientIpFromHeaders(spoofed, '127.0.0.1'), '203.0.113.5');
+    assert.equal(classify(ids, spoofed, '127.0.0.1'), 'remote');
+
+    const lanSpoof = { 'x-forwarded-for': '192.168.1.5, 203.0.113.5' };
+    assert.equal(
+        classifyClient({ ip: ids.getClientIpFromHeaders(lanSpoof, '127.0.0.1'), trustedLanCidrs: '192.168.1.0/24' }).kind,
+        'remote'
+    );
+});
+
+test('VAL-145: a request relayed with CF-Connecting-IP but no X-Forwarded-For is never loopback or trusted-LAN', () => {
+    const ids = identity({ origins: [], trustForwarded: true });
+    for (const claimed of ['127.0.0.1', '192.168.1.5']) {
+        const headers = { host: '127.0.0.1:3000', 'cf-connecting-ip': claimed };
+        const ip = ids.getClientIpFromHeaders(headers, '127.0.0.1');
+        assert.equal(ip, 'unknown', claimed);
+        assert.equal(classifyClient({ ip, trustedLanCidrs: '192.168.1.0/24' }).kind, 'remote', claimed);
+        assert.equal(classify(ids, headers, '127.0.0.1'), 'known-proxy', claimed);
+    }
+    // The host's own browser sends none of these headers and stays the operator.
+    assert.equal(ids.getClientIpFromHeaders({ host: '127.0.0.1:3000' }, '127.0.0.1'), '127.0.0.1');
+    assert.equal(classify(ids, { host: '127.0.0.1:3000' }, '127.0.0.1'), 'loopback');
+});
+
+test('Nextra\'s own tunnel is the one place CF-Connecting-IP is read; a spoofed X-Forwarded-For entry still is not', () => {
+    const ids = identity({ trustForwarded: false });
+    const viaTunnel = { ...TUNNEL, 'x-forwarded-for': '127.0.0.1, 203.0.113.9' };
+    assert.equal(ids.getClientIpFromHeaders(viaTunnel, '127.0.0.1'), '203.0.113.9');
+    assert.equal(ids.getClientIpFromHeaders({ ...TUNNEL, 'cf-connecting-ip': 'not-an-ip', 'x-forwarded-for': '127.0.0.1, 203.0.113.10' }, '127.0.0.1'), '203.0.113.10');
+    assert.equal(classify(ids, viaTunnel, '127.0.0.1'), 'known-proxy');
+});
+
+test('the TRUST_PROXY hop count is skipped from the right of X-Forwarded-For', () => {
+    const headers = { 'x-forwarded-for': '10.9.9.9, 203.0.113.5, 198.51.100.7' };
+    const withTrustProxy = (trustProxy) => createRequestIdentity({
+        getKnownPublicShareOrigins: () => [],
+        getTrustForwardedHeaders: () => true,
+        getTrustProxy: () => trustProxy,
+    });
+    assert.equal(withTrustProxy(false).getClientIpFromHeaders(headers, '127.0.0.1'), '198.51.100.7');
+    assert.equal(withTrustProxy(1).getClientIpFromHeaders(headers, '127.0.0.1'), '198.51.100.7');
+    assert.equal(withTrustProxy(2).getClientIpFromHeaders(headers, '127.0.0.1'), '203.0.113.5');
+    assert.equal(withTrustProxy('10.0.0.0/8').getClientIpFromHeaders(headers, '127.0.0.1'), '198.51.100.7');
+    assert.equal(withTrustProxy(4).getClientIpFromHeaders(headers, '127.0.0.1'), 'unknown');
+    // An identity built without the setting skips one hop.
+    assert.equal(identity({ origins: [], trustForwarded: true }).getClientIpFromHeaders(headers, '127.0.0.1'), '198.51.100.7');
+});
