@@ -1,14 +1,19 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { classifyClient } = require('../lib/network');
+const { classifyClient, isLocalClientIp } = require('../lib/network');
 const { createRequestIdentity, hasCloudflareProxyEvidence } = require('../lib/requestIdentity');
 
 const SHARE = 'https://nextra-proof.trycloudflare.com';
 const TUNNEL = { host: 'nextra-proof.trycloudflare.com', 'cf-connecting-ip': '203.0.113.9', 'cf-ray': '8f00-AMS', 'x-forwarded-proto': 'https' };
 
+// SHARE is the quick tunnel Nextra launched, running; server.js counts its URL among the known share origins.
 function identity({ origins = [SHARE], trustForwarded = false } = {}) {
-    return createRequestIdentity({ getKnownPublicShareOrigins: () => origins, getTrustForwardedHeaders: () => trustForwarded });
+    return createRequestIdentity({
+        getKnownPublicShareOrigins: () => origins,
+        getTrustForwardedHeaders: () => trustForwarded,
+        getManagedTunnelOrigin: () => (origins.includes(SHARE) ? SHARE : ''),
+    });
 }
 
 /** The classification server.js gives a request: the identity's IP, and whether it came through a relay. */
@@ -59,8 +64,9 @@ test('VAL-079: viewers through the tunnel keep their own identities, never a loc
     const noForwarded = { host: 'nextra-proof.trycloudflare.com', 'cf-ray': '8f00-AMS' };
     assert.equal(ids.getClientIpFromHeaders({ ...noForwarded, 'cf-connecting-ip': '203.0.113.9' }, '127.0.0.1'), '203.0.113.9');
     assert.equal(ids.getClientIpFromHeaders({ ...noForwarded, 'cf-connecting-ip': '203.0.113.10' }, '127.0.0.1'), '203.0.113.10');
+    // No tunnel and no TRUST_CLOUDFLARE_CONNECTING_IP: the relay's CF-Connecting-IP is unproven, so it picks no bucket.
     const untrusted = identity({ origins: [] });
-    assert.equal(untrusted.getClientIpFromHeaders({ host: '127.0.0.1:3000', 'cf-connecting-ip': '203.0.113.9' }, '127.0.0.1'), 'public-share:203.0.113.9');
+    assert.equal(untrusted.getClientIpFromHeaders({ host: '127.0.0.1:3000', 'cf-connecting-ip': '203.0.113.9' }, '127.0.0.1'), 'public-share-proxy');
     assert.equal(untrusted.getClientIpFromHeaders({ host: '127.0.0.1:3000', 'cf-ray': '8f00-AMS' }, '127.0.0.1'), 'public-share-proxy');
 });
 
@@ -122,4 +128,84 @@ test('the TRUST_PROXY hop count is skipped from the right of X-Forwarded-For', (
     assert.equal(withTrustProxy(4).getClientIpFromHeaders(headers, '127.0.0.1'), 'unknown');
     // An identity built without the setting skips one hop.
     assert.equal(identity({ origins: [], trustForwarded: true }).getClientIpFromHeaders(headers, '127.0.0.1'), '198.51.100.7');
+});
+
+// The owner's answer 4 (Q-001): CF-Connecting-IP is Cloudflare's record of the viewer only where Cloudflare relayed
+// the request: Nextra's own cloudflared tunnel, or a deployment whose operator sets TRUST_CLOUDFLARE_CONNECTING_IP.
+// SHARE_BASE_URL on its own names some other proxy (nginx, Caddy), which passes on whatever CF-Connecting-IP the
+// client sent, so there the proxy-appended X-Forwarded-For entry decides.
+const PROXY_SHARE = 'https://stream.example.com';
+
+test('VAL-132: behind a SHARE_BASE_URL proxy a client-supplied CF-Connecting-IP never chooses the client', () => {
+    for (const trustForwarded of [false, true]) {
+        const ids = createRequestIdentity({
+            getKnownPublicShareOrigins: () => [PROXY_SHARE],
+            getTrustForwardedHeaders: () => trustForwarded,
+        });
+        for (const claimed of ['127.0.0.1', '192.168.1.5', '198.51.100.4']) {
+            const label = `trustForwarded=${trustForwarded} cf-connecting-ip=${claimed}`;
+            const withXff = { host: 'stream.example.com', 'x-forwarded-for': '203.0.113.20', 'cf-connecting-ip': claimed };
+            assert.equal(ids.getClientIpFromHeaders(withXff, '127.0.0.1'), '203.0.113.20', label);
+            // Without X-Forwarded-For the proxy vouches for no client: 'unknown', which is remote.
+            const ip = ids.getClientIpFromHeaders({ host: 'stream.example.com', 'cf-connecting-ip': claimed }, '127.0.0.1');
+            assert.equal(ip, 'unknown', label);
+            assert.equal(isLocalClientIp(ip), false, label);
+            assert.equal(classifyClient({ ip, trustedLanCidrs: '192.168.1.0/24' }).kind, 'remote', label);
+        }
+    }
+});
+
+test('VAL-146: CF-Connecting-IP is read for Nextra\'s own running tunnel and under TRUST_CLOUDFLARE_CONNECTING_IP only', () => {
+    const viaTunnel = { ...TUNNEL, 'x-forwarded-for': '198.51.100.40' };
+    // Nextra launched cloudflared, it is running, and the request is addressed to its URL.
+    const ownTunnel = createRequestIdentity({
+        getKnownPublicShareOrigins: () => [SHARE],
+        getTrustForwardedHeaders: () => false,
+        getManagedTunnelOrigin: () => SHARE,
+    });
+    assert.equal(ownTunnel.getClientIpFromHeaders(viaTunnel, '127.0.0.1'), '203.0.113.9');
+    assert.equal(ownTunnel.getClientIpFromHeaders({ ...viaTunnel, host: '127.0.0.1:3000', origin: SHARE }, '127.0.0.1'), '203.0.113.9');
+    // The same URL as SHARE_BASE_URL in front of a proxy Nextra did not start: X-Forwarded-For decides.
+    const manual = createRequestIdentity({ getKnownPublicShareOrigins: () => [SHARE], getTrustForwardedHeaders: () => false });
+    assert.equal(manual.getClientIpFromHeaders(viaTunnel, '127.0.0.1'), '198.51.100.40');
+    // While the tunnel runs, a loopback request addressed elsewhere (another proxy on this machine) is not the tunnel's.
+    const elsewhere = { host: '127.0.0.1:3000', 'cf-connecting-ip': '203.0.113.9', 'cf-ray': '8f00-AMS' };
+    assert.equal(ownTunnel.getClientIpFromHeaders(elsewhere, '127.0.0.1'), 'public-share-proxy');
+    // A direct client never gets to name itself, whatever it claims.
+    assert.equal(ownTunnel.getClientIpFromHeaders(viaTunnel, '192.168.1.20'), '192.168.1.20');
+
+    // The operator's flag: every loopback relay is Cloudflare's, with or without a share URL.
+    const flagged = createRequestIdentity({
+        getKnownPublicShareOrigins: () => [PROXY_SHARE],
+        getTrustForwardedHeaders: () => true,
+        getTrustCloudflareClientIp: () => true,
+    });
+    assert.equal(flagged.getClientIpFromHeaders({ 'cf-connecting-ip': '203.0.113.9', 'x-forwarded-for': '198.51.100.40' }, '127.0.0.1'), '203.0.113.9');
+    assert.equal(flagged.getClientIpFromHeaders({ 'cf-connecting-ip': '::ffff:203.0.113.9' }, '::1'), '203.0.113.9');
+    // A value that is not one address is ignored and X-Forwarded-For decides.
+    assert.equal(flagged.getClientIpFromHeaders({ 'cf-connecting-ip': '203.0.113.9, 127.0.0.1', 'x-forwarded-for': '198.51.100.40' }, '127.0.0.1'), '198.51.100.40');
+    assert.equal(flagged.getClientIpFromHeaders({ 'cf-connecting-ip': '203.0.113.9' }, '192.168.1.20'), '192.168.1.20');
+    // Only a boolean true turns it on.
+    const notFlagged = createRequestIdentity({
+        getKnownPublicShareOrigins: () => [],
+        getTrustForwardedHeaders: () => true,
+        getTrustCloudflareClientIp: () => 'true',
+    });
+    assert.equal(notFlagged.getClientIpFromHeaders({ 'cf-connecting-ip': '203.0.113.9' }, '127.0.0.1'), 'unknown');
+});
+
+test('the rate-limit bucket of a relay forwarded headers do not cover comes from CF-Connecting-IP only under a Cloudflare mode', () => {
+    const relayed = (claimed) => ({ host: '127.0.0.1:3000', 'cf-connecting-ip': claimed, 'cf-ray': '8f00-AMS' });
+    const unproven = createRequestIdentity({ getKnownPublicShareOrigins: () => [], getTrustForwardedHeaders: () => false });
+    // Without a mode every such request shares one bucket: the client cannot pick a fresh one per attempt.
+    for (const claimed of ['203.0.113.9', '203.0.113.10', '127.0.0.1']) {
+        assert.equal(unproven.getClientIpFromHeaders(relayed(claimed), '127.0.0.1'), 'public-share-proxy', claimed);
+    }
+    const flagged = createRequestIdentity({
+        getKnownPublicShareOrigins: () => [],
+        getTrustForwardedHeaders: () => false,
+        getTrustCloudflareClientIp: () => true,
+    });
+    assert.equal(flagged.getClientIpFromHeaders(relayed('203.0.113.9'), '127.0.0.1'), 'public-share:203.0.113.9');
+    assert.equal(flagged.getClientIpFromHeaders(relayed('not-an-ip'), '127.0.0.1'), 'public-share-proxy');
 });

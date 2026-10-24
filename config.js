@@ -202,6 +202,9 @@ const config = {
     AUTO_DETECT_PUBLIC_IP: parseBoolEnv(process.env.AUTO_DETECT_PUBLIC_IP, false),
     TRUST_PROXY: parseTrustProxy(process.env.TRUST_PROXY),
     TRUST_X_FORWARDED_HEADERS: parseBoolEnv(process.env.TRUST_X_FORWARDED_HEADERS, false),
+    // CF-Connecting-IP from a loopback peer is Cloudflare's record of the viewer only behind cloudflared; any other
+    // proxy passes on the client's own copy. Nextra's own tunnel needs no flag; one you run yourself does.
+    TRUST_CLOUDFLARE_CONNECTING_IP: parseBoolEnv(process.env.TRUST_CLOUDFLARE_CONNECTING_IP, false),
     ALLOW_TRYCLOUDFLARE_ORIGINS: parseBoolEnv(process.env.ALLOW_TRYCLOUDFLARE_ORIGINS, false),
     ALLOW_SOCKET_NO_ORIGIN: parseBoolEnv(process.env.ALLOW_SOCKET_NO_ORIGIN, false),
     EXPOSE_LAN_URL: parseBoolEnv(process.env.EXPOSE_LAN_URL, false),

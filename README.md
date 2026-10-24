@@ -261,7 +261,7 @@ For source/dev:
 - Set `AUTO_PUBLIC_TUNNEL=true` if you want the app to create a Cloudflare tunnel automatically.
 - Ensure the `cloudflared` binary is in the project root or on PATH. Download it from [Cloudflare](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
 - For a stable named tunnel, set both `CLOUDFLARED_TUNNEL_TOKEN` and `SHARE_BASE_URL`; configure the tunnel's public hostname to forward to Nextra. The token is passed to `cloudflared` through its environment, not its command line. Nextra reports the named tunnel as active only once `cloudflared` logs a registered tunnel connection; if that does not happen within `PUBLIC_TUNNEL_TIMEOUT_MS`, `cloudflared` is stopped, the tunnel shows an error and Nextra retries.
-- Or set `SHARE_BASE_URL` if you already have your own reverse proxy or public domain.
+- Or set `SHARE_BASE_URL` if you already have your own reverse proxy or public domain. Nextra then takes each viewer's address from the `X-Forwarded-For` entries your proxies append, counted from the right (see `TRUST_PROXY`). If that proxy is a `cloudflared` tunnel you run yourself, also set `TRUST_CLOUDFLARE_CONNECTING_IP=true`; Nextra's own tunnel needs no such setting.
 - Without either, the app stays local/LAN only.
 
 Tunnel notes:
@@ -366,6 +366,9 @@ Notes:
 | `CLOUDFLARED_TUNNEL_TOKEN` | - | Run a stable named Cloudflare tunnel; requires `SHARE_BASE_URL` |
 | `SHARE_BASE_URL` | - | Public URL for a named tunnel or your own reverse proxy |
 | `PUBLIC_TUNNEL_PROVIDER` | `cloudflared` | Tunnel provider |
+| `TRUST_X_FORWARDED_HEADERS` | `false` | Take the client's address from `X-Forwarded-For` on requests that a proxy on this machine (a loopback peer) relays. Requests addressed to `SHARE_BASE_URL` or to Nextra's own tunnel are read this way without it |
+| `TRUST_PROXY` | `false` | How many proxies sit in front of Nextra: the client is that many entries from the right of `X-Forwarded-For` (`2` takes the entry before the last). `true`, `false`, an address or a subnet list count as one. Also sets Express's `trust proxy` |
+| `TRUST_CLOUDFLARE_CONNECTING_IP` | `false` | Take the client's address from `CF-Connecting-IP` on requests from a loopback peer. Set it only when every such request comes through a `cloudflared` tunnel you run yourself: nginx, Caddy and other proxies pass on a `CF-Connecting-IP` the client wrote. Nextra's own tunnel (`AUTO_PUBLIC_TUNNEL` or `CLOUDFLARED_TUNNEL_TOKEN`) is trusted without it, for requests addressed to its URL while it runs |
 
 ### Rooms & Limits
 
