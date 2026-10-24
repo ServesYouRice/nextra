@@ -785,6 +785,9 @@ app.get('/api/config', (req, res) => {
 });
 
 let cachedCloudflareTurnCredentials = null;
+// Absolute ms when the cached credentials expire, and the end of the window in
+// which the cache is still served (one minute before that expiry).
+let cachedCloudflareTurnCredentialsExpiresAtMs = 0;
 let cachedCloudflareTurnCredentialsExpiresAt = 0;
 const TURN_MINT_WINDOW_MS = 10_000;
 const cloudflareTurnMintByIp = new ExpiringTracker(TURN_MINT_WINDOW_MS);
@@ -818,14 +821,20 @@ app.post('/api/cloudflare-turn-credentials', async (req, res) => {
     }
 
     if (cachedCloudflareTurnCredentials && now < cachedCloudflareTurnCredentialsExpiresAt) {
+        // Advertise the lifetime that is left, not the one the provider issued.
+        const remainingSeconds = Math.max(
+            1,
+            Math.floor((cachedCloudflareTurnCredentialsExpiresAtMs - Date.now()) / 1000),
+        );
         res.set('Cache-Control', 'no-store');
-        res.json(cachedCloudflareTurnCredentials);
+        res.json({ ...cachedCloudflareTurnCredentials, ttlSeconds: remainingSeconds });
         return;
     }
 
     cloudflareTurnMintByIp.record(clientIp);
 
     try {
+        const mintedAt = Date.now();
         const result = await loadCloudflareTurnCredentials();
         const payload = {
             provider: 'cloudflare',
@@ -833,7 +842,8 @@ app.post('/api/cloudflare-turn-credentials', async (req, res) => {
             turnConfig: result.turnConfig,
         };
         cachedCloudflareTurnCredentials = payload;
-        cachedCloudflareTurnCredentialsExpiresAt = now + Math.max(0, (result.ttlSeconds - 60) * 1000);
+        cachedCloudflareTurnCredentialsExpiresAtMs = mintedAt + result.ttlSeconds * 1000;
+        cachedCloudflareTurnCredentialsExpiresAt = mintedAt + Math.max(0, (result.ttlSeconds - 60) * 1000);
         res.set('Cache-Control', 'no-store');
         res.json(payload);
     } catch (err) {
