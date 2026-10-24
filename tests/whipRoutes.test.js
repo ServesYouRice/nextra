@@ -1285,6 +1285,49 @@ test('WHIP DELETE with the host token returns 200 { ok: true } and tears the ses
     }
 });
 
+// Host metrics after a WHIP DELETE: the host page learns that OBS is gone from the metrics event, as it does
+// for every other teardown (ICE, DTLS, timers), instead of showing a live ingest until the next broadcast.
+test('WHIP DELETE with the host token emits host metrics for that room once, after the teardown', { concurrency: false }, async () => {
+    const { h, resourceId } = await startLiveSessionWithRelay('whip-delete-host-metrics');
+    try {
+        const metricsBefore = h.hostMetrics.length;
+        const response = await h.delete(resourceId);
+        assert.equal(response.status, 200);
+        assert.deepEqual(h.hostMetrics.slice(metricsBefore), [{
+            roomCode: h.room.code, whipConnected: false, whipReconnecting: false, whipSessionId: null,
+        }], 'one metrics emit for the room, made after the session was torn down');
+
+        // A repeated DELETE finds no session and tells no one.
+        assert.equal((await h.delete(resourceId)).status, 404);
+        assert.equal(h.hostMetrics.length, metricsBefore + 1);
+    } finally {
+        await h.close();
+    }
+});
+
+test('a WHIP DELETE that is refused or finds no session emits no host metrics', { concurrency: false }, async () => {
+    const { h, resourceId, assertUntouched } = await startLiveSessionWithRelay('whip-delete-no-host-metrics');
+    const metricsBefore = h.hostMetrics.length;
+    sessionRegistry.registerWhipResource('stale-metrics-resource-id', h.room.code);
+    sessionRegistry.registerWhipResource('orphan-metrics-resource-id', 'NOROOM');
+    try {
+        for (const headers of [{}, { Authorization: 'Bearer not-the-host-token' }]) {
+            assert.equal((await h.delete(resourceId, headers)).status, 403);
+        }
+        for (const id of ['no-such-resource', 'stale-metrics-resource-id', 'orphan-metrics-resource-id']) {
+            assert.equal((await h.delete(id)).status, 404);
+        }
+        assert.equal(h.hostMetrics.length, metricsBefore, 'no metrics were emitted');
+        // Only the registrations this test added are left over; the live session itself is untouched.
+        sessionRegistry.unregisterWhipResource('stale-metrics-resource-id');
+        assertUntouched();
+    } finally {
+        sessionRegistry.unregisterWhipResource('stale-metrics-resource-id');
+        sessionRegistry.unregisterWhipResource('orphan-metrics-resource-id');
+        await h.close();
+    }
+});
+
 test('WHIP DELETE answers 404 for an unknown or stale resource without asking for a token', { concurrency: false }, async () => {
     const { h, resourceId, assertUntouched } = await startLiveSessionWithRelay('whip-delete-unknown-resource');
     sessionRegistry.registerWhipResource('stale-resource-id', h.room.code);
