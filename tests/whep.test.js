@@ -226,6 +226,70 @@ describe('parseViewerDtls', () => {
 });
 
 // ====================================================================
+// a=setup in the answer
+// ====================================================================
+describe('WHEP answer a=setup matches the DTLS role given to mediasoup', () => {
+    // parseViewerDtls gives transport.connect() the viewer's role; mediasoup then takes
+    // the opposite one. The answer's a=setup states the server's role, so a remote role
+    // 'server' (viewer offered passive) must be answered active, and 'client' passive
+    // (RFC 4145 section 4.1: passive -> active, active -> passive, actpass -> either).
+    const CASES = [
+        { offered: 'actpass', role: 'client', answer: 'passive' },
+        { offered: 'active', role: 'client', answer: 'passive' },
+        { offered: 'passive', role: 'server', answer: 'active' },
+    ];
+
+    // SAMPLE_OFFER with its session-level a=setup:actpass replaced; setups maps a level
+    // ('session') or a mid ('0' video, '1' audio) to the value written there.
+    function offerWithSetups(setups) {
+        const lines = SAMPLE_OFFER.split('\r\n').filter((line) => line !== 'a=setup:actpass');
+        if (setups.session) lines.splice(lines.indexOf('a=ice-ufrag:testufrag'), 0, `a=setup:${setups.session}`);
+        for (const mid of ['0', '1']) {
+            if (setups[mid]) lines.splice(lines.indexOf(`a=mid:${mid}`) + 1, 0, `a=setup:${setups[mid]}`);
+        }
+        return lines.join('\r\n');
+    }
+
+    function answerSetups(answer) {
+        return answer.split('\r\n')
+            .filter((line) => line.startsWith('a=setup:'))
+            .map((line) => line.slice('a=setup:'.length));
+    }
+
+    function answerFor(offer) {
+        const parsed = parseViewerOffer(offer);
+        return {
+            role: parseViewerDtls(parsed).role,
+            setups: answerSetups(createViewerAnswer(parsed, [mockVideoConsumer, mockAudioConsumer], mockTransportParams)),
+        };
+    }
+
+    for (const { offered, role, answer } of CASES) {
+        it(`answers a=setup:${answer} in every section for a session-level a=setup:${offered} offer, with remote role '${role}'`, () => {
+            assert.deepEqual(answerFor(offerWithSetups({ session: offered })), { role, setups: [answer, answer] });
+        });
+
+        it(`answers a=setup:${answer} in every section for a media-level a=setup:${offered} offer, with remote role '${role}'`, () => {
+            assert.deepEqual(answerFor(offerWithSetups({ 0: offered, 1: offered })), { role, setups: [answer, answer] });
+        });
+    }
+
+    it("answers a=setup:passive for an offer with no a=setup, with remote role 'client'", () => {
+        assert.deepEqual(answerFor(offerWithSetups({})), { role: 'client', setups: ['passive', 'passive'] });
+    });
+
+    it('reads the offered setup value case-insensitively (ABNF strings, RFC 5234 section 2.3)', () => {
+        assert.deepEqual(answerFor(offerWithSetups({ session: 'PASSIVE' })), { role: 'server', setups: ['active', 'active'] });
+    });
+
+    it('takes one a=setup for every section from the section that supplies the DTLS parameters', () => {
+        // One bundled transport, one DTLS role: the video section decides, as in parseViewerDtls.
+        assert.deepEqual(answerFor(offerWithSetups({ 0: 'passive', 1: 'actpass' })), { role: 'server', setups: ['active', 'active'] });
+        assert.deepEqual(answerFor(offerWithSetups({ 0: 'actpass', 1: 'passive' })), { role: 'client', setups: ['passive', 'passive'] });
+    });
+});
+
+// ====================================================================
 // createViewerAnswer
 // ====================================================================
 describe('createViewerAnswer', () => {
