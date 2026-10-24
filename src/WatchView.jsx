@@ -24,6 +24,8 @@ import {
     isAttemptCurrent,
     isSupersededAttemptError,
     SupersededAttemptError,
+    waitForTransportConnected,
+    withDeadline,
 } from './lib/playbackAttempt.mjs';
 import { createSubscriptionLedger, emitClaimedStart, releaseSubscription } from './lib/subscriptionLedger.mjs';
 
@@ -291,8 +293,12 @@ export default function WatchView({ initialCode = '' }) {
             : [];
         const newStream = new MediaStream([...existingTracks, consumer.track]);
         mediaStreamRef.current = newStream;
-        await playVideoElement(newStream, () => isAttemptCurrent(attemptId, activePlaybackAttemptRef));
-        assertAttemptCurrent(attemptId, activePlaybackAttemptRef);
+        if (!videoRef.current) throw new Error('Video element not found');
+        // Do not await here: play() on a MediaStream stays pending until media
+        // arrives, and with an unreachable connection that is never. The start
+        // path's ICE wait must not sit behind it. playVideoElement handles an
+        // autoplay denial (muted retry) on its own.
+        void playVideoElement(newStream, () => isAttemptCurrent(attemptId, activePlaybackAttemptRef)).catch(() => { });
     }, [socket, playVideoElement]);
 
     const isTunnelOrigin = /\.trycloudflare\.com$/i.test(window.location.hostname)
@@ -356,10 +362,13 @@ export default function WatchView({ initialCode = '' }) {
         fallbackModeRef.current = fallbackMode;
     }, [fallbackMode]);
 
+    // `attempt` is the attempt this start runs as when withDeadline began it for
+    // the caller; otherwise the start begins its own.
     const startMediasoupPlayback = useCallback(async ({
         forceProbe = false,
         relayAllowedOverride,
         turnAvailableOverride,
+        attempt = beginPlaybackAttempt(activePlaybackAttemptRef),
     } = {}) => {
         const canUseRelay = typeof relayAllowedOverride === 'boolean'
             ? relayAllowedOverride
@@ -368,7 +377,6 @@ export default function WatchView({ initialCode = '' }) {
             ? turnAvailableOverride
             : effectiveTurnAvailability;
 
-        const attempt = beginPlaybackAttempt(activePlaybackAttemptRef);
         const device = deviceRef.current;
         if (!device || !device.loaded) {
             throw new Error('Viewer is not ready yet. Rejoin room and try again.');
@@ -418,39 +426,15 @@ export default function WatchView({ initialCode = '' }) {
             // to relay playback instead of wasting time on unreachable candidates.
             const shouldFailFastForTunnel = isTunnelOrigin && !turnAvailable && !forceProbe;
             const iceTimeoutMs = shouldFailFastForTunnel ? 2000 : 8000;
-            const connectionState = recvTransport.connectionState;
-            if (connectionState !== 'connected') {
-                await new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => {
-                        cleanup();
-                        reject(new Error(
-                            shouldFailFastForTunnel
-                                ? canUseRelay
-                                    ? 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required, or use Relay mode instead.'
-                                    : 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required for this room.'
-                                : 'WebRTC connection timed out (ICE could not connect). Try refreshing or check firewall settings.'
-                        ));
-                    }, iceTimeoutMs);
-
-                    const cleanup = () => {
-                        clearTimeout(timeout);
-                        recvTransport.off('connectionstatechange', onStateChange);
-                    };
-
-                    const onStateChange = (state) => {
-                        console.log(`[Nextra] ICE connection state: ${state}`);
-                        if (state === 'connected') {
-                            cleanup();
-                            resolve();
-                        } else if (state === 'failed' || state === 'closed') {
-                            cleanup();
-                            reject(new Error(`WebRTC connection ${state}.`));
-                        }
-                    };
-
-                    recvTransport.on('connectionstatechange', onStateChange);
-                });
-            }
+            await waitForTransportConnected(recvTransport, {
+                timeoutMs: iceTimeoutMs,
+                timeoutMessage: shouldFailFastForTunnel
+                    ? canUseRelay
+                        ? 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required, or use Relay mode instead.'
+                        : 'WebRTC cannot work through a Cloudflare tunnel (UDP is blocked). A TURN server is required for this room.'
+                    : 'WebRTC connection timed out (ICE could not connect). Try refreshing or check firewall settings.',
+                onStateChange: (state) => console.log(`[Nextra] ICE connection state: ${state}`),
+            });
 
             attempt.assertCurrent();
 
@@ -991,10 +975,11 @@ export default function WatchView({ initialCode = '' }) {
                     await startRelayPlayback();
                 } else {
                     try {
-                        await startMediasoupPlayback({
+                        await withDeadline(activePlaybackAttemptRef, (attempt) => startMediasoupPlayback({
                             relayAllowedOverride: relayAllowed,
                             turnAvailableOverride: roomHasTurnServer || hasTurnServer,
-                        });
+                            attempt,
+                        }));
                     } catch (err) {
                         if (isSupersededAttemptError(err) || relayAllowed === false) throw err;
                         console.warn('[Nextra] Recovered WebRTC transport failed; trying relay:', err.message);
@@ -1234,7 +1219,11 @@ export default function WatchView({ initialCode = '' }) {
         exitFallbackMode();
         
         try {
-            await startMediasoupPlayback({ forceProbe: true });
+            // Unlike handleWatch, nothing else bounds this start.
+            await withDeadline(activePlaybackAttemptRef, (attempt) => startMediasoupPlayback({
+                forceProbe: true,
+                attempt,
+            }));
         } catch (err) {
             // Superseded by a cleanup or a newer start, which own the session now.
             if (isSupersededAttemptError(err)) return;
@@ -1413,10 +1402,11 @@ export default function WatchView({ initialCode = '' }) {
                             await startRelayPlayback();
                         } else {
                             try {
-                                await startMediasoupPlayback({
+                                await withDeadline(activePlaybackAttemptRef, (attempt) => startMediasoupPlayback({
                                     relayAllowedOverride: response.relayAllowed,
                                     turnAvailableOverride: !!response.hasRoomTurnServer || hasTurnServer,
-                                });
+                                    attempt,
+                                }));
                             } catch (err) {
                                 if (isSupersededAttemptError(err) || response.relayAllowed === false) throw err;
                                 console.warn('[Nextra] Reconnected WebRTC playback failed; trying relay:', err.message);
