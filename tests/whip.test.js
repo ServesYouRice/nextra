@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseOffer, validateCodecs, toMediasoupRtpParameters, createAnswer } = require('../lib/whip');
+const { parseOffer, validateCodecs, toMediasoupRtpParameters, createAnswer, parseDtlsParameters } = require('../lib/whip');
 
 function buildOffer(videoSection) {
     return [
@@ -575,4 +575,128 @@ test('WHIP producer omits Opus sprop-stereo when the offer does not carry it', (
     const rtpParameters = toMediasoupRtpParameters(parseOffer(offer));
 
     assert.ok(!('sprop-stereo' in rtpParameters.audio.codecs[0].parameters));
+});
+
+// ── DTLS role: the remote role for connect() and the answer's a=setup agree ──
+
+// The offer's setup value decides both. mediasoup's connect() role is the REMOTE
+// endpoint's role: a passive offerer listens (remote 'server'), so the answer must
+// be active; every other value leaves the client role to the offerer, so the
+// answer is passive.
+const DTLS_ROLE_CASES = [
+    { setup: 'active', role: 'client', answerSetup: 'passive' },
+    { setup: 'actpass', role: 'client', answerSetup: 'passive' },
+    { setup: null, role: 'client', answerSetup: 'passive' },
+    { setup: 'passive', role: 'server', answerSetup: 'active' },
+];
+
+// An offer whose a=setup sits at session level or on each media section (null: none).
+function offerWithSetup(setup, level, sections = [h264Video('0'), opusAudio('1')]) {
+    const offer = offerWithSections(...sections).split('\r\n');
+    const at = offer.indexOf('a=setup:actpass');
+    assert.ok(at > 0, 'the base offer carries a session-level a=setup:actpass');
+    offer.splice(at, 1);
+    if (setup && level === 'session') offer.splice(at, 0, `a=setup:${setup}`);
+    const withMediaSetup = [];
+    for (const line of offer) {
+        withMediaSetup.push(line);
+        if (setup && level === 'media' && line.startsWith('a=mid:')) withMediaSetup.push(`a=setup:${setup}`);
+    }
+    return withMediaSetup.join('\r\n');
+}
+
+function setupLines(answer) {
+    return answer.split('\r\n').filter((line) => line.startsWith('a=setup:'));
+}
+
+for (const { setup, role } of DTLS_ROLE_CASES) {
+    for (const level of setup ? ['media', 'session'] : ['none']) {
+        test(`WHIP remote DTLS role is '${role}' for a ${level}-level a=setup:${setup ?? '(absent)'} offer`, () => {
+            const parsed = parseOffer(offerWithSetup(setup, level));
+            assert.deepEqual(parseDtlsParameters(parsed), {
+                role,
+                fingerprints: [{ algorithm: 'sha-256', value: '11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00' }],
+            });
+        });
+    }
+}
+
+for (const { setup, role, answerSetup } of DTLS_ROLE_CASES) {
+    for (const level of setup ? ['media', 'session'] : ['none']) {
+        test(`WHIP answer says a=setup:${answerSetup} in every section for a ${level}-level a=setup:${setup ?? '(absent)'} offer, matching remote role '${role}'`, () => {
+            const parsed = parseOffer(offerWithSetup(setup, level));
+            const answer = createAnswer(parsed, SERVER_TRANSPORT);
+
+            // Both accepted sections carry the one value, and no other a=setup line exists.
+            assert.deepEqual(setupLines(answer), [`a=setup:${answerSetup}`, `a=setup:${answerSetup}`]);
+            // The answer and the role handed to connect() complement each other: a passive
+            // answer means the offerer is the DTLS client, an active answer that it is the server.
+            const connectRole = parseDtlsParameters(parsed).role;
+            assert.equal(connectRole, role);
+            assert.equal(setupLines(answer)[0], connectRole === 'client' ? 'a=setup:passive' : 'a=setup:active');
+        });
+    }
+}
+
+test('WHIP answer takes one a=setup from the section that supplies the DTLS parameters, for every section', () => {
+    // Video says passive, audio says active: the video section decides, as in parseDtlsParameters.
+    const offer = offerWithSections(
+        [...h264Video('0'), 'a=setup:passive'],
+        [...opusAudio('1'), 'a=setup:active'],
+    );
+    const parsed = parseOffer(offer);
+    assert.equal(parseDtlsParameters(parsed).role, 'server');
+    assert.deepEqual(setupLines(createAnswer(parsed, SERVER_TRANSPORT)), ['a=setup:active', 'a=setup:active']);
+
+    // An audio-only offer falls back to the audio section for both.
+    const audioOnly = parseOffer(offerWithSetup('passive', 'media', [opusAudio('0')]));
+    assert.equal(parseDtlsParameters(audioOnly).role, 'server');
+    assert.deepEqual(setupLines(createAnswer(audioOnly, SERVER_TRANSPORT)), ['a=setup:active']);
+});
+
+test('WHIP answer for a setup:actpass offer is unchanged apart from the o= line', () => {
+    const answer = createAnswer(parseOffer(offerWithSections(h264Video('0'), opusAudio('1'))), SERVER_TRANSPORT);
+    const lines = answer.split('\r\n');
+    assert.match(lines[1], /^o=- \d+ 1 IN IP4 0\.0\.0\.0$/);
+    // Captured from the serializer before the DTLS role change.
+    assert.deepEqual(lines.filter((line) => !line.startsWith('o=')), [
+        'v=0',
+        's=-',
+        't=0 0',
+        'a=group:BUNDLE 0 1',
+        'a=msid-semantic: WMS',
+        'm=video 9 UDP/TLS/RTP/SAVPF 96',
+        'c=IN IP4 0.0.0.0',
+        'a=rtcp:9 IN IP4 0.0.0.0',
+        'a=ice-ufrag:srvufrag',
+        'a=ice-pwd:srvpassword',
+        'a=ice-options:trickle',
+        'a=fingerprint:sha-256 AA:BB:CC:DD',
+        'a=setup:passive',
+        'a=mid:0',
+        'a=recvonly',
+        'a=rtcp-mux',
+        'a=rtcp-rsize',
+        'a=rtpmap:96 H264/90000',
+        'a=fmtp:96 profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1',
+        'a=candidate:1 1 UDP 2130706431 192.0.2.10 40000 typ host',
+        'a=end-of-candidates',
+        'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+        'c=IN IP4 0.0.0.0',
+        'a=rtcp:9 IN IP4 0.0.0.0',
+        'a=ice-ufrag:srvufrag',
+        'a=ice-pwd:srvpassword',
+        'a=ice-options:trickle',
+        'a=fingerprint:sha-256 AA:BB:CC:DD',
+        'a=setup:passive',
+        'a=mid:1',
+        'a=recvonly',
+        'a=rtcp-mux',
+        'a=rtcp-rsize',
+        'a=rtpmap:111 OPUS/48000/2',
+        'a=fmtp:111 minptime=10;useinbandfec=1',
+        'a=candidate:1 1 UDP 2130706431 192.0.2.10 40000 typ host',
+        'a=end-of-candidates',
+        '',
+    ]);
 });
