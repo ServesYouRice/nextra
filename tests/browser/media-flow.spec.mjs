@@ -157,6 +157,77 @@ async function installViewerRequestControl(page) {
     });
 }
 
+// Makes the room look like an OBS room to this viewer, whose relay-first path
+// then asks for the fMP4 relay by itself (fallback-consume-start), and lets a
+// test decide what answers that request: the join-room answer is rewritten to
+// ingestMode 'obs' with a producer, and every fallback-consume-start answer from
+// the real server (a browser room refuses it) is replaced by the server's
+// success shape `{ ok: true, fallbackAvailable: true }`, held back until the
+// test releases it, or dropped as a lost answer. `answer` is 'ok', 'hold' or
+// 'drop'. The events the page sends are logged; the Socket.IO WebSockets can be
+// closed to make socket.io-client reconnect under a new socket.id.
+async function installFallbackStartControl(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const control = { answer: 'ok', sockets: [], sent: [], held: [], joinIds: new Set(), startIds: new Set() };
+        window.__nextraFallbackControl = control;
+        control.releaseHeld = () => control.held.splice(0).map((deliver) => deliver()).length;
+        window.WebSocket = class FallbackStartControlWebSocket extends NativeWebSocket {
+            constructor(...args) {
+                super(...args);
+                control.sockets.push(this);
+            }
+
+            send(data) {
+                const request = typeof data === 'string' ? /^42(\d*)\["([^"]+)"/.exec(data) : null;
+                if (request) {
+                    const [, id, event] = request;
+                    control.sent.push(event);
+                    if (id && event === 'join-room') control.joinIds.add(id);
+                    if (id && event === 'fallback-consume-start') control.startIds.add(id);
+                }
+                super.send(data);
+            }
+
+            get onmessage() {
+                return super.onmessage;
+            }
+
+            set onmessage(handler) {
+                super.onmessage = typeof handler === 'function'
+                    ? (event) => {
+                        const answerPacket = typeof event.data === 'string' ? /^43(\d+)([\s\S]*)$/.exec(event.data) : null;
+                        if (answerPacket) {
+                            const [, id, body] = answerPacket;
+                            if (control.joinIds.delete(id)) {
+                                const [response] = JSON.parse(body);
+                                const rewritten = response && response.success !== false
+                                    ? { ...response, ingestMode: 'obs', hasProducer: true, relayAllowed: true }
+                                    : response;
+                                handler.call(this, new MessageEvent('message', { data: `43${id}${JSON.stringify([rewritten])}` }));
+                                return;
+                            }
+                            if (control.startIds.delete(id)) {
+                                const deliver = () => handler.call(this, new MessageEvent('message', {
+                                    data: `43${id}[{"ok":true,"fallbackAvailable":true}]`,
+                                }));
+                                if (control.answer === 'ok') deliver();
+                                else if (control.answer === 'hold') control.held.push(deliver);
+                                return;
+                            }
+                        }
+                        handler.call(this, event);
+                    }
+                    : handler;
+            }
+        };
+    });
+}
+
+const fallbackStartsSent = (page) => page.evaluate(
+    () => window.__nextraFallbackControl.sent.filter((event) => event === 'fallback-consume-start').length,
+);
+
 // Drops a watching viewer's connection with the room join of its reconnect held
 // back, so Leave Room can be pressed while the rejoin is still on its way.
 async function dropWatchingViewerWithRejoinHeld(viewerPage) {
@@ -1261,6 +1332,129 @@ test('a rejoin left behind by Leave Room finishes without undoing the join made 
     await expect.poll(async () => (await request.get('/api/metrics')).json())
         .toMatchObject({ rooms: { active: 0 } });
 
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The relay-first path of an OBS room asks the server for the fMP4 relay on its
+// own (fallback-consume-start). The start was sent with an un-timed
+// acknowledgement, so an answer that never came left the viewer on
+// "Relay Mode - connecting" for good and blocked every later start.
+test('a relay start the server never answers ends its connecting state with a reason and is stopped once, not retried in a loop', async ({ browser }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installFallbackStartControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await viewerPage.evaluate(() => { window.__nextraFallbackControl.answer = 'drop'; });
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+
+    const connecting = viewerPage.getByText(/Relay Mode \(.*\) - connecting/);
+    await expect(connecting).toBeVisible();
+    expect(await fallbackStartsSent(viewerPage)).toBe(1);
+
+    // The acknowledgement times out after 10 s: the connecting state ends and says why.
+    await expect(connecting).toHaveCount(0, { timeout: 20_000 });
+    await expect(viewerPage.getByRole('alert')).toContainText(/did not respond/i);
+    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toBeEnabled();
+
+    // The server may still have processed the start, so one stop follows it on the same
+    // connection; nothing asks again by itself.
+    await viewerPage.waitForTimeout(2000);
+    expect(await fallbackStartsSent(viewerPage)).toBe(1);
+    expect(await viewerPage.evaluate(
+        () => window.__nextraFallbackControl.sent.filter((event) => event === 'fallback-consume-stop').length,
+    )).toBe(1);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+test('a connection that drops while the relay start is unanswered starts it again on the new connection', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installFallbackStartControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await viewerPage.evaluate(() => { window.__nextraFallbackControl.answer = 'drop'; });
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    await expect(viewerPage.getByText(/Relay Mode \(.*\) - connecting/)).toBeVisible();
+    expect(await fallbackStartsSent(viewerPage)).toBe(1);
+
+    // The connection drops with the start unanswered; the reconnect rejoins the room
+    // and asks for the relay again, this time on the new socket.id.
+    await viewerPage.evaluate(() => {
+        window.__nextraFallbackControl.answer = 'ok';
+        window.__nextraFallbackControl.sockets.at(-1).close();
+    });
+    await expect.poll(() => fallbackStartsSent(viewerPage)).toBe(2);
+    await expect(viewerPage.getByText(/Relay Mode \(.*\) - (connecting|buffering)/)).toBeVisible();
+    await expect.poll(async () => (await getOnlyRoom(request))?.viewerCount).toBe(1);
+
+    // The old connection's start is never stopped from the new one.
+    expect(await viewerPage.evaluate(
+        () => window.__nextraFallbackControl.sent.filter((event) => event === 'fallback-consume-stop').length,
+    )).toBe(0);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The answer of a start made before Leave Room arrives after the viewer joined
+// again and its own start was answered. It belongs to a viewer that is gone: it
+// must not touch the new session, and its stop would remove the new
+// subscription (fallback-consume-stop is socket-wide on the server).
+test('a relay start answered after Leave Room and a new join leaves the new session alone and sends no stop', async ({ browser }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installFallbackStartControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await viewerPage.evaluate(() => { window.__nextraFallbackControl.answer = 'hold'; });
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    await expect(viewerPage.getByText(/Relay Mode \(.*\) - connecting/)).toBeVisible();
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraFallbackControl.held.length)).toBe(1);
+
+    // Leave Room with the answer still on its way.
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    const joinButton = viewerPage.getByRole('button', { name: 'Join Room' });
+    await expect(joinButton).toBeVisible();
+
+    // Join again: a new start, answered at once.
+    await viewerPage.evaluate(() => { window.__nextraFallbackControl.answer = 'ok'; });
+    await joinButton.click();
+    await expect(viewerPage.getByText(/Relay Mode (.*) - (connecting|buffering)/)).toBeVisible();
+    await expect.poll(() => fallbackStartsSent(viewerPage)).toBe(2);
+
+    // Only now does the first start's answer arrive. Nothing is stopped, and the new
+    // session is still in relay mode.
+    expect(await viewerPage.evaluate(() => window.__nextraFallbackControl.releaseHeld())).toBe(1);
+    await viewerPage.waitForTimeout(1000);
+    expect(await viewerPage.evaluate(
+        () => window.__nextraFallbackControl.sent.filter((event) => event === 'fallback-consume-stop').length,
+    )).toBe(0);
+    await expect(viewerPage.getByText(/Relay Mode (.*)/)).toBeVisible();
+    await expect(viewerPage.getByRole('button', { name: 'Try WebRTC' })).toBeVisible();
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
     await viewerContext.close();
     await hostContext.close();
 });

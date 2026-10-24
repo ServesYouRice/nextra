@@ -77,6 +77,14 @@ export function createViewerSession() {
         get active() {
             return latestJoin !== 0 && generation === latestJoin;
         },
+
+        /**
+         * The session in progress, for work that runs inside it without having
+         * begun it (the relay fallback start asks at entry), or null when none is.
+         */
+        current() {
+            return latestJoin !== 0 && generation === latestJoin ? tokenFor(generation) : null;
+        },
     };
 }
 

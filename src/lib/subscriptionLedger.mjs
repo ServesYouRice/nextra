@@ -22,6 +22,8 @@
 //
 // Pure module with no React dependency; the unit tests drive it with a fake socket.
 
+import { emitWithTimedAck, SocketNotConnectedError } from './timedAck.mjs';
+
 /** @typedef {'relay' | 'fallback'} SubscriptionKind */
 /** @typedef {{ readonly kind: SubscriptionKind, readonly token: unknown, readonly socketId: string }} SubscriptionClaim */
 /**
@@ -103,22 +105,18 @@ export function createSubscriptionLedger() {
 
 /** @typedef {ReturnType<typeof createSubscriptionLedger>} SubscriptionLedger */
 
-export class SocketNotConnectedError extends Error {
-    /** @param {string} event */
-    constructor(event) {
-        super(`Not connected to the server, so "${event}" was not sent. Try again in a moment.`);
-        this.name = 'SocketNotConnectedError';
-    }
-}
+// Re-exported: the ledger's starts and timedAck.mjs's helper refuse a disconnected socket alike.
+export { SocketNotConnectedError };
 
 /**
  * Emits a subscription start with its ack and records the claim in the same
  * synchronous block. Throws a SocketNotConnectedError, claiming and emitting
  * nothing, while the socket is disconnected. The promise resolves with the raw
- * acknowledgement and rejects on a timeout or a disconnect; nothing is retried.
+ * acknowledgement and rejects on a timeout or a disconnect; nothing is retried
+ * (see timedAck.mjs).
  * @param {SubscriptionLedger} ledger
  * @param {SubscriptionKind} kind
- * @param {unknown} token
+ * @param {unknown} token The attempt that sends the start.
  * @param {LedgerSocket} socket
  * @param {string} event
  * @param {unknown} [payload]
@@ -130,32 +128,9 @@ export function emitClaimedStart(ledger, kind, token, socket, event, payload = {
         throw new SocketNotConnectedError(event);
     }
     const claim = ledger.claim(kind, token, socket.id);
-    const acknowledged = new Promise((resolve, reject) => {
-        let settled = false;
-        /** @type {ReturnType<typeof setTimeout> | undefined} */
-        let timer;
-        const onDisconnect = (/** @type {unknown} */ reason) => {
-            if (settled) return;
-            finish();
-            reject(new Error(`Connection lost while waiting for "${event}" (${String(reason)})`));
-        };
-        const finish = () => {
-            settled = true;
-            clearTimeout(timer);
-            socket.off?.('disconnect', onDisconnect);
-        };
-        timer = setTimeout(() => {
-            if (settled) return;
-            finish();
-            reject(new Error(`Request "${event}" timed out after ${Math.round(timeoutMs / 1000)}s`));
-        }, timeoutMs);
-        socket.on?.('disconnect', onDisconnect);
-        socket.emit(event, payload, (/** @type {unknown} */ response) => {
-            if (settled) return;
-            finish();
-            resolve(response);
-        });
-    });
+    // emitWithTimedAck emits inside its promise executor, before it returns:
+    // the claim and the emit share this synchronous block.
+    const acknowledged = emitWithTimedAck(socket, event, payload, { timeoutMs });
     return { claim, acknowledged };
 }
 

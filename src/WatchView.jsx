@@ -28,6 +28,8 @@ import {
     withDeadline,
 } from './lib/playbackAttempt.mjs';
 import { createSubscriptionLedger, emitClaimedStart, releaseSubscription } from './lib/subscriptionLedger.mjs';
+import { beginFallbackStart } from './lib/fallbackStart.mjs';
+import { isSocketNotConnectedError } from './lib/timedAck.mjs';
 import { createRelayAppendQueue } from './lib/relayAppendQueue.mjs';
 import { abandonStaleJoin, createViewerSession, isStaleViewerSessionError } from './lib/viewerSession.mjs';
 
@@ -144,7 +146,17 @@ export default function WatchView({ initialCode = '' }) {
     const relayUnsupportedWarnedRef = useRef(false);
     const mediaStreamRef = useRef(null);
     const fmp4PlayerRef = useRef(null);
+    // True from the fallback-consume-start emit until its answer, its timeout or
+    // whatever drops the start settles it; enterFallbackMode does not start twice.
     const isEnteringFallbackRef = useRef(false);
+    // The ledger claim of the fallback-consume-start this viewer waits for or
+    // holds. Its subscription is released by exitFallbackMode; the resets that
+    // end the server's side of it (Leave Room, a room that ended, a new
+    // connection) drop it without a stop (dropFallbackClaim).
+    const fallbackClaimRef = useRef(null);
+    // The connection dropped while the fallback start was unanswered; the
+    // reconnect asks for the relay again.
+    const fallbackResumeRef = useRef(false);
     const activePlaybackAttemptRef = useRef(0);
     const joinedRef = useRef(false);
     const joinedRoomCodeRef = useRef(normalizeRoomCode(initialCode));
@@ -165,6 +177,18 @@ export default function WatchView({ initialCode = '' }) {
     // retrying. The rejection clears fallbackMode, which would otherwise satisfy
     // the effect's guard again and spin as fast as the socket can round-trip.
     const fallbackStartRejectedRef = useRef(false);
+
+    // Lets go of the fallback start without a stop, for the resets after which the
+    // server no longer holds the subscription: leave-room removed the viewer, the
+    // room is gone, or the connection the start used has closed. A start still
+    // waiting for its answer finds its claim gone, does nothing when the answer
+    // comes, and the ledger lets no stop out for it.
+    const dropFallbackClaim = useCallback(() => {
+        const claim = fallbackClaimRef.current;
+        fallbackClaimRef.current = null;
+        isEnteringFallbackRef.current = false;
+        if (claim) subscriptionLedger.release('fallback', claim);
+    }, [subscriptionLedger]);
 
     useEffect(() => {
         if (passphraseRequired) passphraseInputRef.current?.focus();
@@ -842,6 +866,10 @@ export default function WatchView({ initialCode = '' }) {
             // queued recovery may resume it.
             viewerSession.invalidate();
             recoveryGuard.clearFollowUp();
+            // The room is gone with the subscription: a fallback start still waiting
+            // for its answer finds the room ended and does nothing.
+            dropFallbackClaim();
+            fallbackResumeRef.current = false;
             setHostReconnectingReason('');
             cleanupPlayback();
             setWatching(false);
@@ -929,7 +957,7 @@ export default function WatchView({ initialCode = '' }) {
             socket.off('room-ended', onRoomEnded);
             socket.off('server-restarting', onRoomEnded);
         };
-    }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback, recoveryGuard, viewerSession]);
+    }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback, dropFallbackClaim, recoveryGuard, viewerSession]);
 
     useEffect(() => {
         const recoverTransport = async (reason, { wasWatching, previousPlaybackMode }) => {
@@ -991,6 +1019,8 @@ export default function WatchView({ initialCode = '' }) {
             // The session ends here: a join still on its way must not restore it.
             viewerSession.invalidate();
             recoveryGuard.clearFollowUp();
+            dropFallbackClaim();
+            fallbackResumeRef.current = false;
             cleanupPlayback();
             resetDevice();
             joinedRoomCodeRef.current = '';
@@ -1020,6 +1050,7 @@ export default function WatchView({ initialCode = '' }) {
     }, [
         socket,
         cleanupPlayback,
+        dropFallbackClaim,
         hasTurnServer,
         recoveryGuard,
         relayAllowed,
@@ -1156,58 +1187,124 @@ export default function WatchView({ initialCode = '' }) {
         }
     }, [codeInput, joinRoomAndLoadDevice, socket, viewerSession]);
 
+    // Asks the server for the fMP4 relay (fallback-consume-start) and, once it
+    // answers, plays it. The start is sent once with a 10 s answer timeout and
+    // owned through the subscription ledger (see fallbackStart.mjs): an answer
+    // that comes after the viewer left, the room ended, the session was replaced
+    // or the start was given up changes nothing, and stops the subscription only
+    // while no newer start has replaced it on this connection.
     const enterFallbackMode = useCallback(() => {
         if (fmp4PlayerRef.current || isEnteringFallbackRef.current) return;
+        // The room this viewer joined, never what the code box holds.
+        const roomCode = joinedRoomCodeRef.current;
+        const session = viewerSession.current();
+        if (!joinedRef.current || !roomCode || !session || terminalRoomEndedRef.current) return;
+
+        let start;
+        try {
+            start = beginFallbackStart({
+                ledger: subscriptionLedger,
+                socket,
+                token: session.generation,
+                // Whether the viewer that asked still wants the answer.
+                isCurrent: (claim) => fallbackClaimRef.current === claim
+                    && session.isCurrent()
+                    && joinedRef.current
+                    && joinedRoomCodeRef.current === roomCode
+                    && !terminalRoomEndedRef.current,
+            });
+        } catch (err) {
+            if (!isSocketNotConnectedError(err)) throw err;
+            // Nothing was sent, so nothing is buffered into a later connection; the
+            // reconnect asks again.
+            fallbackResumeRef.current = true;
+            setError('Connection interrupted. Reconnecting...');
+            return;
+        }
+        const { claim, settled } = start;
+        fallbackClaimRef.current = claim;
         isEnteringFallbackRef.current = true;
         setError('');
         setFallbackMode(true);
         setFallbackState('connecting');
 
-        socket.emit('fallback-consume-start', {}, (response) => {
-            isEnteringFallbackRef.current = false;
+        void (async () => {
+            // Whether this start still owned the view when it settled: only then are
+            // the entering flag, the claim and the screen its to change.
+            let owned = false;
+            try {
+                const outcome = await settled;
+                owned = fallbackClaimRef.current === claim;
+                // fallbackStart.mjs has compensated for everything but a start that went through.
+                if (owned && outcome.status !== 'started') fallbackClaimRef.current = null;
+                if (!owned || outcome.status === 'stale') return;
 
-            if (response?.error) {
-                console.error('[WatchView] Fallback start error:', response.error);
-                fallbackStartRejectedRef.current = true;
-                setFallbackMode(false);
-                setFallbackState(null);
-                setError(response.error);
-                return;
+                if (outcome.status === 'rejected') {
+                    console.error('[WatchView] Fallback start error:', outcome.error);
+                    fallbackStartRejectedRef.current = true;
+                    setFallbackMode(false);
+                    setFallbackState(null);
+                    setError(outcome.error);
+                    return;
+                }
+                if (outcome.status === 'timeout') {
+                    // Latched, like a refusal, so the auto-enter effect does not ask again in a loop.
+                    console.warn('[WatchView] Fallback start was not answered:', outcome.error.message);
+                    fallbackStartRejectedRef.current = true;
+                    setFallbackMode(false);
+                    setFallbackState(null);
+                    setError('Relay mode did not respond in time. Try again in a moment.');
+                    return;
+                }
+                if (outcome.status === 'disconnected') {
+                    // Not latched: the reconnect asks again on the new connection.
+                    console.warn('[WatchView] Fallback start interrupted:', outcome.error.message);
+                    fallbackResumeRef.current = true;
+                    setFallbackMode(false);
+                    setFallbackState(null);
+                    setError('Connection interrupted. Reconnecting...');
+                    return;
+                }
+
+                fallbackStartRejectedRef.current = false;
+
+                cleanupPlayback(); // Tear down WebRTC only after the server knows this viewer is switching
+                setPlaybackMode('');
+                setWatching(false);
+
+                // Provide closure state validity
+                if (!videoRef.current) {
+                    // Nothing can play it: give the subscription back.
+                    fallbackClaimRef.current = null;
+                    releaseSubscription(subscriptionLedger, 'fallback', claim, socket, 'fallback-consume-stop');
+                    setFallbackMode(false);
+                    setFallbackState(null);
+                    return;
+                }
+
+                const player = createFmp4RelayPlayer({
+                    videoElement: videoRef.current,
+                    socket,
+                    roomCode,
+                    onStateChange: (state) => {
+                        setFallbackState(state);
+                        // A stale connection error contradicts visibly-playing video.
+                        if (state === 'playing') setError('');
+                    },
+                    onError: (msg, err) => {
+                        console.error('[WatchView] Fallback error:', msg, err);
+                        if (isRelayPlaybackUnsupported(msg)) setError(msg);
+                    },
+                });
+
+                fmp4PlayerRef.current = player;
+                player.start();
+            } finally {
+                // A start that lost the view to a newer owner leaves the flag to it.
+                if (owned || fallbackClaimRef.current === claim) isEnteringFallbackRef.current = false;
             }
-
-            fallbackStartRejectedRef.current = false;
-
-            cleanupPlayback(); // Tear down WebRTC only after the server knows this viewer is switching
-            setPlaybackMode('');
-            setWatching(false);
-
-            // Provide closure state validity
-            if (!videoRef.current) {
-                setFallbackMode(false);
-                setFallbackState(null);
-                return;
-            }
-
-            const roomCode = joinedRoomCodeRef.current || normalizeRoomCode(codeInput);
-            const player = createFmp4RelayPlayer({
-                videoElement: videoRef.current,
-                socket,
-                roomCode,
-                onStateChange: (state) => {
-                    setFallbackState(state);
-                    // A stale connection error contradicts visibly-playing video.
-                    if (state === 'playing') setError('');
-                },
-                onError: (msg, err) => {
-                    console.error('[WatchView] Fallback error:', msg, err);
-                    if (isRelayPlaybackUnsupported(msg)) setError(msg);
-                },
-            });
-
-            fmp4PlayerRef.current = player;
-            player.start();
-        });
-    }, [socket, codeInput, cleanupPlayback]);
+        })();
+    }, [socket, cleanupPlayback, subscriptionLedger, viewerSession]);
 
     // Auto-enter fallback mode for OBS rooms only when media is actually ready.
     useEffect(() => {
@@ -1223,12 +1320,18 @@ export default function WatchView({ initialCode = '' }) {
             fmp4PlayerRef.current.stop();
             fmp4PlayerRef.current = null;
         }
+        // The subscription held or still being asked for goes back, and only while
+        // it is the latest fallback start on this connection. A late answer to a
+        // start given up here finds its claim gone and sends nothing.
+        const claim = fallbackClaimRef.current;
+        fallbackClaimRef.current = null;
         isEnteringFallbackRef.current = false;
-        socket.emit('fallback-consume-stop');
+        fallbackResumeRef.current = false;
+        releaseSubscription(subscriptionLedger, 'fallback', claim, socket, 'fallback-consume-stop');
         setFallbackMode(false);
         setFallbackState(null);
         cleanupPlayback(); // Ensure everything from relay is gone before returning
-    }, [socket, cleanupPlayback]);
+    }, [socket, cleanupPlayback, subscriptionLedger]);
 
 
     const handleTryMediasoup = useCallback(async () => {
@@ -1362,6 +1465,11 @@ export default function WatchView({ initialCode = '' }) {
         // recovery may resume it either.
         viewerSession.invalidate();
         recoveryGuard.clearFollowUp();
+        // leave-room takes the viewer's fallback subscription with it, and a start
+        // still waiting for its answer must find the viewer gone, not start a
+        // player in whichever room joins next.
+        dropFallbackClaim();
+        fallbackResumeRef.current = false;
         try {
             await socketRequest(socket, 'leave-room', {}, { timeoutMs: 5000, maxAttempts: 1 });
         } catch (err) {
@@ -1392,10 +1500,13 @@ export default function WatchView({ initialCode = '' }) {
         setFallbackCodec(null);
         setCodecUnsupported(false);
         setWhipReconnecting(false);
-    }, [cleanupPlayback, recoveryGuard, socket, viewerSession]);
+    }, [cleanupPlayback, recoveryGuard, dropFallbackClaim, socket, viewerSession]);
 
     useEffect(() => {
-        const rejoinAfterReconnect = async ({ wasWatching, previousPlaybackMode, wasFallbackMode }) => {
+        const rejoinAfterReconnect = async ({ wasWatching, previousPlaybackMode, wasFallbackMode: wasInFallbackMode }) => {
+            // A fallback start the drop interrupted is resumed like fallback mode itself.
+            const wasFallbackMode = wasInFallbackMode || fallbackResumeRef.current;
+            fallbackResumeRef.current = false;
             if (!joinedRef.current || terminalRoomEndedRef.current) return;
             // The session was ended (Leave Room is waiting for its answer, ...):
             // there is nothing left to rejoin.
@@ -1495,6 +1606,10 @@ export default function WatchView({ initialCode = '' }) {
         };
 
         const onReconnect = () => {
+            // The fallback subscription (and a start that was waiting for its answer)
+            // belonged to the connection that is gone: the server dropped it, so no
+            // stop, and the entering flag no longer blocks the next start.
+            dropFallbackClaim();
             // A reconnect during a recovery is not dropped: the new socket.id must
             // rejoin the room. It runs once, after the recovery in progress.
             void recoveryGuard.run('reconnect', rejoinAfterReconnect, {
@@ -1509,6 +1624,7 @@ export default function WatchView({ initialCode = '' }) {
         socket,
         codeInput,
         cleanupPlayback,
+        dropFallbackClaim,
         enterFallbackMode,
         hasTurnServer,
         joinRoomAndLoadDevice,
@@ -1522,6 +1638,8 @@ export default function WatchView({ initialCode = '' }) {
         // Closed, not just ended: the socket belongs to whichever view comes next,
         // so a join still on its way must not send a leave for it afterwards.
         viewerSession.close();
+        dropFallbackClaim();
+        fallbackResumeRef.current = false;
         if (fmp4PlayerRef.current) {
             fmp4PlayerRef.current.stop();
             fmp4PlayerRef.current = null;
@@ -1529,7 +1647,7 @@ export default function WatchView({ initialCode = '' }) {
         socket.emit('leave-room');
         cleanupPlayback();
         resetDevice();
-    }, [cleanupPlayback, socket, viewerSession]);
+    }, [cleanupPlayback, dropFallbackClaim, socket, viewerSession]);
 
     const playbackStatus = fallbackMode
         ? `Relay Mode (${fallbackCodec || 'unknown'}) - ${fallbackState || 'initializing'}`
