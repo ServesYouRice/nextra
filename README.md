@@ -311,6 +311,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 | `OPEN_BROWSER` | `false` from source, `true` in packaged builds | Open the host page automatically on startup or duplicate launch |
 | `LOCAL_HTTPS` | `false` | Serve the local app over self-signed HTTPS instead of HTTP |
 | `HTTPS_CERT_DIR` | `./certs` | TLS certificate directory when `LOCAL_HTTPS=true` |
+| `EXTERNAL_SUPERVISOR` | `false` | Set to `true` when a service manager, systemd or a container restart policy restarts Nextra after it exits. A media-engine (mediasoup worker) crash then ends the process with exit code 1 and Nextra starts no replacement of its own. See [Operations and supported scale](#operations-and-supported-scale) |
 
 ### OBS / WHIP
 
@@ -423,7 +424,7 @@ Operational security:
 
 - A quick tunnel pointing at self-signed local HTTPS may need cloudflared's local-origin `--no-tls-verify`; this relaxes only cloudflared-to-Nextra certificate verification, so never use it for an unrelated upstream.
 - Alert when `/readyz` is non-ready, the media-worker PID changes unexpectedly, relay restart/error counters rise, or the tunnel remains in an error/backoff state.
-- Run under a single-process supervisor. Unexpected unhandled rejections and uncaught exceptions log a shutdown reason and exit non-zero; mediasoup worker death replaces the process. Either event ends all in-memory rooms.
+- Run under a single-process supervisor. Unexpected unhandled rejections and uncaught exceptions log a shutdown reason and exit non-zero; mediasoup worker death exits non-zero too when `EXTERNAL_SUPERVISOR=true` is set, and otherwise Nextra starts a replacement process itself. Either event ends all in-memory rooms.
 - Rotate logs outside the process, restrict file access, and redact room codes, bearer capabilities, public capability URLs, TURN credentials, and request headers before sharing diagnostics.
 - The Host page's **Troubleshooting diagnostics** export downloads an allowlisted JSON snapshot of readiness, safe configuration flags, topology counts, runtime utilization, and current errors. It excludes room codes, room/public links, credentials, authorization headers, and raw room lists; review the file before sharing it outside your organization.
 - Store `OPERATOR_TOKEN`, `METRICS_TOKEN`, TURN secrets, tunnel tokens, and OBS credentials in protected environment/service-secret storage, never in command history, URLs, source control, or client storage.
@@ -480,7 +481,10 @@ Production supervision means exactly one replica; a restart ends all in-memory r
 
 - `/healthz` is an unauthenticated process-liveness check.
 - `/readyz` returns 200 only when every component required by the active profile is ready: HTTP, Socket.IO, the mediasoup worker, the production SPA bundle, and WHIP when enabled. Development marks the Vite-served SPA as external; disabled WHIP and optional FFmpeg/NVENC fallback do not block readiness. A 503 response includes each component's required flag, state, and WHIP startup error when present.
-- An uncaught exception or mediasoup worker death terminates/restarts the process. Run production deployments under a supervisor such as Windows Service management, systemd, or a container restart policy.
+- An uncaught exception or mediasoup worker death ends the process. Run production deployments under a supervisor such as Windows Service management, systemd, or a container restart policy, and set `EXTERNAL_SUPERVISOR=true`: after a mediasoup worker death, connected clients are told their room ended and Nextra exits with code 1 for the supervisor to restart it. A worker death during the first `WORKER_RECOVERY_MIN_UPTIME_SECONDS` (30 by default) of a run also exits 1, supervised or not, and is never restarted by Nextra itself, so a worker that cannot start does not loop.
+- Without `EXTERNAL_SUPERVISOR` (a desktop run, `node server.js` in a terminal, the packaged app), Nextra keeps the app usable after a mediasoup worker death: it ends the rooms, releases the port, and starts a replacement Nextra as an ordinary child process. The replacement writes to the same console (or the same output the launcher captured), so a startup failure is visible, and the original process stays alive until the replacement ends and exits with the replacement's exit code. A supervisor that watches the original PID therefore sees a running server, not a clean exit. Do not combine this with a supervisor: declare the supervisor instead.
+  - Signals on Linux and macOS: Ctrl+C or a closed terminal reaches both processes (same process group); `kill <pid>` of the original alone (SIGINT, SIGTERM, SIGHUP) is passed on to the replacement. A SIGKILL of the original leaves the replacement running.
+  - Signals on Windows: Ctrl+C, Ctrl+Break and closing the console window reach both processes through the console. Stopping the original with `taskkill` or Task Manager does not stop the replacement; use `taskkill /PID <pid> /T` to stop both.
 - Repeated FFmpeg failure is isolated to its room. Tunnel failures use bounded exponential restart backoff and do not stop LAN service.
 
 Version tags with or without the historical `v` prefix run the complete Windows and
