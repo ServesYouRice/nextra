@@ -130,6 +130,42 @@ test('Host downloads an allowlisted diagnostics JSON file', async ({ page }) => 
     await expect(page.locator('.host-diagnostics [role="status"]')).toContainText('Downloaded nextra-diagnostics-');
 });
 
+// Blocked site data, and sandboxed iframes without allow-same-origin, make reading
+// window.localStorage throw a SecurityError. HostView and WatchView used to read it
+// while their module evaluated, so the lazily loaded route chunk failed to load and
+// the route never rendered. The getter below throws like that on every read.
+for (const { route, control } of [
+    { route: '/#watch', control: (page) => page.getByRole('button', { name: 'Join Room' }) },
+    { route: '/#host', control: (page) => page.locator('.host-side-panel') },
+]) {
+    test(`${route} still renders when reading window.localStorage throws`, async ({ page }) => {
+        const pageErrors = [];
+        page.on('pageerror', (err) => pageErrors.push(`${err.name}: ${err.message}`));
+        await page.addInitScript(() => {
+            Object.defineProperty(window, 'localStorage', {
+                configurable: true,
+                get() {
+                    throw new DOMException('The operation is insecure.', 'SecurityError');
+                },
+            });
+        });
+
+        await page.goto(route);
+        await expect(control(page)).toBeVisible();
+        await expect(page.getByText('Something went wrong')).toHaveCount(0);
+        // The init script took effect: a read really throws on this page.
+        expect(await page.evaluate(() => {
+            try {
+                void window.localStorage;
+                return 'readable';
+            } catch (err) {
+                return err.name;
+            }
+        })).toBe('SecurityError');
+        expect(pageErrors).toEqual([]);
+    });
+}
+
 // VAL-086: the skip link moves focus to <main>; it must not be treated as a
 // hash route, which would render NotFound and unmount the current view.
 for (const { route, marker } of [
