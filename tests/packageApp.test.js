@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
@@ -11,11 +12,14 @@ const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
 const {
+    buildPackagerCommand,
     copyCloudflaredToStage,
     decideCloudflaredCandidate,
     downloadFileWithRedirects,
+    getCaxaBinPath,
     getCloudflaredAssetName,
     getFfmpegAsset,
+    run,
     stageCloudflaredCandidate,
     stageLocalCloudflared,
     stageVerifiedCloudflaredArchive,
@@ -927,4 +931,297 @@ test('on Windows the lookup still copies a verified project-root .exe directly a
         assert.equal(stageLocalCloudflared({ ...second, ...secondRun.deps }), false);
         assert.deepEqual(secondRun.calls.copy, []);
     });
+});
+
+// ---------------------------------------------------------------------------
+// How the packager starts npm ci and caxa (run, buildPackagerCommand)
+//
+// On Windows npm and npx are .cmd shims, which Node will not start without
+// cmd.exe. run() used to pass shell: true, so Node joined the command and its
+// arguments into one unquoted cmd.exe line: the caxa paths (stage directory,
+// output exe, icon stub in the temp folder) were split at every space, and &,
+// |, ^, ( and ) in them were acted on by cmd.exe. The paths below are what a
+// user profile or project folder can look like.
+//
+// No test here ever starts the real npm: the npm tests use a stand-in
+// npm-cli.js and check the route before anything is spawned.
+// ---------------------------------------------------------------------------
+
+const awkwardStageDir = 'C:\\Users\\A B\\proj & x\\.caxa-stage';
+const awkwardOutputExe = 'C:\\Users\\A B\\proj & x\\Nextra.exe';
+const awkwardIconStub = 'C:\\Users\\A B\\AppData\\Local\\Temp (1)\\a^b|c\\nextra-caxa-stub-42.exe';
+const npmCiArgs = ['ci', '--omit=dev', '--no-audit', '--no-fund'];
+const windowsNode = 'C:\\Program Files\\nodejs\\node.exe';
+const windowsNpmCli = 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js';
+const windowsCaxaBin = 'C:\\Users\\A B\\proj & x\\node_modules\\caxa\\build\\index.mjs';
+
+function caxaArgsFor(input, output, stub) {
+    return [
+        'caxa',
+        '--input', input,
+        '--output', output,
+        '--identifier', 'nextra-0123456789ab',
+        '--stub', stub,
+        '--',
+        '{{caxa}}/node_modules/.bin/node',
+        '-r',
+        '{{caxa}}/lib/startupRuntime.js',
+        '{{caxa}}/server.js',
+    ];
+}
+
+// Records the arguments and working directory it was started with.
+function writeArgvProbe(scriptPath, recordPath) {
+    fs.writeFileSync(
+        scriptPath,
+        `require('fs').writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));\n`
+    );
+}
+
+test('off Windows buildPackagerCommand returns the command and arguments as given, without a shell', () => {
+    for (const platform of ['darwin', 'linux']) {
+        const caxaArgs = caxaArgsFor('/Users/A B/proj & x/.caxa-stage', '/Users/A B/proj & x/Nextra-macos-arm64', '/tmp/a (b)');
+        assert.deepEqual(
+            buildPackagerCommand('npx', caxaArgs, { platform, resolveCaxaBin: () => '/never/used.mjs' }),
+            { command: 'npx', args: caxaArgs, shell: false, windowsVerbatimArguments: false },
+            platform
+        );
+        assert.deepEqual(
+            buildPackagerCommand('npm', npmCiArgs, { platform, env: { npm_execpath: '/usr/lib/node_modules/npm/bin/npm-cli.js' } }),
+            { command: 'npm', args: npmCiArgs, shell: false, windowsVerbatimArguments: false },
+            platform
+        );
+    }
+});
+
+test('on Windows npm ci runs as node plus npm_execpath, with no shell and its flags unchanged', () => {
+    assert.deepEqual(
+        buildPackagerCommand('npm', npmCiArgs, { platform: 'win32', execPath: windowsNode, env: { npm_execpath: windowsNpmCli } }),
+        { command: windowsNode, args: [windowsNpmCli, ...npmCiArgs], shell: false, windowsVerbatimArguments: false }
+    );
+});
+
+test('on Windows an npm_execpath that is not npm\'s own CLI is not used to run npm ci', () => {
+    const notNpm = [
+        '',
+        'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js',
+        'C:\\Users\\A\\AppData\\Local\\pnpm\\pnpm.cjs',
+        'C:\\Users\\A\\AppData\\Roaming\\yarn\\bin\\yarn.js',
+        'node_modules\\npm\\bin\\npm-cli.js',
+    ];
+    for (const npmExecpath of notNpm) {
+        assert.deepEqual(
+            buildPackagerCommand('npm', npmCiArgs, {
+                platform: 'win32',
+                execPath: windowsNode,
+                env: { npm_execpath: npmExecpath, ComSpec: 'C:\\WINDOWS\\system32\\cmd.exe' },
+            }),
+            {
+                command: 'C:\\WINDOWS\\system32\\cmd.exe',
+                args: ['/d', '/s', '/c', '"npm "ci" "--omit=dev" "--no-audit" "--no-fund""'],
+                shell: false,
+                windowsVerbatimArguments: true,
+            },
+            JSON.stringify(npmExecpath)
+        );
+    }
+});
+
+test('on Windows caxa runs as node plus its bin script, each path one argument, the -- and {{caxa}} placeholders verbatim', () => {
+    for (const stub of [awkwardIconStub, 'C:\\Users\\100% !done\\Temp\\nextra-caxa-stub-42.exe']) {
+        const caxaArgs = caxaArgsFor(awkwardStageDir, awkwardOutputExe, stub);
+        const invocation = buildPackagerCommand('npx', caxaArgs, {
+            platform: 'win32',
+            execPath: windowsNode,
+            env: {},
+            resolveCaxaBin: () => windowsCaxaBin,
+        });
+
+        assert.deepEqual(invocation, {
+            command: windowsNode,
+            args: [windowsCaxaBin, ...caxaArgs.slice(1)],
+            shell: false,
+            windowsVerbatimArguments: false,
+        });
+        const valueOf = (flag) => invocation.args[invocation.args.indexOf(flag) + 1];
+        assert.equal(valueOf('--input'), awkwardStageDir);
+        assert.equal(valueOf('--output'), awkwardOutputExe);
+        assert.equal(valueOf('--stub'), stub);
+        assert.deepEqual(invocation.args.slice(invocation.args.indexOf('--')), [
+            '--', '{{caxa}}/node_modules/.bin/node', '-r', '{{caxa}}/lib/startupRuntime.js', '{{caxa}}/server.js',
+        ]);
+    }
+});
+
+test('the Windows cmd.exe fallback double-quotes every argument, so spaces and & | ^ ( ) stay inside one argument', () => {
+    const invocation = buildPackagerCommand(
+        'npx',
+        ['other-tool', awkwardStageDir, awkwardIconStub, 'C:\\dir with space\\', ''],
+        { platform: 'win32', env: { comspec: 'C:\\WINDOWS\\system32\\cmd.exe' } }
+    );
+
+    assert.equal(invocation.command, 'C:\\WINDOWS\\system32\\cmd.exe');
+    assert.equal(invocation.shell, false);
+    assert.equal(invocation.windowsVerbatimArguments, true);
+    // A trailing backslash is doubled so it does not escape the closing quote
+    // for the child's own argument parser. The bare command name stays
+    // unquoted: a batch file started by a quoted bare name gets a wrong %~dp0.
+    assert.deepEqual(invocation.args, [
+        '/d', '/s', '/c',
+        `"npx "other-tool" "${awkwardStageDir}" "${awkwardIconStub}" "C:\\dir with space\\\\" """`,
+    ]);
+    assert.equal(buildPackagerCommand('npm', ['ci'], { platform: 'win32', env: {} }).command, 'cmd.exe');
+    // A command given as a path is quoted like an argument.
+    assert.deepEqual(
+        buildPackagerCommand('C:\\Program Files (x86)\\A & B\\tool.cmd', ['x y'], { platform: 'win32', env: {} }).args,
+        ['/d', '/s', '/c', '""C:\\Program Files (x86)\\A & B\\tool.cmd" "x y""']
+    );
+});
+
+test('the Windows cmd.exe fallback refuses ", %, ! and line breaks instead of escaping them', () => {
+    const unsafe = [
+        'C:\\Users\\A "B"\\proj',
+        'C:\\Users\\%USERNAME%\\proj',
+        'C:\\Users\\100%\\proj',
+        'C:\\Users\\wow!\\proj',
+        'C:\\Users\\A\r\nB',
+    ];
+    for (const value of unsafe) {
+        assert.throws(
+            () => buildPackagerCommand('npm', ['ci', value], { platform: 'win32', env: {} }),
+            /cannot pass .* through cmd\.exe/,
+            JSON.stringify(value)
+        );
+    }
+});
+
+test('getCaxaBinPath finds the bin caxa\'s package.json names, and node runs it as the caxa CLI', () => {
+    const caxaRoot = path.resolve(path.dirname(require.resolve('caxa')), '..');
+    const manifest = JSON.parse(fs.readFileSync(path.join(caxaRoot, 'package.json'), 'utf8'));
+    const binScript = getCaxaBinPath();
+
+    assert.equal(binScript, path.resolve(caxaRoot, typeof manifest.bin === 'string' ? manifest.bin : manifest.bin.caxa));
+    const result = spawnSync(process.execPath, [binScript, '--version'], { encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), manifest.version);
+});
+
+test('getCaxaBinPath walks past a nested package.json to caxa\'s own, reads an object bin, and says when caxa is missing', async () => {
+    await withTempDir(async (dir) => {
+        const caxaRoot = path.join(dir, 'node_modules', 'caxa');
+        fs.mkdirSync(path.join(caxaRoot, 'build'), { recursive: true });
+        fs.writeFileSync(path.join(caxaRoot, 'package.json'), JSON.stringify({ name: 'caxa', bin: { caxa: './build/cli.mjs' } }));
+        fs.writeFileSync(path.join(caxaRoot, 'build', 'package.json'), JSON.stringify({ type: 'module' }));
+
+        assert.equal(getCaxaBinPath(() => path.join(caxaRoot, 'build', 'index.mjs')), path.join(caxaRoot, 'build', 'cli.mjs'));
+    });
+    assert.throws(
+        () => getCaxaBinPath(() => { throw new Error("Cannot find module 'caxa'"); }),
+        /caxa is not installed \(it is a devDependency; run npm install first\): Cannot find module 'caxa'/
+    );
+});
+
+test('caxa started the Windows way receives a path with spaces, & ^ ( ), % and ! as one argument', async () => {
+    await withTempDir(async (dir) => {
+        // Never created: caxa names the --input it was given and stops before doing any work.
+        const awkwardDir = path.join(dir, 'A B (1) & x ^y 100% !z');
+        const missingInput = path.join(awkwardDir, '.caxa-stage');
+        const caxaArgs = [
+            'caxa', '--input', missingInput, '--output', path.join(awkwardDir, 'Nextra.exe'),
+            '--', '{{caxa}}/node_modules/.bin/node', '{{caxa}}/server.js',
+        ];
+        const invocation = buildPackagerCommand('npx', caxaArgs, { platform: 'win32' });
+        assert.equal(invocation.command, process.execPath);
+        assert.equal(invocation.args[0], getCaxaBinPath());
+
+        const result = spawnSync(invocation.command, invocation.args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+        assert.equal(result.status, 1, result.stderr);
+        const expected = `Input isn\u2019t a directory: \u2018${missingInput}\u2019.`;
+        assert.ok(result.stderr.includes(expected), `expected ${JSON.stringify(expected)} in caxa's stderr: ${result.stderr}`);
+    });
+});
+
+test('npm ci started the Windows way keeps its flags and runs in a stage directory with spaces and & ( ) in its path', async () => {
+    await withTempDir(async (dir) => {
+        const stage = path.join(dir, 'A B (1) & x', '.caxa-stage');
+        fs.mkdirSync(stage, { recursive: true });
+        const standInNpmCli = path.join(dir, 'stand-in npm', 'bin', 'npm-cli.js');
+        const record = path.join(dir, 'npm-call.json');
+        fs.mkdirSync(path.dirname(standInNpmCli), { recursive: true });
+        writeArgvProbe(standInNpmCli, record);
+
+        const invocation = buildPackagerCommand('npm', npmCiArgs, { platform: 'win32', env: { npm_execpath: standInNpmCli } });
+        // Checked before anything is spawned, so a wrong route can never start the real npm ci.
+        assert.deepEqual([invocation.command, invocation.args[0]], [process.execPath, standInNpmCli]);
+
+        const result = spawnSync(invocation.command, invocation.args, { cwd: stage, encoding: 'utf8', windowsHide: true });
+        assert.equal(result.status, 0, result.stderr);
+        const call = JSON.parse(fs.readFileSync(record, 'utf8'));
+        assert.deepEqual(call.argv, npmCiArgs);
+        assert.equal(fs.realpathSync(call.cwd), fs.realpathSync(stage));
+    });
+});
+
+// The child's own record of its argv is the ground truth here. Every fragment
+// an unquoted cmd.exe line could act on is a relative path that does not exist.
+const awkwardChildArgs = [awkwardStageDir, awkwardOutputExe, awkwardIconStub, 'C:\\dir with space\\', '--', '{{caxa}}/server.js'];
+
+test('run passes path arguments with spaces and cmd.exe metacharacters to the child unchanged', async () => {
+    await withTempDir(async (dir) => {
+        const awkwardDir = path.join(dir, 'A B (1) & x');
+        fs.mkdirSync(awkwardDir);
+        const probe = path.join(awkwardDir, 'probe.js');
+        const record = path.join(awkwardDir, 'argv.json');
+        writeArgvProbe(probe, record);
+
+        run(process.execPath, [probe, ...awkwardChildArgs], { cwd: awkwardDir });
+
+        assert.deepEqual(JSON.parse(fs.readFileSync(record, 'utf8')).argv, awkwardChildArgs);
+    });
+});
+
+test('run passes them unchanged through a .cmd shim built like npm.cmd', { skip: process.platform !== 'win32' && '.cmd shims run only on Windows' }, async () => {
+    await withTempDir(async (dir) => {
+        const awkwardDir = path.join(dir, 'A B (1) & x');
+        fs.mkdirSync(awkwardDir);
+        const probe = path.join(awkwardDir, 'probe.js');
+        const record = path.join(awkwardDir, 'argv.json');
+        writeArgvProbe(probe, record);
+        const shim = path.join(awkwardDir, 'tool.cmd');
+        fs.writeFileSync(shim, `@"${process.execPath}" "%~dp0probe.js" %*\r\n`);
+
+        run(shim, awkwardChildArgs, { cwd: awkwardDir });
+
+        assert.deepEqual(JSON.parse(fs.readFileSync(record, 'utf8')).argv, awkwardChildArgs);
+    });
+});
+
+// This is how the fallback reaches npm.cmd when npm_execpath is not set: by its
+// bare name through PATH. The shim finds its script through %~dp0, as npm.cmd
+// finds npm-cli.js, and runs from another directory so a wrong %~dp0 shows.
+test('run passes them unchanged to a .cmd shim found by its bare name through PATH', { skip: process.platform !== 'win32' && '.cmd shims run only on Windows' }, async () => {
+    await withTempDir(async (dir) => {
+        const shimDir = path.join(dir, 'A B (1) & x');
+        const elsewhere = path.join(dir, 'elsewhere');
+        fs.mkdirSync(shimDir);
+        fs.mkdirSync(elsewhere);
+        const record = path.join(dir, 'argv.json');
+        writeArgvProbe(path.join(shimDir, 'probe.js'), record);
+        fs.writeFileSync(path.join(shimDir, 'nextra-test-shim.cmd'), `@"${process.execPath}" "%~dp0probe.js" %*\r\n`);
+        const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH') || 'PATH';
+
+        run('nextra-test-shim', awkwardChildArgs, {
+            cwd: elsewhere,
+            env: { [pathKey]: `${shimDir}${path.delimiter}${process.env[pathKey] || ''}` },
+        });
+
+        assert.deepEqual(JSON.parse(fs.readFileSync(record, 'utf8')).argv, awkwardChildArgs);
+    });
+});
+
+test('run still throws "<command> failed with code <status>" when the child exits non-zero', () => {
+    assert.throws(
+        () => run(process.execPath, ['-e', 'process.exit(3)']),
+        { message: `${process.execPath} failed with code 3` }
+    );
 });
