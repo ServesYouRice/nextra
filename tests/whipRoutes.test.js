@@ -466,7 +466,11 @@ async function startWhipHarness(hostId, transportPlans = [], mediasoupRouter = {
             body,
             signal,
         }),
-        delete: (resourceId) => fetch(`${baseUrl}/whip/broadcast/${resourceId}`, { method: 'DELETE' }),
+        // Sends the host's bearer token unless the caller passes its own headers ({} for none).
+        delete: (resourceId, headers = { Authorization: `Bearer ${room.hostToken}` }) => fetch(
+            `${baseUrl}/whip/broadcast/${resourceId}`,
+            { method: 'DELETE', headers },
+        ),
         resourceIdOf: (response) => response.headers.get('location').split('/').pop(),
         resourcesForRoom: () => [...sessionRegistry.whipResources]
             .filter(([, roomCode]) => roomCode === room.code)
@@ -1187,6 +1191,120 @@ test('a sprop stream capture whose producer was replaced writes no SPS/PPS to th
         assert.equal(h.room.fallbackH264Pps, null);
         assert.equal(consumer.closed, true, 'the stale capture is stopped');
     } finally {
+        await h.close();
+    }
+});
+
+// DELETE needs the host's bearer token, exactly as POST does.
+async function startLiveSessionWithRelay(hostId) {
+    const h = await startWhipHarness(hostId, [{}]);
+    const { resourceId, transport } = await startLiveSession(h);
+    const relay = { stops: 0, stop() { relay.stops += 1; } };
+    h.room.fallbackWorker = relay;
+    const metricsBefore = h.hostMetrics.length;
+    return {
+        h,
+        resourceId,
+        transport,
+        relay,
+        assertUntouched() {
+            assertSessionLive(h, transport, resourceId);
+            assert.equal(relay.stops, 0, 'the fallback relay is not stopped');
+            assert.equal(h.room.fallbackWorker, relay, 'the fallback relay stays on the room');
+            assert.deepEqual(h.resourcesForRoom(), [resourceId], 'the WHIP resource stays registered');
+            assert.equal(h.room.whipSessionId !== null, true);
+            assert.equal(h.hostMetrics.length, metricsBefore, 'the host is not told of a teardown');
+        },
+    };
+}
+
+for (const [name, headersFor] of [
+    ['no Authorization header', () => ({})],
+    ['an empty bearer token', () => ({ Authorization: 'Bearer ' })],
+    ['a wrong bearer token', () => ({ Authorization: 'Bearer not-the-host-token' })],
+    ['a bearer token of the right length that is wrong', (room) => ({ Authorization: `Bearer ${'x'.repeat(room.hostToken.length)}` })],
+    ['the host token without the Bearer scheme', (room) => ({ Authorization: room.hostToken })],
+    ['the host token under another scheme', (room) => ({ Authorization: `Basic ${room.hostToken}` })],
+]) {
+    test(`WHIP DELETE with ${name} gets 403 and leaves the session, relay and registry alone`, { concurrency: false }, async () => {
+        const { h, resourceId, assertUntouched } = await startLiveSessionWithRelay(`whip-delete-refused-${name.replace(/\W+/g, '-')}`);
+        try {
+            const response = await h.delete(resourceId, headersFor(h.room));
+            assert.equal(response.status, 403);
+            assert.deepEqual(await response.json(), { error: 'Invalid or missing authorization token' });
+            assert.equal(response.headers.get('access-control-allow-methods'), 'POST, DELETE, OPTIONS');
+            assert.equal(response.headers.get('access-control-allow-headers'), 'Content-Type, Authorization');
+            assertUntouched();
+        } finally {
+            await h.close();
+        }
+    });
+}
+
+test('WHIP DELETE with another room\'s host token gets 403 and leaves the session alone', { concurrency: false }, async () => {
+    const { h, resourceId, assertUntouched } = await startLiveSessionWithRelay('whip-delete-other-rooms-token');
+    const other = await createRoom('whip-delete-other-room', { ingestMode: 'obs' });
+    try {
+        assert.notEqual(other.hostToken, h.room.hostToken);
+        const response = await h.delete(resourceId, { Authorization: `Bearer ${other.hostToken}` });
+        assert.equal(response.status, 403);
+        assertUntouched();
+    } finally {
+        destroyRoom(other.code);
+        await h.close();
+    }
+});
+
+test('WHIP DELETE with the host token returns 200 { ok: true } and tears the session down, once', { concurrency: false }, async () => {
+    const { h, resourceId, transport, relay } = await startLiveSessionWithRelay('whip-delete-authorized');
+    try {
+        // A refused attempt first: the same resource is still there for the host to delete.
+        assert.equal((await h.delete(resourceId, {})).status, 403);
+
+        const response = await h.delete(resourceId);
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), { ok: true });
+        assert.equal(response.headers.get('access-control-allow-methods'), 'POST, DELETE, OPTIONS');
+        assert.equal(transport.closed, true, 'the transport is closed');
+        for (const producer of transport.producers) assert.equal(producer.closed, true, `${producer.kind} producer is closed`);
+        assert.equal(h.room.whipTransport, null);
+        assert.equal(h.room.whipProducer, null);
+        assert.equal(h.room.whipAudioProducer, null);
+        assert.equal(h.room.whipSessionId, null);
+        assert.equal(h.room.whipResourceId, null);
+        assert.equal(h.room.whipConnected, false);
+        assert.equal(sessionRegistry.roomCodeForWhipResource(resourceId), null, 'the WHIP resource is unregistered');
+        assert.equal(relay.stops, 1, 'the fallback relay is stopped');
+        assert.equal(h.room.fallbackWorker, null);
+        assert.deepEqual(h.resourcesForRoom(), []);
+
+        const again = await h.delete(resourceId);
+        assert.equal(again.status, 404, 'the resource is gone after the delete');
+    } finally {
+        await h.close();
+    }
+});
+
+test('WHIP DELETE answers 404 for an unknown or stale resource without asking for a token', { concurrency: false }, async () => {
+    const { h, resourceId, assertUntouched } = await startLiveSessionWithRelay('whip-delete-unknown-resource');
+    sessionRegistry.registerWhipResource('stale-resource-id', h.room.code);
+    try {
+        for (const headers of [{}, { Authorization: 'Bearer not-the-host-token' }, { Authorization: `Bearer ${h.room.hostToken}` }]) {
+            const unknown = await h.delete('no-such-resource', headers);
+            assert.equal(unknown.status, 404);
+            assert.deepEqual(await unknown.json(), { error: 'WHIP session not found' });
+            assert.equal(unknown.headers.get('access-control-allow-methods'), 'POST, DELETE, OPTIONS');
+
+            // Registered for the room but no longer the room's session: also 404, and the live session is untouched.
+            const stale = await h.delete('stale-resource-id', headers);
+            assert.equal(stale.status, 404);
+            assert.deepEqual(await stale.json(), { error: 'WHIP session not found' });
+        }
+        sessionRegistry.unregisterWhipResource('stale-resource-id');
+        assertUntouched();
+        assert.equal(h.room.whipResourceId, resourceId);
+    } finally {
+        sessionRegistry.unregisterWhipResource('stale-resource-id');
         await h.close();
     }
 });
