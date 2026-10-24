@@ -548,3 +548,31 @@ test('WHIP answer gives a rejected section no a=rtcp-fb', (t) => {
     assert.equal(sections[1].port, 0);
     assert.deepEqual(rtcpFbLines(sections[1]), []);
 });
+
+function opusAudioWithFmtp(mid, fmtpParams) {
+    return [
+        'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+        'c=IN IP4 0.0.0.0',
+        `a=mid:${mid}`,
+        'a=sendonly',
+        'a=rtpmap:111 opus/48000/2',
+        `a=fmtp:111 ${fmtpParams}`,
+        'a=ssrc:2222 cname:test',
+    ];
+}
+
+test('WHIP producer copies Opus sprop-stereo=1 from the offer into the codec parameters', () => {
+    const offer = offerWithSections(h264Video('0'), opusAudioWithFmtp('1', 'minptime=10;useinbandfec=1;sprop-stereo=1'));
+    const rtpParameters = toMediasoupRtpParameters(parseOffer(offer));
+
+    assert.equal(rtpParameters.audio.codecs[0].parameters['sprop-stereo'], 1);
+    assert.equal(rtpParameters.audio.codecs[0].parameters.minptime, 10);
+    assert.equal(rtpParameters.audio.codecs[0].parameters.useinbandfec, 1);
+});
+
+test('WHIP producer omits Opus sprop-stereo when the offer does not carry it', () => {
+    const offer = offerWithSections(h264Video('0'), opusAudioWithFmtp('1', 'minptime=10;useinbandfec=1'));
+    const rtpParameters = toMediasoupRtpParameters(parseOffer(offer));
+
+    assert.ok(!('sprop-stereo' in rtpParameters.audio.codecs[0].parameters));
+});
