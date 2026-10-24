@@ -628,10 +628,11 @@ export default function HostView() {
         stopObsStream({ password: obsPasswordRef.current }).catch(() => {});
     }, []);
 
-    // The one place a control channel is opened. A start operation that is no
-    // longer current opens none and leaves the ref alone, since a successor may
-    // own it. A channel whose connection fails is dropped from the ref so that
-    // stopObsIngest uses the stopObsStream fallback instead of a dead channel.
+    // The one place a control channel is opened, by the start and by Retry
+    // Auto-Configure. An operation that is no longer current opens none and
+    // leaves the ref alone, since a successor may own it. A channel whose
+    // connection fails is dropped from the ref so that stopObsIngest uses the
+    // stopObsStream fallback instead of a dead channel.
     const establishObsControlChannel = useCallback((op) => {
         if (!startGuardRef.current.isCurrent(op)) return null;
         obsControlChannelRef.current?.close();
@@ -2213,9 +2214,20 @@ export default function HostView() {
                                             const retryOpts = {
                                                 ...buildObsAutoConfig(whipUrl, hostTokenRef.current),
                                             };
+                                            // The retry belongs to the start operation that
+                                            // created this session. Stop, a room that ended
+                                            // or the page going away end it while the retry
+                                            // runs, and its result then belongs to no session.
+                                            const retryOp = startGuardRef.current.activeOperation;
                                             configureObsStream(retryOpts).then((result) => {
+                                                if (!startGuardRef.current.isCurrent(retryOp)) return;
                                                 setObsAutoStatus(result.success ? 'success' : 'error');
                                                 setObsAutoMessage(result.message);
+                                                // Whatever the result, as at start: a failed
+                                                // run can still leave OBS streaming, and a
+                                                // channel that failed or was never opened
+                                                // leaves nothing to stop it with.
+                                                establishObsControlChannel(retryOp);
                                             });
                                         }}
                                     >
