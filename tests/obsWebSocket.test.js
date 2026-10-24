@@ -295,6 +295,117 @@ test('the OBS control channel reports a connection that never identifies', async
     assert.equal(await channel.stopStream(), false);
 });
 
+// A socket the test drives by hand, so that a handshake can arrive after the
+// caller has already closed the channel. It records every frame written to it.
+function manualObsWebSocket() {
+    const sockets = [];
+    class ManualObsWebSocket {
+        constructor(url) {
+            this.url = url;
+            this.closed = false;
+            this.sent = [];
+            sockets.push(this);
+        }
+
+        send(payload) {
+            this.sent.push(JSON.parse(payload));
+        }
+
+        close() {
+            if (this.closed) return;
+            this.closed = true;
+            this.onclose?.({ code: 1000 });
+        }
+
+        receive(message) {
+            this.onmessage?.({ data: JSON.stringify(message) });
+        }
+    }
+    return { WebSocketImpl: ManualObsWebSocket, sockets };
+}
+
+const settleTasks = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+test('closing the OBS control channel while it is still connecting closes the socket for good', async () => {
+    const { WebSocketImpl, sockets } = manualObsWebSocket();
+    const { openObsControlChannel } = await obsWebSocketModule;
+    const channel = openObsControlChannel(connectionOptions(WebSocketImpl));
+    const [ws] = sockets;
+
+    channel.close();
+
+    assert.equal(ws.closed, true, 'close() has to end a socket that has not identified yet');
+    const state = await channel.ready;
+    assert.equal(state.success, false);
+    assert.match(state.message, /closed before it opened/);
+
+    // OBS's side of the handshake can still be on its way. It must not bring
+    // the channel back to life.
+    ws.receive({ op: 0, d: { rpcVersion: 1 } });
+    ws.receive({ op: 2, d: { negotiatedRpcVersion: 1 } });
+    await settleTasks();
+    assert.deepEqual(ws.sent, []);
+    assert.equal(await channel.stopStream(), false);
+    assert.deepEqual(ws.sent, []);
+});
+
+test('closing the OBS control channel while it authenticates closes the socket and never identifies', async () => {
+    const { WebSocketImpl, sockets } = manualObsWebSocket();
+    const { openObsControlChannel } = await obsWebSocketModule;
+    const channel = openObsControlChannel(connectionOptions(WebSocketImpl, { password: 'secret' }));
+    const [ws] = sockets;
+
+    // The password hash is still being computed when the channel is closed.
+    ws.receive({ op: 0, d: { rpcVersion: 1, authentication: { challenge: 'c', salt: 's' } } });
+    channel.close();
+    assert.equal(ws.closed, true);
+    await settleTasks();
+    assert.deepEqual(ws.sent, [], 'the late identify must not be written to a closed socket');
+
+    ws.receive({ op: 2, d: { negotiatedRpcVersion: 1 } });
+    await settleTasks();
+    assert.deepEqual(ws.sent, []);
+    assert.equal(await channel.stopStream(), false);
+    assert.deepEqual(ws.sent, []);
+    assert.equal((await channel.ready).success, false);
+});
+
+test('closing the OBS control channel right behind Identified never runs the channel setup', async () => {
+    const { WebSocketImpl, sockets } = manualObsWebSocket();
+    const { openObsControlChannel } = await obsWebSocketModule;
+    const channel = openObsControlChannel(connectionOptions(WebSocketImpl));
+    const [ws] = sockets;
+    ws.receive({ op: 0, d: { rpcVersion: 1 } });
+    ws.sent.length = 0;
+
+    // Identified is handled, and its callback is queued, before close() runs.
+    ws.receive({ op: 2, d: { negotiatedRpcVersion: 1 } });
+    channel.close();
+
+    assert.equal(ws.closed, true);
+    const state = await channel.ready;
+    assert.equal(state.success, false);
+    assert.equal(await channel.stopStream(), false);
+    assert.deepEqual(ws.sent, []);
+});
+
+test('closing the OBS control channel twice, or after it opened, still settles ready once', async () => {
+    const { WebSocketImpl, sockets } = manualObsWebSocket();
+    const { openObsControlChannel } = await obsWebSocketModule;
+    const channel = openObsControlChannel(connectionOptions(WebSocketImpl));
+    const [ws] = sockets;
+    ws.receive({ op: 0, d: { rpcVersion: 1 } });
+    ws.receive({ op: 2, d: { negotiatedRpcVersion: 1 } });
+
+    assert.deepEqual(await channel.ready, { success: true, message: 'OBS control channel open.' });
+    channel.close();
+    channel.close();
+
+    assert.equal(ws.closed, true);
+    assert.deepEqual(await channel.ready, { success: true, message: 'OBS control channel open.' });
+    assert.equal(await channel.stopStream(), false);
+});
+
 test('OBS configuration rollback restores mutations in reverse order', async () => {
     const calls = [];
     const sendRequest = async (requestType, requestData) => {

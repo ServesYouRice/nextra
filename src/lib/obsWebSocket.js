@@ -49,7 +49,14 @@ async function sha256Base64(input) {
  * `done`. It has `deadlineGraceMs` for that; after it the connection is closed
  * and the transaction settles with the timeout. Without a handler the deadline
  * settles the transaction at once.
- * @returns {Promise<{ success: boolean, message: string }>}
+ *
+ * The returned promise has an `abort(result)` method that ends the transaction
+ * from outside, at any stage: it closes the socket and settles with `result`
+ * (a failure by default) at once, without running a deadline handler. Once the
+ * transaction has settled, nothing else runs on it: a handshake message that
+ * arrives later is ignored and the callback is never called. `abort()` after the
+ * transaction settled does nothing.
+ * @returns {Promise<{ success: boolean, message: string }> & { abort: (result?: { success: boolean, message: string }) => void }}
  */
 export function withObsConnection(password, callback, {
     WebSocketImpl = globalThis.WebSocket,
@@ -59,7 +66,8 @@ export function withObsConnection(password, callback, {
     transactionTimeoutMs = OBS_WS_TRANSACTION_TIMEOUT,
     deadlineGraceMs = OBS_WS_DEADLINE_GRACE,
 } = {}) {
-    return new Promise((resolve) => {
+    let abortTransaction = () => {};
+    const transaction = new Promise((resolve) => {
         if (typeof WebSocketImpl !== 'function') {
             resolve({ success: false, message: 'WebSocket is unavailable in this browser.' });
             return;
@@ -94,6 +102,10 @@ export function withObsConnection(password, callback, {
             try { ws.close(); } catch {}
             resolve(result);
         };
+        abortTransaction = (result) => done(result ?? {
+            success: false,
+            message: 'OBS WebSocket transaction was aborted.',
+        });
 
         const expireTransaction = () => {
             const timedOut = {
@@ -176,6 +188,9 @@ export function withObsConnection(password, callback, {
         };
 
         ws.onmessage = async (event) => {
+            // The transaction is over (closed, aborted or timed out); a handshake
+            // that was still on its way must not start anything on it.
+            if (settled) return;
             let msg;
             try { msg = JSON.parse(event.data); } catch { return; }
 
@@ -199,6 +214,8 @@ export function withObsConnection(password, callback, {
                     return;
                 }
 
+                // The password hash took time; the transaction may have ended meanwhile.
+                if (settled) return;
                 ws.send(JSON.stringify({ op: 1, d: identify }));
             }
 
@@ -210,10 +227,12 @@ export function withObsConnection(password, callback, {
                     transactionTimeout = setTimeout(expireTransaction, transactionTimeoutMs);
                 }
                 Promise.resolve()
-                    .then(() => callback(sendRequest, done, {
+                    // Settled in the meantime (aborted right behind Identified):
+                    // the callback must not run on a connection that is gone.
+                    .then(() => (settled ? undefined : callback(sendRequest, done, {
                         signal: deadlineController.signal,
                         onDeadline: (handler) => { deadlineHandler = handler; },
-                    }))
+                    })))
                     .catch((error) => done({
                         success: false,
                         message: error instanceof Error ? error.message : String(error),
@@ -231,6 +250,9 @@ export function withObsConnection(password, callback, {
             }
         };
     });
+    // The executor has run by now, so `abortTransaction` is the real one.
+    transaction.abort = (result) => abortTransaction(result);
+    return transaction;
 }
 
 function normalizeProfileValue(value) {
@@ -1074,23 +1096,21 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
  */
 export function openObsControlChannel({ password = '', ...options } = {}) {
     let sendRequest = null;
-    let settleConnection = null;
     let resolveReady = null;
     const ready = new Promise((resolve) => { resolveReady = resolve; });
 
-    const closed = withObsConnection(password, (send, done) => {
+    const connection = withObsConnection(password, (send) => {
         sendRequest = send;
-        settleConnection = done;
         resolveReady({ success: true, message: 'OBS control channel open.' });
         // Never settles on its own; close() ends the transaction.
         return new Promise(() => {});
     }, { ...options, transactionTimeoutMs: Infinity });
 
-    // A connection that fails or drops before identifying settles without ever
-    // running the callback, so surface that as the ready result instead.
-    closed.then((result) => {
+    // A connection that fails, drops or is closed before identifying settles
+    // without ever running the callback, so surface that as the ready result
+    // instead. Once ready has resolved this changes nothing.
+    connection.then((result) => {
         sendRequest = null;
-        settleConnection = null;
         resolveReady(result);
     });
 
@@ -1110,11 +1130,17 @@ export function openObsControlChannel({ password = '', ...options } = {}) {
                 return Promise.resolve(false);
             }
         },
+        /**
+         * Close the socket and keep the channel closed, whatever stage the
+         * connection is at: a handshake that completes later is ignored, and
+         * stopStream() resolves false from here on. Safe to call again.
+         */
         close() {
+            const wasOpen = sendRequest !== null;
             sendRequest = null;
-            const settle = settleConnection;
-            settleConnection = null;
-            settle?.({ success: true, message: 'OBS control channel closed.' });
+            connection.abort(wasOpen
+                ? { success: true, message: 'OBS control channel closed.' }
+                : { success: false, message: 'OBS control channel closed before it opened.' });
         },
     };
 }
