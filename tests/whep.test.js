@@ -322,3 +322,187 @@ describe('createViewerAnswer', () => {
         assert.ok(answer.includes('a=rtcp-fb:96 transport-cc'), 'should include transport-cc feedback');
     });
 });
+
+// ====================================================================
+// createViewerAnswer: which offer sections may receive a consumer
+// ====================================================================
+describe('createViewerAnswer section eligibility', () => {
+    const OFFER_HEAD = [
+        'v=0',
+        'o=- 123456 2 IN IP4 127.0.0.1',
+        's=-',
+        't=0 0',
+        'a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99',
+        'a=setup:actpass',
+        'a=ice-ufrag:testufrag',
+        'a=ice-pwd:testpwd1234567890123456',
+    ];
+
+    // Build an offer from section descriptions: { kind, port, direction, mid }.
+    // direction null leaves out the direction attribute; mid null leaves out a=mid.
+    function buildOffer(sections) {
+        const mids = sections.filter((s) => s.mid != null).map((s) => s.mid);
+        const lines = [...OFFER_HEAD];
+        if (mids.length > 0) lines.push(`a=group:BUNDLE ${mids.join(' ')}`);
+        for (const s of sections) {
+            const pt = s.kind === 'video' ? 96 : 111;
+            lines.push(`m=${s.kind} ${s.port === undefined ? 9 : s.port} UDP/TLS/RTP/SAVPF ${pt}`);
+            lines.push('c=IN IP4 0.0.0.0');
+            if (s.mid != null) lines.push(`a=mid:${s.mid}`);
+            if (s.direction) lines.push(`a=${s.direction}`);
+            lines.push('a=rtcp-mux');
+            lines.push(s.kind === 'video' ? 'a=rtpmap:96 H264/90000' : 'a=rtpmap:111 opus/48000/2');
+            if (s.kind === 'video') lines.push('a=fmtp:96 profile-level-id=42e01f;packetization-mode=1');
+        }
+        lines.push('');
+        return lines.join('\r\n');
+    }
+
+    // Split an SDP into its session part and one array of lines per m-section.
+    function splitSdp(sdp) {
+        const lines = sdp.split('\r\n').filter((l) => l !== '');
+        const sessionLines = [];
+        const sections = [];
+        for (const line of lines) {
+            if (line.startsWith('m=')) sections.push([line]);
+            else if (sections.length > 0) sections[sections.length - 1].push(line);
+            else sessionLines.push(line);
+        }
+        return { sessionLines, sections };
+    }
+
+    function answerFor(offer, consumers) {
+        const answer = createViewerAnswer(parseViewerOffer(offer), consumers, mockTransportParams);
+        return { answer, ...splitSdp(answer) };
+    }
+
+    function assertRejected(section, kind, mid) {
+        assert.match(section[0], new RegExp(`^m=${kind} 0 `), `section should be rejected with port 0: ${section[0]}`);
+        assert.ok(section.includes('a=inactive'), 'rejected section should be a=inactive');
+        assert.ok(!section.some((l) => l.startsWith('a=ssrc')), 'rejected section must not carry ssrc lines');
+        assert.ok(!section.some((l) => l.startsWith('a=ice-ufrag')), 'rejected section must not carry ICE lines');
+        if (mid != null) assert.ok(section.includes(`a=mid:${mid}`), `rejected section should echo a=mid:${mid}`);
+        else assert.ok(!section.some((l) => l.startsWith('a=mid:')), 'no a=mid when the offer had none');
+    }
+
+    function assertActive(section, kind, mid, ssrc) {
+        assert.match(section[0], new RegExp(`^m=${kind} 9 `), `section should be active: ${section[0]}`);
+        assert.ok(section.includes(`a=mid:${mid}`), `active section should carry a=mid:${mid}`);
+        assert.ok(section.includes('a=sendonly'));
+        assert.ok(section.includes(`a=ssrc:${ssrc} cname:whep`), 'active section should carry the consumer ssrc');
+    }
+
+    function bundleOf(sessionLines) {
+        return sessionLines.find((l) => l.startsWith('a=group:BUNDLE')) || null;
+    }
+
+    it('gives the video consumer to the active video section when a disabled (port 0) one comes first', () => {
+        const offer = buildOffer([
+            { kind: 'video', port: 0, direction: 'recvonly', mid: '0' },
+            { kind: 'video', port: 9, direction: 'recvonly', mid: '1' },
+            { kind: 'audio', port: 9, direction: 'recvonly', mid: '2' },
+        ]);
+        const { sessionLines, sections } = answerFor(offer, [mockVideoConsumer, mockAudioConsumer]);
+
+        assert.equal(sections.length, 3, 'answer m-line count must equal the offer m-line count');
+        assertRejected(sections[0], 'video', '0');
+        assertActive(sections[1], 'video', '1', 12345678);
+        assertActive(sections[2], 'audio', '2', 87654321);
+        assert.equal(bundleOf(sessionLines), 'a=group:BUNDLE 1 2', 'the rejected mid stays out of BUNDLE');
+    });
+
+    it('gives the audio consumer to the active audio section when an a=inactive one comes first', () => {
+        const offer = buildOffer([
+            { kind: 'video', port: 9, direction: 'recvonly', mid: '0' },
+            { kind: 'audio', port: 9, direction: 'inactive', mid: '1' },
+            { kind: 'audio', port: 9, direction: 'recvonly', mid: '2' },
+        ]);
+        const { sessionLines, sections } = answerFor(offer, [mockVideoConsumer, mockAudioConsumer]);
+
+        assert.equal(sections.length, 3, 'answer m-line count must equal the offer m-line count');
+        assertActive(sections[0], 'video', '0', 12345678);
+        assertRejected(sections[1], 'audio', '1');
+        assertActive(sections[2], 'audio', '2', 87654321);
+        assert.equal(bundleOf(sessionLines), 'a=group:BUNDLE 0 2');
+    });
+
+    it('answers every section as rejected, with no BUNDLE group, when all sections are disabled or inactive', () => {
+        const offer = buildOffer([
+            { kind: 'video', port: 0, direction: 'recvonly', mid: '0' },
+            { kind: 'audio', port: 9, direction: 'inactive', mid: '1' },
+            { kind: 'video', port: 0, direction: 'recvonly', mid: '2' },
+        ]);
+        const { answer, sessionLines, sections } = answerFor(offer, [mockVideoConsumer, mockAudioConsumer]);
+
+        assert.equal(sections.length, 3, 'answer m-line count must equal the offer m-line count');
+        assertRejected(sections[0], 'video', '0');
+        assertRejected(sections[1], 'audio', '1');
+        assertRejected(sections[2], 'video', '2');
+        assert.equal(bundleOf(sessionLines), null, 'no BUNDLE group when nothing is active');
+        assert.ok(!answer.includes('a=sendonly'));
+    });
+
+    it('does not give a consumer to a section the viewer only sends on (sendonly)', () => {
+        const offer = buildOffer([
+            { kind: 'video', port: 9, direction: 'sendonly', mid: '0' },
+            { kind: 'video', port: 9, direction: 'recvonly', mid: '1' },
+        ]);
+        const { sessionLines, sections } = answerFor(offer, [mockVideoConsumer]);
+
+        assert.equal(sections.length, 2);
+        assertRejected(sections[0], 'video', '0');
+        assertActive(sections[1], 'video', '1', 12345678);
+        assert.equal(bundleOf(sessionLines), 'a=group:BUNDLE 1');
+    });
+
+    it('treats a section without a direction attribute as sendrecv and gives it the consumer', () => {
+        const offer = buildOffer([
+            { kind: 'video', port: 9, direction: null, mid: '0' },
+            { kind: 'video', port: 9, direction: 'sendrecv', mid: '1' },
+        ]);
+        const { sections } = answerFor(offer, [mockVideoConsumer]);
+
+        assert.equal(sections.length, 2);
+        assertActive(sections[0], 'video', '0', 12345678);
+        assertRejected(sections[1], 'video', '1');
+    });
+
+    it('rejects an eligible section that has no consumer left and keeps its position and mid', () => {
+        const offer = buildOffer([
+            { kind: 'video', port: 9, direction: 'recvonly', mid: 'v-a' },
+            { kind: 'video', port: 9, direction: 'recvonly', mid: 'v-b' },
+        ]);
+        const { sessionLines, sections } = answerFor(offer, [mockVideoConsumer]);
+
+        assert.equal(sections.length, 2);
+        assertActive(sections[0], 'video', 'v-a', 12345678);
+        assertRejected(sections[1], 'video', 'v-b');
+        assert.equal(bundleOf(sessionLines), 'a=group:BUNDLE v-a');
+    });
+
+    it('omits a=mid from a rejected section when the offer had no mid for it', () => {
+        const offer = buildOffer([
+            { kind: 'video', port: 0, direction: 'recvonly', mid: null },
+            { kind: 'video', port: 9, direction: 'recvonly', mid: null },
+        ]);
+        const { sections } = answerFor(offer, [mockVideoConsumer]);
+
+        assert.equal(sections.length, 2);
+        assertRejected(sections[0], 'video', null);
+        assert.match(sections[1][0], /^m=video 9 /);
+        assert.ok(sections[1].includes('a=ssrc:12345678 cname:whep'));
+    });
+
+    it('leaves the answer unchanged for an offer with one active section per kind', () => {
+        const offer = buildOffer([
+            { kind: 'video', port: 9, direction: 'recvonly', mid: '0' },
+            { kind: 'audio', port: 9, direction: 'recvonly', mid: '1' },
+        ]);
+        const { sessionLines, sections } = answerFor(offer, [mockVideoConsumer, mockAudioConsumer]);
+
+        assert.equal(sections.length, 2);
+        assertActive(sections[0], 'video', '0', 12345678);
+        assertActive(sections[1], 'audio', '1', 87654321);
+        assert.equal(bundleOf(sessionLines), 'a=group:BUNDLE 0 1');
+    });
+});
