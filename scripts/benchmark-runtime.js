@@ -2,6 +2,7 @@
 
 const os = require('node:os');
 const { io } = require('socket.io-client');
+const { createMetricsFetcher } = require('./runtime-metrics-client');
 const {
     minimumRequirementsForScenario,
     validateBenchmarkDefinition,
@@ -55,18 +56,12 @@ const thresholds = {
     memoryGrowthPercent: numberArg('max-memory-growth-percent', 20),
 };
 const metricsToken = process.env.METRICS_TOKEN || '';
+const fetchMetrics = createMetricsFetcher({ baseUrl, allowInsecureTls, token: metricsToken });
 
 function percentile(values, percentileValue) {
     if (values.length === 0) return 0;
     const sorted = [...values].sort((a, b) => a - b);
     return sorted[Math.min(sorted.length - 1, Math.ceil((percentileValue / 100) * sorted.length) - 1)];
-}
-
-async function fetchMetrics() {
-    const headers = metricsToken ? { Authorization: `Bearer ${metricsToken}` } : {};
-    const response = await fetch(`${baseUrl}/api/metrics?resetEventLoopDelay=true`, { headers });
-    if (!response.ok) throw new Error(`/api/metrics returned ${response.status}`);
-    return response.json();
 }
 
 function connectClient() {
