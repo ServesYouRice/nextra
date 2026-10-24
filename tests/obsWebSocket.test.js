@@ -377,6 +377,491 @@ test('OBS rollback reports a rejected restore and continues remaining steps', as
     assert.deepEqual(failures, ['SetProfileParameter: restore denied']);
 });
 
+test('a mutation whose response times out after dispatch is still rolled back', async () => {
+    const received = [];
+    let videoWrites = 0;
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        received.push({ requestType: request.requestType, requestData: request.requestData });
+        if (request.requestType === 'GetVideoSettings') {
+            queueMicrotask(() => ws.respond(request, { outputWidth: 1920, outputHeight: 1080 }));
+            return;
+        }
+        if (request.requestType === 'SetVideoSettings') {
+            videoWrites += 1;
+            // The first write is applied by OBS but its answer never arrives in
+            // time; the restore that follows is answered normally.
+            if (videoWrites === 1) return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    });
+    const { withObsConnection, createObsConfigurationTransaction } = await obsWebSocketModule;
+    let dispatchError = null;
+    let failures = null;
+
+    const result = await withObsConnection('', async (sendRequest, done) => {
+        const transaction = createObsConfigurationTransaction(sendRequest);
+        try {
+            await transaction.request('SetVideoSettings', { outputWidth: 1280, outputHeight: 720 });
+        } catch (error) {
+            dispatchError = error;
+        }
+        failures = await transaction.rollback();
+        done({ success: true, message: 'checked' });
+    }, connectionOptions(WebSocketImpl, { requestTimeoutMs: 20 }));
+
+    assert.equal(result.success, true);
+    assert.match(dispatchError?.message ?? '', /SetVideoSettings timed out after 20ms/);
+    assert.deepEqual(failures, []);
+    assert.deepEqual(received.filter((r) => r.requestType === 'SetVideoSettings'), [
+        { requestType: 'SetVideoSettings', requestData: { outputWidth: 1280, outputHeight: 720 } },
+        { requestType: 'SetVideoSettings', requestData: { outputWidth: 1920, outputHeight: 1080 } },
+    ]);
+});
+
+test('a mutation that throws after dispatch is journaled once', async () => {
+    const calls = [];
+    const sendRequest = async (requestType, requestData) => {
+        calls.push({ requestType, requestData });
+        if (requestType === 'GetStreamServiceSettings') {
+            return {
+                requestStatus: { result: true },
+                responseData: { streamServiceType: 'rtmp_custom', streamServiceSettings: { server: 'rtmp://previous/live' } },
+            };
+        }
+        if (requestType === 'SetStreamServiceSettings' && calls.filter((c) => c.requestType === requestType).length === 1) {
+            throw new Error('OBS request SetStreamServiceSettings timed out after 5000ms.');
+        }
+        return { requestStatus: { result: true } };
+    };
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(sendRequest);
+
+    await assert.rejects(
+        transaction.request('SetStreamServiceSettings', { streamServiceType: 'whip_custom' }),
+        /timed out after 5000ms/,
+    );
+    assert.deepEqual(await transaction.rollback(), []);
+
+    const writes = calls.filter((c) => c.requestType === 'SetStreamServiceSettings');
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes[1].requestData, {
+        streamServiceType: 'rtmp_custom',
+        streamServiceSettings: { server: 'rtmp://previous/live' },
+    });
+});
+
+test('a mutation OBS explicitly rejects is not journaled', async () => {
+    const calls = [];
+    const sendRequest = async (requestType, requestData) => {
+        calls.push({ requestType, requestData });
+        if (requestType === 'GetVideoSettings') {
+            return { requestStatus: { result: true }, responseData: { outputWidth: 1920, outputHeight: 1080 } };
+        }
+        if (requestType === 'SetVideoSettings') {
+            return { requestStatus: { result: false, comment: 'denied' } };
+        }
+        return { requestStatus: { result: true } };
+    };
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(sendRequest);
+
+    const response = await transaction.request('SetVideoSettings', { outputWidth: 1280, outputHeight: 720 });
+    assert.equal(response.requestStatus.result, false);
+    assert.deepEqual(await transaction.rollback(), []);
+    assert.equal(calls.filter((c) => c.requestType === 'SetVideoSettings').length, 1);
+});
+
+test('a mutation that was never dispatched because its snapshot failed is not journaled', async () => {
+    const calls = [];
+    const sendRequest = async (requestType, requestData) => {
+        calls.push({ requestType, requestData });
+        if (requestType === 'GetVideoSettings') throw new Error('OBS request GetVideoSettings timed out after 5000ms.');
+        return { requestStatus: { result: true } };
+    };
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(sendRequest);
+
+    await assert.rejects(transaction.request('SetVideoSettings', { outputWidth: 1280 }), /GetVideoSettings timed out/);
+    assert.deepEqual(await transaction.rollback(), []);
+    assert.deepEqual(calls.map((c) => c.requestType), ['GetVideoSettings']);
+});
+
+test('rolling back an unset profile parameter sends null so OBS deletes it', async () => {
+    const received = [];
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        received.push({ requestType: request.requestType, requestData: request.requestData });
+        if (request.requestType === 'GetProfileParameter') {
+            const { parameterName } = request.requestData;
+            // OBS answers null for a parameter with no user value, and a string for one that has.
+            const parameterValue = parameterName === 'Encoder' ? null : 'Full';
+            queueMicrotask(() => ws.respond(request, { parameterValue, defaultParameterValue: 'default' }));
+            return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    });
+    const { withObsConnection, createObsConfigurationTransaction } = await obsWebSocketModule;
+    let failures = null;
+
+    const result = await withObsConnection('', async (sendRequest, done) => {
+        const transaction = createObsConfigurationTransaction(sendRequest);
+        await transaction.request('SetProfileParameter', {
+            parameterCategory: 'AdvOut', parameterName: 'Encoder', parameterValue: 'obs_x264',
+        });
+        await transaction.request('SetProfileParameter', {
+            parameterCategory: 'Video', parameterName: 'ColorRange', parameterValue: 'Partial',
+        });
+        failures = await transaction.rollback();
+        done({ success: true, message: 'checked' });
+    }, connectionOptions(WebSocketImpl));
+
+    assert.equal(result.success, true);
+    assert.deepEqual(failures, []);
+    const restores = received.filter((r) => r.requestType === 'SetProfileParameter').slice(2);
+    assert.deepEqual(restores, [
+        {
+            requestType: 'SetProfileParameter',
+            requestData: { parameterCategory: 'Video', parameterName: 'ColorRange', parameterValue: 'Full' },
+        },
+        {
+            requestType: 'SetProfileParameter',
+            requestData: { parameterCategory: 'AdvOut', parameterName: 'Encoder', parameterValue: null },
+        },
+    ]);
+});
+
+// A clock a rollback can be timed against without waiting: every delay the
+// transaction asks for is recorded and moves the clock forward by that much.
+function fakeRollbackClock() {
+    const clock = { time: 0, delays: [] };
+    clock.now = () => clock.time;
+    clock.delay = async (ms) => {
+        clock.delays.push(ms);
+        clock.time += ms;
+    };
+    return clock;
+}
+
+const idleStream = { outputActive: false, outputReconnecting: false };
+
+// A request function for the rollback tests. It answers the reads a snapshot
+// needs, records every request with the fake time it was sent at, and lets the
+// test decide what GetStreamStatus says on its nth poll and how the nth StopStream answers.
+function rollbackObs(clock, { status = () => idleStream, stopAnswer = () => null, slowRestoreMs = 0 } = {}) {
+    const log = [];
+    let polls = 0;
+    let stops = 0;
+    const sendRequest = async (requestType, requestData) => {
+        log.push({ requestType, requestData, at: clock.time });
+        switch (requestType) {
+        case 'GetStreamStatus': {
+            polls += 1;
+            const answer = status(polls);
+            if (answer instanceof Error) throw answer;
+            if (answer === null) return { requestStatus: { result: false, comment: 'not ready' } };
+            if (answer === undefined) return { requestStatus: { result: true } };
+            return { requestStatus: { result: true }, responseData: answer };
+        }
+        case 'StopStream':
+            stops += 1;
+            return stopAnswer(stops) ?? { requestStatus: { result: true } };
+        case 'GetStreamServiceSettings':
+            return {
+                requestStatus: { result: true },
+                responseData: { streamServiceType: 'rtmp_custom', streamServiceSettings: { server: 'rtmp://previous/live' } },
+            };
+        case 'GetVideoSettings':
+            return { requestStatus: { result: true }, responseData: { outputWidth: 1920, outputHeight: 1080 } };
+        case 'GetProfileParameter':
+            return { requestStatus: { result: true }, responseData: { parameterValue: 'old' } };
+        case 'SetProfileParameter':
+            // A restore that takes OBS a while, so time passes between two restores.
+            if (requestData.parameterCategory === 'Output') clock.time += slowRestoreMs;
+            return { requestStatus: { result: true } };
+        default:
+            return { requestStatus: { result: true } };
+        }
+    };
+    return { sendRequest, log, requestTypes: (from) => log.slice(from).map((entry) => entry.requestType) };
+}
+
+// The order configureObsStream journals a setup that replaces a live stream and
+// starts a new one: stop, write the service, write the video, start.
+async function journalStreamReplacement(transaction) {
+    await transaction.request('StopStream');
+    await transaction.request('SetStreamServiceSettings', { streamServiceType: 'whip_custom' });
+    await transaction.request('SetVideoSettings', { outputWidth: 1280, outputHeight: 720 });
+    await transaction.request('StartStream');
+}
+
+test('a rollback waits until OBS reports the stream stopped before it restores anything', async () => {
+    const clock = fakeRollbackClock();
+    // OBS answers StopStream at once, but the output only finishes shutting down on the third poll.
+    const obs = rollbackObs(clock, { status: (poll) => (poll < 3 ? { outputActive: true, outputReconnecting: false } : idleStream) });
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(obs.sendRequest, { delay: clock.delay, now: clock.now });
+    await journalStreamReplacement(transaction);
+    const forward = obs.log.length;
+
+    assert.deepEqual(await transaction.rollback(), []);
+
+    assert.deepEqual(obs.requestTypes(forward), [
+        'StopStream',
+        'GetStreamStatus',
+        'GetStreamStatus',
+        'GetStreamStatus',
+        'SetVideoSettings',
+        'SetStreamServiceSettings',
+        'StartStream',
+    ]);
+});
+
+test('a rollback sends nothing after a stop that stays active, and names every step it skipped', async () => {
+    const stuck = [
+        { outputActive: true, outputReconnecting: false },
+        // A stream OBS is still retrying holds the encoder just like a live one.
+        { outputActive: false, outputReconnecting: true },
+    ];
+    for (const stuckStatus of stuck) {
+        const clock = fakeRollbackClock();
+        const obs = rollbackObs(clock, { status: () => stuckStatus });
+        const { createObsConfigurationTransaction } = await obsWebSocketModule;
+        const transaction = createObsConfigurationTransaction(obs.sendRequest, {
+            delay: clock.delay,
+            now: clock.now,
+            stopPollIntervalMs: 100,
+            stopPollAttempts: 4,
+        });
+        await journalStreamReplacement(transaction);
+        const forward = obs.log.length;
+
+        const failures = await transaction.rollback();
+
+        assert.deepEqual(obs.requestTypes(forward), ['StopStream', 'GetStreamStatus', 'GetStreamStatus', 'GetStreamStatus', 'GetStreamStatus']);
+        assert.deepEqual(failures, [
+            'StopStream: output still active after 400ms',
+            'skipped SetVideoSettings',
+            'skipped SetStreamServiceSettings',
+            'skipped StartStream',
+        ]);
+        assert.deepEqual(clock.delays, [100, 100, 100, 100]);
+    }
+});
+
+test('a rollback whose stream state cannot be read treats the stream as active and sends nothing more', async () => {
+    const unreadable = {
+        'a status request that throws': () => new Error('OBS request GetStreamStatus timed out after 5000ms.'),
+        'a status request OBS rejects': () => null,
+        'a status answer with no data': () => undefined,
+        'a status answer with no outputActive': () => ({}),
+    };
+    for (const [name, status] of Object.entries(unreadable)) {
+        const clock = fakeRollbackClock();
+        const obs = rollbackObs(clock, { status });
+        const { createObsConfigurationTransaction } = await obsWebSocketModule;
+        const transaction = createObsConfigurationTransaction(obs.sendRequest, {
+            delay: clock.delay,
+            now: clock.now,
+            stopPollIntervalMs: 100,
+            stopPollAttempts: 3,
+        });
+        await journalStreamReplacement(transaction);
+        const forward = obs.log.length;
+
+        const failures = await transaction.rollback();
+
+        assert.deepEqual(obs.requestTypes(forward), ['StopStream', 'GetStreamStatus', 'GetStreamStatus', 'GetStreamStatus'], name);
+        assert.deepEqual(failures, [
+            'StopStream: stream state unknown',
+            'skipped SetVideoSettings',
+            'skipped SetStreamServiceSettings',
+            'skipped StartStream',
+        ], name);
+    }
+});
+
+test('a StopStream OBS rejects is not a failure once the stream is confirmed stopped, and the rollback goes on', async () => {
+    const clock = fakeRollbackClock();
+    // The rollback's stop (the second) is refused because the output was already down.
+    const obs = rollbackObs(clock, {
+        stopAnswer: (nth) => (nth === 2 ? { requestStatus: { result: false, comment: 'output not active' } } : null),
+    });
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(obs.sendRequest, { delay: clock.delay, now: clock.now });
+    await journalStreamReplacement(transaction);
+    const forward = obs.log.length;
+
+    assert.deepEqual(await transaction.rollback(), []);
+
+    assert.deepEqual(obs.requestTypes(forward), [
+        'StopStream',
+        'GetStreamStatus',
+        'SetVideoSettings',
+        'SetStreamServiceSettings',
+        'StartStream',
+    ]);
+});
+
+test('a StopStream OBS rejects while the stream stays active is reported with the stop failure', async () => {
+    const clock = fakeRollbackClock();
+    const obs = rollbackObs(clock, {
+        status: () => ({ outputActive: true, outputReconnecting: false }),
+        stopAnswer: () => ({ requestStatus: { result: false, comment: 'output busy' } }),
+    });
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(obs.sendRequest, {
+        delay: clock.delay,
+        now: clock.now,
+        stopPollIntervalMs: 50,
+        stopPollAttempts: 2,
+    });
+    await transaction.request('SetStreamServiceSettings', { streamServiceType: 'whip_custom' });
+    await transaction.request('StartStream');
+
+    const failures = await transaction.rollback();
+
+    assert.deepEqual(failures, [
+        'StopStream: output busy',
+        'StopStream: output still active after 100ms',
+        'skipped SetStreamServiceSettings',
+    ]);
+});
+
+test('a rollback starts the stream again only after the video settle time has passed since the last video restore', async () => {
+    const clock = fakeRollbackClock();
+    // The Output restore takes 500 ms of the 1200, so only the rest is waited.
+    const obs = rollbackObs(clock, { slowRestoreMs: 500 });
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(obs.sendRequest, {
+        delay: clock.delay,
+        now: clock.now,
+        videoSettleMs: 1200,
+    });
+    await transaction.request('StopStream');
+    await transaction.request('SetProfileParameter', { parameterCategory: 'Output', parameterName: 'Mode', parameterValue: 'Advanced' });
+    await transaction.request('SetVideoSettings', { outputWidth: 1280, outputHeight: 720 });
+    const forward = obs.log.length;
+
+    assert.deepEqual(await transaction.rollback(), []);
+
+    const rolled = obs.log.slice(forward);
+    assert.deepEqual(rolled.map((entry) => entry.requestType), ['SetVideoSettings', 'SetProfileParameter', 'StartStream']);
+    const videoRestoredAt = rolled[0].at;
+    const startedAt = rolled[2].at;
+    assert.ok(startedAt - videoRestoredAt >= 1200, `StartStream came ${startedAt - videoRestoredAt}ms after the video restore`);
+    assert.deepEqual(clock.delays, [700]);
+});
+
+test('a video color restore counts for the settle time, and other restores and a missing video restore do not', async () => {
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const cases = [
+        { name: 'Video profile parameter', category: 'Video', parameterName: 'ColorRange', delays: [1200] },
+        { name: 'Output profile parameter', category: 'Output', parameterName: 'Mode', delays: [] },
+        { name: 'no restore at all', category: null, parameterName: null, delays: [] },
+    ];
+    for (const { name, category, parameterName, delays } of cases) {
+        const clock = fakeRollbackClock();
+        const obs = rollbackObs(clock);
+        const transaction = createObsConfigurationTransaction(obs.sendRequest, { delay: clock.delay, now: clock.now });
+        await transaction.request('StopStream');
+        if (category) {
+            await transaction.request('SetProfileParameter', { parameterCategory: category, parameterName, parameterValue: 'new' });
+        }
+        const forward = obs.log.length;
+
+        assert.deepEqual(await transaction.rollback(), [], name);
+
+        assert.deepEqual(clock.delays, delays, name);
+        assert.equal(obs.requestTypes(forward).at(-1), 'StartStream', name);
+    }
+});
+
+test('a start that timed out may have been applied, so the rollback stops it and checks before it restores', async () => {
+    const clock = fakeRollbackClock();
+    const obs = rollbackObs(clock);
+    const inner = obs.sendRequest;
+    const sendRequest = async (requestType, requestData) => {
+        const response = await inner(requestType, requestData);
+        if (requestType === 'StartStream') throw new Error('OBS request StartStream timed out after 5000ms.');
+        return response;
+    };
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(sendRequest, { delay: clock.delay, now: clock.now });
+    await transaction.request('SetStreamServiceSettings', { streamServiceType: 'whip_custom' });
+    await assert.rejects(transaction.request('StartStream'), /StartStream timed out/);
+    const forward = obs.log.length;
+
+    assert.deepEqual(await transaction.rollback(), []);
+
+    assert.deepEqual(obs.requestTypes(forward), ['StopStream', 'GetStreamStatus', 'SetStreamServiceSettings']);
+});
+
+test('a stop that timed out is not journaled, so a rollback does not report a start OBS would refuse', async () => {
+    const clock = fakeRollbackClock();
+    const obs = rollbackObs(clock);
+    const inner = obs.sendRequest;
+    const sendRequest = async (requestType, requestData) => {
+        const response = await inner(requestType, requestData);
+        if (requestType === 'StopStream') throw new Error('OBS request StopStream timed out after 5000ms.');
+        return response;
+    };
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(sendRequest, { delay: clock.delay, now: clock.now });
+    await assert.rejects(transaction.request('StopStream'), /StopStream timed out/);
+    const forward = obs.log.length;
+
+    assert.deepEqual(await transaction.rollback(), []);
+
+    assert.deepEqual(obs.requestTypes(forward), []);
+});
+
+test('a setup whose stream cannot be confirmed stopped says its rollback is incomplete and restores nothing', async () => {
+    // OBS is live when the setup begins and stops when asked. The new stream
+    // starts and is then reported stopped, which fails the setup. The rollback's
+    // stop is acknowledged, but the output stays active.
+    const requests = [];
+    let stops = 0;
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        const { requestType } = request;
+        requests.push(requestType);
+        if (requestType === 'StopStream') stops += 1;
+        if (requestType === 'GetStreamStatus') {
+            const outputActive = stops === 0 || stops >= 2;
+            queueMicrotask(() => ws.respond(request, { outputActive, outputReconnecting: false }));
+            return;
+        }
+        if (requestType === 'GetStreamServiceSettings') {
+            queueMicrotask(() => ws.respond(request, {
+                streamServiceType: 'rtmp_custom',
+                streamServiceSettings: { server: 'rtmp://previous.example/live' },
+            }));
+            return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    });
+    const previousWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = WebSocketImpl;
+    const { configureObsStream } = await obsWebSocketModule;
+
+    try {
+        const result = await configureObsStream({
+            whipUrl: 'http://127.0.0.1:8889/whip/room',
+            bearerToken: 'token',
+            autoStart: true,
+            transactionOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+        });
+
+        assert.equal(result.success, false);
+        assert.match(result.message, /streaming stopped immediately/);
+        assert.match(result.message, /Rollback incomplete: StopStream: output still active after 3ms; skipped SetStreamServiceSettings; skipped StartStream/);
+        // After the rollback's own StopStream (the second) only status polls may follow.
+        const secondStop = requests.indexOf('StopStream', requests.indexOf('StopStream') + 1);
+        assert.notEqual(secondStop, -1);
+        assert.deepEqual(requests.slice(secondStop + 1), ['GetStreamStatus', 'GetStreamStatus', 'GetStreamStatus']);
+    } finally {
+        globalThis.WebSocket = previousWebSocket;
+    }
+});
+
 test('configureObsStream restores the previous service after a later validation failure', async () => {
     const serviceWrites = [];
     const WebSocketImpl = fakeObsWebSocket(withStream((ws, request) => {

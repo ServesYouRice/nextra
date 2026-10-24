@@ -15,6 +15,12 @@ const OBS_WS_PORT = 4455;
 const OBS_WS_CONNECT_TIMEOUT = 5000;
 const OBS_WS_REQUEST_TIMEOUT = 5000;
 const OBS_WS_TRANSACTION_TIMEOUT = 30000;
+// How long and how often to wait for a stopped output to report itself idle.
+const STREAM_STOP_POLL_INTERVAL_MS = 250;
+const STREAM_STOP_POLL_ATTEMPTS = 10;
+// OBS needs a moment to finish resetting its video pipeline after the video
+// settings change; starting the encoder before then can crash OBS.
+const VIDEO_SETTLE_MS = 1200;
 
 async function sha256Base64(input) {
     const encoder = new TextEncoder();
@@ -211,6 +217,46 @@ async function getStreamStatus(sendRequest) {
     return response.responseData || null;
 }
 
+/**
+ * Poll until OBS reports the stream output idle. OBS answers StopStream before
+ * the output has finished shutting down, so the answer alone proves nothing.
+ *
+ * With `failClosed`, only a status that says outputActive is false and does not
+ * say it is reconnecting counts as idle: one that cannot be read (the request
+ * failed, was refused or carried no data) is taken as still active, and
+ * `statusKnown` tells whether the last poll could be read. Without it, any
+ * status that does not say active or reconnecting counts as idle and a failing
+ * request propagates.
+ *
+ * @returns {Promise<{ inactive: boolean, statusKnown: boolean }>}
+ */
+async function waitForStreamInactive(sendRequest, {
+    wait = delay,
+    intervalMs = STREAM_STOP_POLL_INTERVAL_MS,
+    attempts = STREAM_STOP_POLL_ATTEMPTS,
+    failClosed = false,
+} = {}) {
+    let statusKnown = true;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+        await wait(intervalMs);
+        let status = null;
+        try {
+            status = await getStreamStatus(sendRequest);
+        } catch (error) {
+            if (!failClosed) throw error;
+        }
+        if (failClosed) {
+            statusKnown = typeof status?.outputActive === 'boolean';
+            if (status?.outputActive === false && status.outputReconnecting !== true) {
+                return { inactive: true, statusKnown };
+            }
+        } else if (!status?.outputActive && !status?.outputReconnecting) {
+            return { inactive: true, statusKnown };
+        }
+    }
+    return { inactive: false, statusKnown };
+}
+
 async function stopActiveStream(sendRequest) {
     const status = await getStreamStatus(sendRequest);
     if (!status?.outputActive && !status?.outputReconnecting) {
@@ -229,12 +275,9 @@ async function stopActiveStream(sendRequest) {
         };
     }
 
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-        await delay(250);
-        const nextStatus = await getStreamStatus(sendRequest);
-        if (!nextStatus?.outputActive && !nextStatus?.outputReconnecting) {
-            return { stopped: true, ok: true, wasLive };
-        }
+    const { inactive } = await waitForStreamInactive(sendRequest);
+    if (inactive) {
+        return { stopped: true, ok: true, wasLive };
     }
 
     return {
@@ -404,12 +447,46 @@ function successfulResponse(response) {
     return response?.requestStatus?.result === true;
 }
 
+// Starting the stream undoes stopping it and the other way round.
+function streamInverse(requestType) {
+    if (requestType === 'StopStream') return { requestType: 'StartStream' };
+    if (requestType === 'StartStream') return { requestType: 'StopStream' };
+    return null;
+}
+
+// Restores that reset OBS's video pipeline: the video settings, and the color
+// space and range, which the profile keeps under Video.
+function affectsVideo(step) {
+    return step.requestType === 'SetVideoSettings'
+        || (step.requestType === 'SetProfileParameter' && step.requestData?.parameterCategory === 'Video');
+}
+
 /**
  * Wrap mutating OBS requests with a snapshot of the value they replace. The
- * resulting rollback runs successful mutations in reverse order and deliberately
- * uses the raw request function so rollback operations are not recorded again.
+ * resulting rollback runs successful mutations, and ones whose answer never
+ * arrived, in reverse order and deliberately uses the raw request function so
+ * rollback operations are not recorded again.
+ *
+ * Rollback treats a StopStream as a gate: OBS answers it before the output has
+ * really stopped, so it polls until the output is idle and, if that cannot be
+ * confirmed, sends nothing more. After the video was restored it waits out the
+ * settle time before starting the stream again.
+ *
+ * @param {Function} sendRequest
+ * @param {object} [options] Timing seams for tests; the defaults are what runs.
+ * @param {(ms: number) => Promise<void>} [options.delay]
+ * @param {() => number} [options.now]
+ * @param {number} [options.stopPollIntervalMs]
+ * @param {number} [options.stopPollAttempts]
+ * @param {number} [options.videoSettleMs]
  */
-export function createObsConfigurationTransaction(sendRequest) {
+export function createObsConfigurationTransaction(sendRequest, {
+    delay: wait = delay,
+    now = () => Date.now(),
+    stopPollIntervalMs = STREAM_STOP_POLL_INTERVAL_MS,
+    stopPollAttempts = STREAM_STOP_POLL_ATTEMPTS,
+    videoSettleMs = VIDEO_SETTLE_MS,
+} = {}) {
     const rollbackSteps = [];
     let finished = false;
 
@@ -442,11 +519,15 @@ export function createObsConfigurationTransaction(sendRequest) {
             };
             const previous = await sendRequest('GetProfileParameter', identity);
             if (!successfulResponse(previous)) return null;
+            // OBS answers null for a parameter the user never set, and reads its
+            // default instead. Sending null back deletes the parameter again;
+            // an empty string would turn the default into an explicit empty value.
+            const previousValue = previous.responseData?.parameterValue;
             return {
                 requestType: 'SetProfileParameter',
                 requestData: {
                     ...identity,
-                    parameterValue: String(previous.responseData?.parameterValue ?? ''),
+                    parameterValue: normalizeProfileValue(previousValue),
                 },
             };
         }
@@ -482,16 +563,29 @@ export function createObsConfigurationTransaction(sendRequest) {
             };
         }
 
-        const response = await sendRequest(requestType, requestData);
+        const undo = inverse || streamInverse(requestType);
+        let response;
+        try {
+            response = await sendRequest(requestType, requestData);
+        } catch (error) {
+            // A request that timed out may still be applied by OBS after the
+            // deadline, so the state captured before it was sent is journaled
+            // and a rollback restores it. Restoring a value that never changed
+            // is harmless; leaving an applied change in place is not. That holds
+            // for a start too: the rollback verifies the output is stopped
+            // before it restores anything, so a stop it did not need costs a
+            // poll, and a start that did happen is not left running over the
+            // restores. A stop that timed out is left out: its inverse is a
+            // start, and one OBS refuses because the stream never stopped
+            // would be reported as a failed rollback.
+            if (inverse) rollbackSteps.push(inverse);
+            else if (requestType === 'StartStream') rollbackSteps.push(undo);
+            throw error;
+        }
+        // OBS answered that it refused the request: nothing changed.
         if (!successfulResponse(response)) return response;
 
-        if (inverse) {
-            rollbackSteps.push(inverse);
-        } else if (requestType === 'StopStream') {
-            rollbackSteps.push({ requestType: 'StartStream' });
-        } else if (requestType === 'StartStream') {
-            rollbackSteps.push({ requestType: 'StopStream' });
-        }
+        if (undo) rollbackSteps.push(undo);
         return response;
     }
 
@@ -499,15 +593,56 @@ export function createObsConfigurationTransaction(sendRequest) {
         if (finished) return [];
         finished = true;
         const failures = [];
-        for (const step of rollbackSteps.reverse()) {
+        const steps = rollbackSteps.reverse();
+        let lastVideoRestoreAt = null;
+        for (let index = 0; index < steps.length; index += 1) {
+            const step = steps[index];
+            if (step.requestType === 'StartStream' && lastVideoRestoreAt !== null) {
+                // The video restore resets OBS's video pipeline; starting the
+                // encoder while that is in flight can crash OBS. Wait out
+                // whatever is left of the settle time since the last restore.
+                const remainingMs = videoSettleMs - (now() - lastVideoRestoreAt);
+                if (remainingMs > 0) await wait(remainingMs);
+            }
+
+            let failure = null;
             try {
                 const response = await sendRequest(step.requestType, step.requestData);
-                if (!successfulResponse(response)) {
-                    failures.push(`${step.requestType}: ${response?.requestStatus?.comment || 'rejected'}`);
+                if (successfulResponse(response)) {
+                    if (affectsVideo(step)) lastVideoRestoreAt = now();
+                } else {
+                    failure = `${step.requestType}: ${response?.requestStatus?.comment || 'rejected'}`;
                 }
             } catch (error) {
-                failures.push(`${step.requestType}: ${error instanceof Error ? error.message : String(error)}`);
+                failure = `${step.requestType}: ${error instanceof Error ? error.message : String(error)}`;
+                // No answer does not mean no change: count it from now.
+                if (affectsVideo(step)) lastVideoRestoreAt = now();
             }
+
+            if (step.requestType !== 'StopStream') {
+                if (failure) failures.push(failure);
+                continue;
+            }
+
+            // The answer to a StopStream is not the output being stopped. Nothing
+            // that follows is safe to send until the output is confirmed idle,
+            // and a status that cannot be read counts as not idle.
+            const { inactive, statusKnown } = await waitForStreamInactive(sendRequest, {
+                wait,
+                intervalMs: stopPollIntervalMs,
+                attempts: stopPollAttempts,
+                failClosed: true,
+            });
+            // OBS refusing to stop an output that is already idle is not a failure.
+            if (inactive) continue;
+            if (failure) failures.push(failure);
+            failures.push(statusKnown
+                ? `StopStream: output still active after ${stopPollIntervalMs * stopPollAttempts}ms`
+                : 'StopStream: stream state unknown');
+            for (const skipped of steps.slice(index + 1)) {
+                failures.push(`skipped ${skipped.requestType}`);
+            }
+            break;
         }
         rollbackSteps.length = 0;
         return failures;
@@ -536,10 +671,12 @@ export function createObsConfigurationTransaction(sendRequest) {
  *   { applied, reason }; stores the encoder's settings where OBS reads them.
  * @param {function} [opts.listEncoders] - async () => the ids of the video encoders
  *   OBS has, or null when that is not known.
+ * @param {object} [opts.transactionOptions] - timing seams for tests, passed to
+ *   createObsConfigurationTransaction().
  */
-export async function configureObsStream({ whipUrl, bearerToken, password = '', autoStart = false, videoSettings = null, encoderSettings = null, writeEncoderSettings = null, listEncoders = null }) {
+export async function configureObsStream({ whipUrl, bearerToken, password = '', autoStart = false, videoSettings = null, encoderSettings = null, writeEncoderSettings = null, listEncoders = null, transactionOptions = undefined }) {
     return withObsConnection(password, async (rawSendRequest, done) => {
-        const transaction = createObsConfigurationTransaction(rawSendRequest);
+        const transaction = createObsConfigurationTransaction(rawSendRequest, transactionOptions);
         const requestedAv1 = String(encoderSettings?.videoCodec || encoderSettings?.encoder || '').toLowerCase() === 'av1';
         const sendRequest = transaction.request;
         let finishing = false;
@@ -816,7 +953,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             // output; starting the encoder while that is in flight can crash OBS in
             // video_output_connect2 (access violation in obs.dll). A short settle
             // delay avoids that race.
-            await delay(1200);
+            await delay(VIDEO_SETTLE_MS);
             const startResult = await sendRequest('StartStream');
             if (startResult.requestStatus?.result === true) {
                 applied.push('streaming started');
