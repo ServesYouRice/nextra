@@ -178,3 +178,59 @@ export async function reclaimWithRetry({
         }
     }
 }
+
+/**
+ * The steps of a Start (or Resume) Sharing, in order. A failure is attributed
+ * to the step it happened in.
+ * - preflight: the TURN form and the preflight blockers
+ * - capture: the screen picker and installing its stream
+ * - room: creating the room, or taking over the reclaimed one
+ * - media: send transport and producers
+ * - obs: OBS auto-configuration
+ */
+export const START_PHASES = Object.freeze({
+    PREFLIGHT: 'preflight',
+    CAPTURE: 'capture',
+    ROOM: 'room',
+    MEDIA: 'media',
+    OBS: 'obs',
+});
+
+/**
+ * Whether a failed start ends the room (host-stopped and the full cleanup).
+ *
+ * A fresh room always is. A room reclaimed after a reload is the one viewers
+ * are waiting in, and until the start has taken it over nothing of it is in
+ * use: a preflight blocker or a cancelled or failed picker gives back only the
+ * capture, and the room, its token and the stored record stay for another
+ * Resume Sharing. From the room step on, a failure ends it as before.
+ *
+ * @param {{ resumed: boolean, phase: string | undefined }} failure
+ */
+export function shouldTeardownAfterStartFailure({ resumed, phase }) {
+    if (!resumed) return true;
+    return phase !== START_PHASES.PREFLIGHT && phase !== START_PHASES.CAPTURE;
+}
+
+/**
+ * The ingest mode of a room reclaimed after a reload, from the server's
+ * reclaim-host answer. The server keeps a room's mode for its lifetime.
+ *
+ * @param {{ ingestMode?: unknown } | null | undefined} room
+ * @returns {'obs' | 'browser'}
+ */
+export function recoveredRoomIngestMode(room) {
+    return room?.ingestMode === 'obs' ? 'obs' : 'browser';
+}
+
+/**
+ * Whether `ingestMode` differs from the mode of the reclaimed room that waits
+ * for Resume Sharing. Resuming reuses that room without a create-room, so the
+ * server would never hear of another mode; with no room waiting, any mode is
+ * fine for the next fresh room.
+ *
+ * @param {{ recoveredRoom: { ingestMode?: unknown } | null | undefined, ingestMode: string }} state
+ */
+export function isIngestModeMismatch({ recoveredRoom, ingestMode }) {
+    return recoveredRoom != null && recoveredRoomIngestMode(recoveredRoom) !== ingestMode;
+}

@@ -514,3 +514,53 @@ test('createCancellableWait: StrictMode\'s replayed effect cancels the first run
     assert.deepEqual(calls, { first: 1, second: 2 });
     assert.equal(timers.active(), 0);
 });
+
+test('shouldTeardownAfterStartFailure: a reclaimed room survives a failure before its capture is in use', async () => {
+    const { START_PHASES, shouldTeardownAfterStartFailure } = await loadRecovery();
+
+    // A preflight blocker, and a cancelled or failed picker (NotAllowedError,
+    // NotFoundError, a stream without a video track): nothing of the room is
+    // in use yet, so it stays for another Resume Sharing.
+    assert.equal(shouldTeardownAfterStartFailure({ resumed: true, phase: START_PHASES.PREFLIGHT }), false);
+    assert.equal(shouldTeardownAfterStartFailure({ resumed: true, phase: START_PHASES.CAPTURE }), false);
+});
+
+test('shouldTeardownAfterStartFailure: a reclaimed room in use, and every fresh room, are torn down', async () => {
+    const { START_PHASES, shouldTeardownAfterStartFailure } = await loadRecovery();
+
+    // Once the start has taken the reclaimed room over (transport, producers,
+    // OBS configuration), a failure ends it as before.
+    for (const phase of [START_PHASES.ROOM, START_PHASES.MEDIA, START_PHASES.OBS]) {
+        assert.equal(shouldTeardownAfterStartFailure({ resumed: true, phase }), true, phase);
+    }
+    // A fresh room keeps the full teardown in every phase.
+    for (const phase of Object.values(START_PHASES)) {
+        assert.equal(shouldTeardownAfterStartFailure({ resumed: false, phase }), true, phase);
+    }
+    // A phase it does not know is treated as in use.
+    assert.equal(shouldTeardownAfterStartFailure({ resumed: true, phase: 'publish' }), true);
+    assert.equal(shouldTeardownAfterStartFailure({ resumed: true, phase: undefined }), true);
+});
+
+test('recoveredRoomIngestMode reads the mode a reclaimed room was created with', async () => {
+    const { recoveredRoomIngestMode } = await loadRecovery();
+
+    assert.equal(recoveredRoomIngestMode({ code: 'ABCDEF', ingestMode: 'obs' }), 'obs');
+    assert.equal(recoveredRoomIngestMode({ code: 'ABCDEF', ingestMode: 'browser' }), 'browser');
+    // An older server that did not say: the same default the page adopts.
+    assert.equal(recoveredRoomIngestMode({ code: 'ABCDEF' }), 'browser');
+    assert.equal(recoveredRoomIngestMode({ ingestMode: 'OBS' }), 'browser');
+});
+
+test('isIngestModeMismatch: only a mode other than the waiting room\'s own is a mismatch', async () => {
+    const { isIngestModeMismatch } = await loadRecovery();
+    const browserRoom = { code: 'ABCDEF', hostToken: 't', ingestMode: 'browser' };
+
+    assert.equal(isIngestModeMismatch({ recoveredRoom: browserRoom, ingestMode: 'obs' }), true);
+    assert.equal(isIngestModeMismatch({ recoveredRoom: browserRoom, ingestMode: 'browser' }), false);
+    assert.equal(isIngestModeMismatch({ recoveredRoom: { ingestMode: 'obs' }, ingestMode: 'browser' }), true);
+    assert.equal(isIngestModeMismatch({ recoveredRoom: { ingestMode: 'obs' }, ingestMode: 'obs' }), false);
+    // No room waiting: any mode may be chosen for the next fresh room.
+    assert.equal(isIngestModeMismatch({ recoveredRoom: null, ingestMode: 'obs' }), false);
+    assert.equal(isIngestModeMismatch({ recoveredRoom: undefined, ingestMode: 'browser' }), false);
+});

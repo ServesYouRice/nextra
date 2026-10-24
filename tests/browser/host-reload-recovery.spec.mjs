@@ -225,3 +225,171 @@ test('leaving the host page during the pause between reclaim attempts sends no f
 
     expect(reclaims.length, 'attempts sent after the host view was left').toBe(sent);
 });
+
+// Browser capture the test steers: getDisplayMedia hands out a canvas stream,
+// or, while window.__captureMode is 'deny', rejects the way a cancelled or
+// dismissed picker does.
+async function installSteerableDisplayCapture(page) {
+    await page.addInitScript(() => {
+        window.__captureMode = 'canvas';
+        const createCapture = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 640;
+            canvas.height = 360;
+            const context = canvas.getContext('2d');
+            let frame = 0;
+            const draw = () => {
+                frame += 1;
+                context.fillStyle = `hsl(${frame % 360} 80% 45%)`;
+                context.fillRect(0, 0, canvas.width, canvas.height);
+                window.setTimeout(draw, 33);
+            };
+            draw();
+            return canvas.captureStream(30);
+        };
+        Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: {
+                getDisplayMedia: async () => {
+                    if (window.__captureMode === 'deny') {
+                        throw new DOMException('Permission denied', 'NotAllowedError');
+                    }
+                    return createCapture();
+                },
+            },
+        });
+    });
+}
+
+// Sits between the page's Socket.IO connection and the server and records the
+// name of every event the page emits. An event named in `fail` is answered by
+// the test with a failed acknowledgement instead of reaching the server.
+async function watchSocketEvents(page) {
+    const watch = { events: [], fail: {} };
+    await page.routeWebSocket(/\/socket\.io\//, (ws) => {
+        const upstream = ws.connectToServer();
+        ws.onMessage((raw) => {
+            const match = typeof raw === 'string' ? /^4(?:2|5\d+-)(\d*)\["([^"]+)"/.exec(raw) : null;
+            if (match) {
+                const [, ackId, event] = match;
+                watch.events.push(event);
+                if (watch.fail[event] && ackId) {
+                    ws.send(`43${ackId}${JSON.stringify([{ success: false, error: watch.fail[event] }])}`);
+                    return;
+                }
+            }
+            upstream.send(raw);
+        });
+    });
+    return watch;
+}
+
+async function activeRooms() {
+    const metrics = await (await fetch(`${server.baseUrl}/api/metrics`)).json();
+    return metrics.rooms.active;
+}
+
+// The host panel shows share links, not the code itself.
+async function readRoomCode(page) {
+    const localLink = await page.locator('.copy-field', { hasText: 'Local Link' })
+        .locator('.copy-field-value').innerText();
+    return localLink.trim().split('#watch/')[1];
+}
+
+// Shares with reload recovery on, reloads, and waits until the new page has
+// reclaimed the room and offers Resume Sharing. Returns the room code.
+async function shareAndReload(page) {
+    await page.goto(`${server.baseUrl}/#host`);
+    await page.getByLabel('Allow recovery after reload').check();
+    await page.getByRole('button', { name: 'Start Sharing' }).click();
+    await expect(page.getByText(/Streaming \(/)).toBeVisible();
+    const code = await readRoomCode(page);
+    expect(code).toMatch(/^[A-Z0-9]{6}$/);
+    await expect.poll(() => readRecoveryRecord(page)).not.toBeNull();
+
+    await page.reload();
+    await expect(page.getByRole('button', { name: 'Resume Sharing' })).toBeVisible({ timeout: 20_000 });
+    expect(await readRoomCode(page)).toBe(code);
+    return code;
+}
+
+test('cancelling the capture picker on Resume Sharing keeps the reclaimed room, and the next Resume Sharing streams in it', async ({ page }) => {
+    await installSteerableDisplayCapture(page);
+    const socketWatch = await watchSocketEvents(page);
+    const code = await shareAndReload(page);
+    expect(await activeRooms()).toBe(1);
+    socketWatch.events.length = 0;
+
+    await page.evaluate(() => { window.__captureMode = 'deny'; });
+    const resume = page.getByRole('button', { name: 'Resume Sharing' });
+    await resume.click();
+    await expect(page.getByRole('alert')).toContainText('Screen sharing was cancelled.');
+    // Long enough for a host-stopped to reach the server and end the room.
+    await page.waitForTimeout(1_000);
+
+    expect.soft(socketWatch.events, 'events the page sent after the cancelled picker').not.toContain('host-stopped');
+    expect.soft(await activeRooms(), 'rooms the server still holds').toBe(1);
+    expect.soft(JSON.parse(await readRecoveryRecord(page) || 'null'), 'the stored recovery record')
+        .toMatchObject({ code, ingestMode: 'browser' });
+    await expect.soft(page.getByRole('alert')).toContainText('Press Resume Sharing to try again.');
+    await expect.soft(resume).toBeEnabled();
+    expect.soft(await page.locator('video').evaluate((video) => video.srcObject), 'the preview after the cancel').toBeNull();
+
+    await page.evaluate(() => { window.__captureMode = 'canvas'; });
+    await resume.click();
+    await expect(page.getByText(/Streaming \(/)).toBeVisible();
+    expect(await readRoomCode(page), 'the room the second Resume Sharing streams in').toBe(code);
+    expect(socketWatch.events, 'a resumed room is not created again').not.toContain('create-room');
+    expect(await activeRooms()).toBe(1);
+
+    await page.getByRole('button', { name: 'Stop Sharing' }).click();
+    await expect.poll(activeRooms).toBe(0);
+});
+
+test('a resumed room whose media setup fails after the capture is still torn down', async ({ page }) => {
+    await installSteerableDisplayCapture(page);
+    const socketWatch = await watchSocketEvents(page);
+    await shareAndReload(page);
+    socketWatch.events.length = 0;
+    socketWatch.fail['create-send-transport'] = 'test: no send transport';
+
+    await page.getByRole('button', { name: 'Resume Sharing' }).click();
+
+    await expect(page.getByRole('alert')).toContainText('test: no send transport');
+    await expect(page.getByRole('button', { name: 'Start Sharing' })).toBeEnabled();
+    await expect.poll(() => socketWatch.events).toContain('host-stopped');
+    await expect.poll(activeRooms).toBe(0);
+    expect(await readRecoveryRecord(page)).toBeNull();
+});
+
+test('while a reclaimed browser room waits for Resume Sharing, its ingest mode cannot be switched to OBS', async ({ page }) => {
+    await installSteerableDisplayCapture(page);
+    const socketWatch = await watchSocketEvents(page);
+    const code = await shareAndReload(page);
+    socketWatch.events.length = 0;
+
+    const obsToggle = page.getByLabel('Use OBS (WHIP ingest)');
+    await expect.soft(obsToggle, 'the OBS toggle while the room waits').toBeDisabled();
+    await expect.soft(page.getByText('keeps the ingest mode it was created with').first()).toBeVisible();
+    await expect.soft(page.locator('#obsTryAv1'), 'the AV1 toggle while the room waits').toBeDisabled();
+
+    // Whatever reaches the handler (here a click on the toggle with its
+    // disabled attribute taken away) must not change the mode either.
+    await obsToggle.evaluate((input) => { input.disabled = false; });
+    await obsToggle.click();
+    await expect.soft(obsToggle, 'the OBS toggle after a click').not.toBeChecked();
+
+    await page.getByRole('button', { name: 'Resume Sharing' }).click();
+    await expect(page.getByText(/Streaming \(/)).toBeVisible();
+    // The recovered room is a browser-capture room: it streams the capture
+    // instead of following the OBS path in a room the server knows as browser.
+    await expect(page.getByText('Streaming via OBS')).toHaveCount(0);
+    expect(await page.locator('video').evaluate((video) => (
+        video.srcObject?.getVideoTracks().map((track) => track.readyState) ?? []
+    )), 'the capture the resumed room streams').toEqual(['live']);
+    expect(await readRoomCode(page)).toBe(code);
+    expect(socketWatch.events).not.toContain('create-room');
+
+    await page.getByRole('button', { name: 'Stop Sharing' }).click();
+    await expect.poll(activeRooms).toBe(0);
+});
