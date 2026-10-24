@@ -607,6 +607,13 @@ function affectsVideo(step) {
  * it (as the newest step at that point). Call the release function once the
  * change is undone; one that could not be undone stays journaled.
  *
+ * `registerUndo(label, undo)` journals a change that is no OBS request at all
+ * (a file, say) the same way: a rollback calls `undo()` in its place in the
+ * reverse order, and a call that throws or rejects is a failure reported as
+ * `<label>: <message>`. It also runs when the stop gate has ended the rollback
+ * for the OBS requests, which change nothing under a live output; a file
+ * cannot. It returns a release function like `hold`'s.
+ *
  * @param {Function} sendRequest
  * @param {object} [options] Timing seams for tests; the defaults are what runs.
  * @param {(ms: number) => Promise<void>} [options.delay]
@@ -747,8 +754,19 @@ export function createObsConfigurationTransaction(sendRequest, {
         const steps = [...rollbackSteps, ...unanswered].reverse();
         unanswered.clear();
         let lastVideoRestoreAt = null;
+        const runUndo = async (step) => {
+            try {
+                await step.undo();
+            } catch (error) {
+                failures.push(`${step.label}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        };
         for (let index = 0; index < steps.length; index += 1) {
             const step = steps[index];
+            if (step.undo) {
+                await runUndo(step);
+                continue;
+            }
             if (step.requestType === 'StartStream' && lastVideoRestoreAt !== null) {
                 // The video restore resets OBS's video pipeline; starting the
                 // encoder while that is in flight can crash OBS. Wait out
@@ -792,7 +810,8 @@ export function createObsConfigurationTransaction(sendRequest, {
                 ? `StopStream: output still active after ${stopPollIntervalMs * stopPollAttempts}ms`
                 : 'StopStream: stream state unknown');
             for (const skipped of steps.slice(index + 1)) {
-                failures.push(`skipped ${skipped.requestType}`);
+                if (skipped.undo) await runUndo(skipped);
+                else failures.push(`skipped ${skipped.requestType}`);
             }
             break;
         }
@@ -800,7 +819,7 @@ export function createObsConfigurationTransaction(sendRequest, {
         return failures;
     }
 
-    function hold(step) {
+    function journal(step) {
         // A change made now would land after, and outside, the restore.
         if (finished) {
             throw new Error('OBS configuration transaction is already complete.');
@@ -812,13 +831,73 @@ export function createObsConfigurationTransaction(sendRequest, {
         };
     }
 
+    function hold(step) {
+        return journal(step);
+    }
+
+    function registerUndo(label, undo) {
+        if (typeof undo !== 'function') {
+            throw new TypeError('registerUndo needs a function that undoes the change.');
+        }
+        return journal({ label, undo });
+    }
+
     function commit() {
         if (finished) return;
         finished = true;
         rollbackSteps.length = 0;
     }
 
-    return { request, hold, rollback, commit };
+    return { request, hold, registerUndo, rollback, commit };
+}
+
+const ENCODER_FILE_LABEL = 'encoder settings file';
+
+/**
+ * Store the encoder's settings through `writeEncoderSettings` and journal how
+ * to put the file back, so that a setup which fails later takes the file along
+ * with the OBS settings it restores.
+ *
+ * What the file held before is the server's to report: the answer to a
+ * successful write may carry `previous`, the settings that restore the file
+ * when they are passed to `writeEncoderSettings` again. Without it the file
+ * cannot be put back, and the rollback says so, so that nothing claims OBS was
+ * restored while the file was not. The same goes for a rollback that begins
+ * while the write is still under way (the deadline): what the file will hold
+ * is not known yet, and the write may land afterwards.
+ *
+ * @returns {Promise<boolean>} whether the settings were stored
+ */
+async function writeEncoderSettingsFile(transaction, writeEncoderSettings, { profileName, settings }) {
+    const releaseUnderWay = transaction.registerUndo(ENCODER_FILE_LABEL, async () => {
+        throw new Error('not restored (a write of it was still under way, so its previous contents are not known)');
+    });
+    let written = null;
+    try {
+        written = await writeEncoderSettings({ profileName, settings });
+    } catch {
+        // No answer is taken as no write, as it always was.
+    } finally {
+        releaseUnderWay();
+    }
+    if (written?.applied !== true) return false;
+
+    const { previous } = written;
+    const restorable = previous !== null && typeof previous === 'object'
+        && !Array.isArray(previous) && Object.keys(previous).length > 0;
+    transaction.registerUndo(ENCODER_FILE_LABEL, async () => {
+        if (!restorable) throw new Error('not restored (its previous contents are not known)');
+        let restored;
+        try {
+            restored = await writeEncoderSettings({ profileName, settings: previous });
+        } catch (error) {
+            throw new Error(`not restored (${error instanceof Error ? error.message : String(error)})`, { cause: error });
+        }
+        if (restored?.applied !== true) {
+            throw new Error(`not restored (${restored?.reason || 'the server did not apply it'})`);
+        }
+    });
+    return true;
 }
 
 /**
@@ -832,7 +911,10 @@ export function createObsConfigurationTransaction(sendRequest, {
  * @param {object} [opts.videoSettings] - { outputWidth, outputHeight, fpsNumerator, fpsDenominator }
  * @param {object} [opts.encoderSettings] - { bitrateKbps, keyframeIntervalSec, preset, encoder }
  * @param {function} [opts.writeEncoderSettings] - async ({ profileName, settings }) =>
- *   { applied, reason }; stores the encoder's settings where OBS reads them.
+ *   { applied, reason, previous }; stores the encoder's settings where OBS reads them.
+ *   `previous`, when the server can say what the file held before, is the settings
+ *   that put it back when passed to this function; without it a rollback reports
+ *   the file as not restored.
  * @param {function} [opts.listEncoders] - async () => the ids of the video encoders
  *   OBS has, or null when that is not known.
  * @param {object} [opts.transactionOptions] - timing seams for tests, passed to
@@ -1125,12 +1207,10 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
                     ? profileList.responseData?.currentProfileName
                     : '';
                 if (profileName) {
-                    try {
-                        const written = await writeEncoderSettings({ profileName, settings: encoderFileSettings });
-                        encoderSettingsApplied = written?.applied === true;
-                    } catch {
-                        encoderSettingsApplied = false;
-                    }
+                    encoderSettingsApplied = await writeEncoderSettingsFile(transaction, writeEncoderSettings, {
+                        profileName,
+                        settings: encoderFileSettings,
+                    });
                 }
             }
             if (encoderSettingsApplied) {
