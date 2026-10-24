@@ -925,6 +925,32 @@ test('a stop that timed out is not journaled, so a rollback does not report a st
     assert.deepEqual(obs.requestTypes(forward), []);
 });
 
+test('a stop held for a stream started outside the transaction is rolled back only while it is held', async () => {
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+
+    // Held: the rollback stops the stream and sees it idle before it restores.
+    const heldClock = fakeRollbackClock();
+    const held = rollbackObs(heldClock);
+    const holding = createObsConfigurationTransaction(held.sendRequest, { delay: heldClock.delay, now: heldClock.now });
+    await holding.request('SetStreamServiceSettings', { streamServiceType: 'whip_custom' });
+    holding.hold({ requestType: 'StopStream' });
+    const heldForward = held.log.length;
+    assert.deepEqual(await holding.rollback(), []);
+    assert.deepEqual(held.requestTypes(heldForward), ['StopStream', 'GetStreamStatus', 'SetStreamServiceSettings']);
+    // Nothing more is started outside a transaction that has ended.
+    assert.throws(() => holding.hold({ requestType: 'StopStream' }), /already complete/);
+
+    // Released: the stream was stopped and confirmed idle, so there is nothing to undo.
+    const releasedClock = fakeRollbackClock();
+    const released = rollbackObs(releasedClock);
+    const releasing = createObsConfigurationTransaction(released.sendRequest, { delay: releasedClock.delay, now: releasedClock.now });
+    await releasing.request('SetStreamServiceSettings', { streamServiceType: 'whip_custom' });
+    releasing.hold({ requestType: 'StopStream' })();
+    const releasedForward = released.log.length;
+    assert.deepEqual(await releasing.rollback(), []);
+    assert.deepEqual(released.requestTypes(releasedForward), ['SetStreamServiceSettings']);
+});
+
 test('a setup whose stream cannot be confirmed stopped says its rollback is incomplete and restores nothing', async () => {
     // OBS is live when the setup begins and stops when asked. The new stream
     // starts and is then reported stopped, which fails the setup. The rollback's
@@ -1143,10 +1169,45 @@ test('setup work still running when the deadline passes sends nothing while the 
         'StartStream',
         'GetStreamStatus',
         'StopStream',
+        // The test stream's stop was answered but not yet seen idle, so the
+        // rollback stops it and confirms that before it restores the service.
+        'StopStream',
+        'GetStreamStatus',
         'SetStreamServiceSettings:rtmp_custom',
         'close',
     ]);
     assert.match(result.message, /^OBS setup timed out after 150ms\. OBS settings were restored\.$/);
+});
+
+test('a deadline that passes while the test stream runs stops it before the rollback restores anything (VAL-116)', async () => {
+    // The deadline falls between the test stream's start and its first poll.
+    const obs = deadlineObs();
+    const { configureObsStream } = await obsWebSocketModule;
+
+    const result = await configureObsStream({
+        ...deadlineSetup,
+        transactionOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+        connectionOptions: connectionOptions(obs.WebSocketImpl, {
+            requestTimeoutMs: 5000,
+            transactionTimeoutMs: 50,
+            deadlineGraceMs: 3000,
+        }),
+    });
+
+    assert.deepEqual(obs.log, [
+        'GetStreamStatus',
+        'GetStreamServiceSettings',
+        'SetStreamServiceSettings:whip_custom',
+        'StartStream',
+        'StopStream',
+        'GetStreamStatus',
+        'SetStreamServiceSettings:rtmp_custom',
+        'close',
+    ]);
+    assert.deepEqual(result, {
+        success: false,
+        message: 'OBS setup timed out after 50ms. OBS settings were restored.',
+    });
 });
 
 test('a mutation still unanswered when the rollback begins is rolled back', async () => {
@@ -1584,6 +1645,217 @@ test('a stream that was simply live is stopped once, with no extra start', async
     });
     await configureWith(obs, { encoderSettings: nvencEncoderSettings, writeEncoderSettings: async () => ({ applied: true }) });
     assert.deepEqual(obs.order, ['StopStream', 'SetStreamServiceSettings']);
+});
+
+// A fake OBS for the encoder-reset test stream. OBS starts idle, a started
+// stream runs, profile parameters are stored, and every request is logged by
+// type. `stallStatus(log)` leaves a status poll unanswered when it returns
+// true (the poll is already the last entry of the log); `stop(n)` shapes the
+// nth StopStream: `refuse` is the comment OBS refuses it with, `staysActive`
+// keeps the output up, `activePolls` is how many polls still see it up before
+// it is down. `refuseStart` is the comment OBS refuses every StartStream with.
+function testStreamObs({ stallStatus = () => false, stop = () => ({}), refuseStart = null } = {}) {
+    const log = [];
+    const status = { outputActive: false, outputReconnecting: false };
+    const profile = new Map([['Output/Mode', 'Advanced'], ['AdvOut/Encoder', 'obs_nvenc_h264_tex']]);
+    let stops = 0;
+    let stillStopping = 0;
+    const WebSocketImpl = fakeObsWebSocket((ws, request) => {
+        const { requestType, requestData = {} } = request;
+        const key = `${requestData.parameterCategory}/${requestData.parameterName}`;
+        log.push(requestType);
+        const reply = (data, requestStatus) => queueMicrotask(() => ws.respond(request, data, requestStatus));
+        switch (requestType) {
+        case 'GetProfileParameter':
+            return reply({ parameterValue: profile.get(key) ?? '' });
+        case 'SetProfileParameter':
+            profile.set(key, requestData.parameterValue);
+            return reply();
+        case 'GetProfileList':
+            return reply({ currentProfileName: 'Streaming', profiles: ['Streaming'] });
+        case 'GetOutputList':
+            return reply({ outputs: [] });
+        case 'GetOutputSettings':
+            return reply({}, { result: false, comment: 'not found' });
+        case 'GetStreamStatus': {
+            if (stallStatus(log)) return undefined;
+            const answer = { ...status };
+            if (stillStopping > 0) {
+                stillStopping -= 1;
+                if (stillStopping === 0) status.outputActive = false;
+            }
+            return reply(answer);
+        }
+        case 'StartStream':
+            if (refuseStart) return reply({}, { result: false, comment: refuseStart });
+            status.outputActive = true;
+            return reply();
+        case 'StopStream': {
+            stops += 1;
+            const { refuse = null, staysActive = false, activePolls = 0 } = stop(stops);
+            if (activePolls > 0) stillStopping = activePolls;
+            else if (!staysActive) status.outputActive = false;
+            return reply({}, refuse ? { result: false, comment: refuse } : undefined);
+        }
+        case 'GetStreamServiceSettings':
+            return reply({ streamServiceType: 'rtmp_custom', streamServiceSettings: { server: 'rtmp://previous.example/live' } });
+        case 'GetVideoSettings':
+            return reply({ outputWidth: 2560, outputHeight: 1440 });
+        default:
+            return reply();
+        }
+    });
+    return { WebSocketImpl, log, status };
+}
+
+// Every StartStream in a request log is followed by a StopStream before the
+// next StartStream.
+function assertEveryStartStopped(log) {
+    log.forEach((requestType, index) => {
+        if (requestType !== 'StartStream') return;
+        const stop = log.indexOf('StopStream', index);
+        const nextStart = log.indexOf('StartStream', index + 1);
+        assert.ok(stop !== -1 && (nextStart === -1 || stop < nextStart),
+            `the StartStream at ${index} is not stopped: ${log.join(', ')}`);
+    });
+}
+
+const resetVideoSettings = { outputWidth: 1920, outputHeight: 1080, fpsNumerator: 30, fpsDenominator: 1 };
+
+test('a test stream whose status request fails mid-run is stopped before the setup fails (VAL-116)', async () => {
+    // The first poll after the test stream started gets no answer, and the
+    // stream is down only on the second poll after its stop. The test stream's
+    // own cleanup waits for that; the rollback's stop gate is shorter (as by
+    // default: 4 s against 2.5 s) and could not have confirmed it.
+    const obs = testStreamObs({
+        stallStatus: (log) => log.at(-2) === 'StartStream',
+        stop: () => ({ activePolls: 1 }),
+    });
+
+    const result = await configureWith(obs, {
+        videoSettings: resetVideoSettings,
+        connectionOptions: connectionOptions(obs.WebSocketImpl, { requestTimeoutMs: 50, transactionTimeoutMs: 5000 }),
+        transactionOptions: { stopPollIntervalMs: 1, stopPollAttempts: 1 },
+        encoderResetOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.message, 'OBS request GetStreamStatus timed out after 50ms.');
+    assertEveryStartStopped(obs.log);
+    // Stopped and seen idle, then the service is restored; the video is never touched.
+    assert.deepEqual(obs.log, [
+        'GetStreamStatus',
+        'GetStreamServiceSettings',
+        'SetStreamServiceSettings',
+        'StartStream',
+        'GetStreamStatus',
+        'StopStream',
+        'GetStreamStatus',
+        'GetStreamStatus',
+        'SetStreamServiceSettings',
+    ]);
+    assert.equal(obs.status.outputActive, false);
+});
+
+test('a test stream that cannot be confirmed stopped ends the setup before the video or encoder changes (VAL-116)', async () => {
+    const cases = [
+        { name: 'OBS refuses the stop', stop: { refuse: 'output busy', staysActive: true }, reason: /StopStream: output busy; output still active after 3ms/ },
+        { name: 'OBS accepts the stop and the output stays up', stop: { staysActive: true }, reason: /\(output still active after 3ms\)/ },
+    ];
+    for (const { name, stop, reason } of cases) {
+        const obs = testStreamObs({ stop: () => stop });
+        const written = [];
+
+        const result = await configureWith(obs, {
+            videoSettings: resetVideoSettings,
+            encoderSettings: nvencEncoderSettings,
+            writeEncoderSettings: async (payload) => {
+                written.push(payload);
+                return { applied: true };
+            },
+            transactionOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+            encoderResetOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+        });
+
+        for (const mutation of ['SetVideoSettings', 'SetProfileParameter', 'SetOutputSettings']) {
+            assert.equal(obs.log.includes(mutation), false, `${name}: ${mutation} sent while the test stream may still run`);
+        }
+        assert.deepEqual(written, [], name);
+        assert.equal(result.success, false, name);
+        assert.match(result.message, /test stream/, name);
+        assert.match(result.message, reason, name);
+        // The rollback stops it once more and, as the output stays up, restores nothing.
+        assert.match(result.message, /Rollback incomplete: .*output still active after 3ms; skipped SetStreamServiceSettings$/, name);
+    }
+});
+
+test('a stop OBS refuses for a test stream that is already down is not a failure (VAL-116)', async () => {
+    const obs = testStreamObs({ stop: () => ({ refuse: 'output not active' }) });
+
+    const result = await configureWith(obs, {
+        videoSettings: resetVideoSettings,
+        encoderResetOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+    });
+
+    assert.equal(result.success, true);
+    assert.match(result.message, /encoder reset/);
+    assert.deepEqual(obs.log.slice(obs.log.indexOf('StopStream')), ['StopStream', 'GetStreamStatus', 'GetVideoSettings', 'SetVideoSettings']);
+});
+
+test('a test stream OBS refuses to start is still stopped and seen idle before the video changes (VAL-116)', async () => {
+    const obs = testStreamObs({ refuseStart: 'not ready' });
+
+    const result = await configureWith(obs, {
+        videoSettings: resetVideoSettings,
+        encoderResetOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+    });
+
+    assert.equal(result.success, true);
+    assert.match(result.message, /could not run the short test stream/);
+    // Tried once: a refused start is not retried.
+    assert.deepEqual(obs.log.slice(obs.log.indexOf('StartStream')), ['StartStream', 'StopStream', 'GetStreamStatus', 'GetVideoSettings', 'SetVideoSettings']);
+});
+
+test('a setup that fails after a clean test stream does not stop the stream again in its rollback', async () => {
+    const obs = testStreamObs();
+
+    const result = await configureWith(obs, {
+        encoderSettings: { videoCodec: 'av1', obsEncoderIds: [] },
+        encoderResetOptions: { stopPollIntervalMs: 1, stopPollAttempts: 3 },
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.message, /No AV1 OBS encoders/);
+    assert.equal(obs.log.filter((requestType) => requestType === 'StopStream').length, 1);
+    assert.equal(obs.log.at(-1), 'SetStreamServiceSettings');
+});
+
+test('without auto-start an idle OBS still runs the encoder-reset test stream once, and stops it (section-84098610a3c7f7be0c63f39f/Q-001, VAL-117)', async () => {
+    // The decision: the reset is kept when autoStart is false; nothing is
+    // gated on the flag except the final start.
+    const obs = testStreamObs();
+
+    const result = await configureWith(obs, {
+        autoStart: false,
+        videoSettings: resetVideoSettings,
+    });
+
+    assert.equal(result.success, true);
+    assert.match(result.message, /encoder reset/);
+    assert.match(result.message, /Click "Start Streaming" in OBS\.$/);
+    assert.equal(obs.log.filter((requestType) => requestType === 'StartStream').length, 1);
+    assertEveryStartStopped(obs.log);
+    // The stop is confirmed (an idle status) before the video changes, and no
+    // start follows.
+    assert.deepEqual(obs.log.slice(obs.log.indexOf('StartStream')), [
+        'StartStream',
+        'GetStreamStatus',
+        'StopStream',
+        'GetStreamStatus',
+        'GetVideoSettings',
+        'SetVideoSettings',
+    ]);
+    assert.equal(obs.status.outputActive, false);
 });
 
 test('a changed encoder or output mode is reported as needing an OBS restart', async () => {
