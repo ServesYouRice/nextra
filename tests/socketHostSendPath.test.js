@@ -85,13 +85,15 @@ function createHarness(label) {
             closed: false,
             closeCalls: 0,
             producers: [],
+            observer: new EventEmitter(),
         });
+        // Like mediasoup's, the transport reports its close through the observer only.
         transport.close = () => {
             transport.closeCalls += 1;
             if (transport.closed) return;
             transport.closed = true;
             transport.producers.forEach((producer) => producer.transportClosed());
-            transport.emit('close');
+            transport.observer.emit('close');
         };
         transport.connect = async () => {};
         transport.produce = async (options) => {

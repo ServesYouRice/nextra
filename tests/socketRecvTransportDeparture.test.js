@@ -50,12 +50,14 @@ function createHarness(label) {
             purpose: options?.purpose,
             closed: false,
             closeCalls: 0,
+            observer: new EventEmitter(),
         });
+        // Like mediasoup's, the transport reports its close through the observer only.
         transport.close = () => {
             transport.closeCalls += 1;
             if (transport.closed) return;
             transport.closed = true;
-            transport.emit('close');
+            transport.observer.emit('close');
         };
         state.transports.push(transport);
         const result = {
