@@ -301,6 +301,61 @@ test('bootstrap chunks put in front are appended before the live ones, in order'
     assert.equal(queue.length, 0);
 });
 
+// A later viewer's bootstrap is the server's snapshot of the generation so far,
+// up to the byte ceiling itself. What can fall behind is the live media that
+// arrives while the snapshot is appended, so that keeps the whole allowance.
+test('a bootstrap in front is counted apart from the live limits, which still apply in full while it is appended', async () => {
+    const { module, queue, sourceBuffer, failures } = await setup({ maxChunks: 3, maxBytes: 100 });
+    queue.prepend([chunk(100, 1)]);
+    queue.pump();
+    for (let i = 0; i < 3; i += 1) queue.enqueue(chunk(33, 2));
+    assert.deepEqual(failures, [], 'a bootstrap at the ceiling leaves the live chunks their limits');
+    assert.equal(queue.length, 4);
+    assert.equal(queue.bytes, 199);
+    assert.equal(sourceBuffer.appended.length, 1, 'the bootstrap is being appended');
+
+    assert.equal(queue.enqueue(chunk(1, 3)), false, 'a fourth live chunk is past the chunk limit');
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].message, module.RELAY_FELL_BEHIND_MESSAGE);
+});
+
+test('once its bootstrap is appended, a queue has the same live limits as any other', async () => {
+    const { queue, sourceBuffer, failures } = await setup({ maxChunks: 3, maxBytes: 100 });
+    queue.prepend([chunk(100, 1)]);
+    queue.pump();
+    queue.enqueue(chunk(50, 2));
+    sourceBuffer.finish();
+    assert.equal(queue.length, 1, 'the live chunk, now being appended');
+    assert.equal(queue.bytes, 50);
+    assert.equal(queue.enqueue(chunk(50, 3)), true, 'at the byte limit is still fine');
+    assert.equal(queue.enqueue(chunk(1, 4)), false);
+    assert.equal(failures.length, 1);
+});
+
+// lib/socket.js never sends a bootstrap above the ceiling; one that is would
+// otherwise sit outside every limit.
+test('a bootstrap larger than the byte ceiling ends relay playback at once', async () => {
+    const { module, queue, sourceBuffer, failures } = await setup({ maxBytes: 100 });
+    assert.equal(queue.prepend([chunk(60, 1), chunk(41, 2)]), false);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].message, module.RELAY_FELL_BEHIND_MESSAGE);
+    queue.pump();
+    assert.deepEqual(sourceBuffer.appended, []);
+    assert.equal(queue.length, 0);
+});
+
+// tests/socketRelayBootstrap.test.js holds the server's bootstrap ceiling to
+// RELAY_QUEUE_MAX_BYTES, so WatchView must size its queue with these limits.
+test('WatchView sizes its relay queue with the limits exported next to the queue', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'WatchView.jsx'), 'utf8');
+    const queueImport = /import \{([^}]*)\} from '\.\/lib\/relayAppendQueue\.mjs';/.exec(source);
+    assert.ok(queueImport, 'WatchView imports relayAppendQueue.mjs');
+    assert.match(queueImport[1], /\bRELAY_QUEUE_MAX_CHUNKS as MAX_QUEUE_CHUNKS\b/);
+    assert.match(queueImport[1], /\bRELAY_QUEUE_MAX_BYTES as MAX_QUEUE_BYTES\b/);
+    assert.doesNotMatch(source, /const MAX_QUEUE_(CHUNKS|BYTES)\b/, 'no limits of its own');
+    assert.match(source, /createRelayAppendQueue\(\{\s*maxChunks: MAX_QUEUE_CHUNKS,\s*maxBytes: MAX_QUEUE_BYTES,/);
+});
+
 test('a closed queue, or one whose attempt is no longer current, ignores late events and reports nothing', async () => {
     const closed = await setup();
     closed.queue.enqueue(chunk(10));
