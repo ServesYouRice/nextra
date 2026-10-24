@@ -810,3 +810,258 @@ test('VAL-093: stop() during reset recovery clears the retry and timeout timers'
     assert.deepEqual(silent.errors, []);
     assert.equal(silent.player.getState().state, 'stopped');
 });
+
+// Makes every later append to this SourceBuffer throw, as MSE does once the
+// video element has an error or the SourceBuffer has left its MediaSource.
+function breakAppends(sourceBuffer) {
+    const broken = { calls: 0 };
+    sourceBuffer.appendBuffer = () => {
+        broken.calls += 1;
+        throw new DOMException('The SourceBuffer cannot take more data', 'InvalidStateError');
+    };
+    return broken;
+}
+
+function captureConsole(t) {
+    const errorLog = t.mock.method(console, 'error', () => {});
+    t.mock.method(console, 'warn', () => {});
+    t.mock.method(console, 'log', () => {});
+    return { errorCount: () => errorLog.mock.callCount() };
+}
+
+function sendFragment(socket, generation, sequence) {
+    socket.serverEmit('media-chunk', { generation, sequence, chunk: Uint8Array.of(sequence % 255) });
+}
+
+// Answers the latest get-media-init with generation `generation` and opens the
+// MediaSource it builds, which takes the init segment.
+async function answerRecovery(socket, generation) {
+    const mediaSources = FakeMediaSource.instances.length;
+    socket.pending('get-media-init').at(-1).ack(initAnswer(generation));
+    assert.equal(FakeMediaSource.instances.length, mediaSources + 1, 'the answer builds a new MediaSource');
+    const rebuilt = FakeMediaSource.instances.at(-1);
+    rebuilt.open();
+    await flushTasks();
+    return { mediaSource: rebuilt, sourceBuffer: rebuilt.sourceBuffers[0] };
+}
+
+test('VAL-094: a failed append is not reported again for every fragment, and the broken SourceBuffer gets nothing more', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const logs = captureConsole(t);
+    const { player, socket, mediaSource, sourceBuffer, errors } = await startHeldPlaying(t);
+
+    const broken = breakAppends(sourceBuffer);
+    for (let sequence = 2; sequence <= 12; sequence += 1) sendFragment(socket, 1, sequence);
+    await flushTasks();
+
+    assert.deepEqual(errors, [], 'one failure, which the player recovers from, is not an error per fragment');
+    assert.equal(logs.errorCount(), 0);
+    assert.equal(broken.calls, 1, 'nothing more is appended to the SourceBuffer that failed');
+    assert.equal(socket.pending('get-media-init').length, 2, 'the player asks once for a fresh init segment');
+    assert.deepEqual(mediaSource.removedSourceBuffers, [sourceBuffer], 'the broken SourceBuffer is let go');
+    assert.equal(player.getState().state, 'buffering');
+    assert.equal(player.getState().queueLength, 0);
+});
+
+test('VAL-094: recovery takes a fresh init segment of the same generation and appends to the new SourceBuffer', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const { player, socket, mediaSource, sourceBuffer, states, errors } = await startHeldPlaying(t);
+
+    const broken = breakAppends(sourceBuffer);
+    sendFragment(socket, 1, 2);
+    await flushTasks();
+    assert.equal(socket.pending('get-media-init').length, 2, 'the failure asks for a fresh init segment');
+
+    // The relay is still on generation 1: its init must not be taken for a duplicate.
+    const rebuilt = await answerRecovery(socket, 1);
+    assert.equal(FakeMediaSource.instances.length, 2, 'the same generation is accepted after the reset');
+    assert.equal(player.getState().generation, 1);
+
+    // The new src detaches the old MediaSource, which closes: the player's own doing.
+    mediaSource.readyState = 'closed';
+    mediaSource.dispatch('sourceclose');
+    assert.equal(socket.pending('get-media-init').length, 2, 'the old MediaSource closing is no new failure');
+
+    socket.serverEmit('media-chunk', { generation: 1, sequence: 3, keyframeStart: true, chunk: Uint8Array.of(6, 7) });
+    await flushTasks();
+    assert.deepEqual(rebuilt.sourceBuffer.appended.map((bytes) => [...bytes]), [[1, 2], [6, 7]]);
+    assert.equal(broken.calls, 1);
+    assert.deepEqual(errors, []);
+    assert.equal(states.at(-1), 'playing');
+
+    // Recovered: nothing is left to time out.
+    t.mock.timers.tick(120_000);
+    assert.equal(socket.pending('get-media-init').length, 2);
+    assert.equal(socket.pending('fallback-consume-start').length, 0);
+    assert.deepEqual(errors, []);
+});
+
+test('VAL-094: failures beyond the recovery budget end in exactly one error', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const logs = captureConsole(t);
+    const context = await startHeldPlaying(t);
+    const { player, socket, video, states, errors } = context;
+
+    // Every rebuilt SourceBuffer takes its init segment and then fails on the
+    // first fragment: three recoveries, then the fourth failure is final.
+    let { sourceBuffer } = context;
+    let sequence = 1;
+    const brokenBuffers = [];
+    for (let failure = 1; failure <= 4; failure += 1) {
+        brokenBuffers.push(breakAppends(sourceBuffer));
+        sequence += 1;
+        sendFragment(socket, 1, sequence);
+        await flushTasks();
+        if (failure === 4) break;
+        assert.deepEqual(errors, [], `failure ${failure} is recovered, not reported`);
+        assert.equal(player.getState().state, 'buffering');
+        ({ sourceBuffer } = await answerRecovery(socket, 1));
+        assert.equal(sourceBuffer.appended.length, 1, 'the rebuilt SourceBuffer took its init segment');
+    }
+
+    assert.deepEqual(errors, ['SourceBuffer append failed']);
+    assert.equal(logs.errorCount(), 1);
+    assert.deepEqual(states.filter((state) => state === 'error'), ['error']);
+    assert.equal(player.getState().state, 'error');
+    assert.equal(socket.pending('get-media-init').length, 4, 'the first request and three recoveries');
+
+    // After the error: no recovery, no append, no second report.
+    const last = FakeMediaSource.instances.at(-1);
+    sendFragment(socket, 1, sequence + 1);
+    last.readyState = 'closed';
+    last.dispatch('sourceclose');
+    video.dispatch('error');
+    await flushTasks();
+    t.mock.timers.tick(120_000);
+    assert.equal(socket.pending('get-media-init').length, 4);
+    assert.equal(socket.pending('fallback-consume-start').length, 0);
+    assert.deepEqual(errors, ['SourceBuffer append failed']);
+    assert.equal(logs.errorCount(), 1);
+    assert.deepEqual(brokenBuffers.map((broken) => broken.calls), [1, 1, 1, 1]);
+});
+
+test('VAL-094: media appended after a recovery ends the failure episode and renews the budget', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const context = await startHeldPlaying(t);
+    const { player, socket, errors } = context;
+
+    // Four failures, each followed by a recovery in which media went in again:
+    // four separate episodes, none of which used up the budget.
+    let { sourceBuffer } = context;
+    let sequence = 1;
+    for (let failure = 1; failure <= 4; failure += 1) {
+        breakAppends(sourceBuffer);
+        sequence += 1;
+        sendFragment(socket, 1, sequence);
+        await flushTasks();
+        ({ sourceBuffer } = await answerRecovery(socket, 1));
+        sequence += 1;
+        sendFragment(socket, 1, sequence);
+        await flushTasks();
+        assert.equal(sourceBuffer.appended.length, 2, `media went in after recovery ${failure}`);
+    }
+    assert.deepEqual(errors, []);
+    assert.notEqual(player.getState().state, 'error');
+});
+
+test('VAL-094: a MediaSource that closes under the player is recovered, and a closed one the player let go of is not', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const { player, socket, mediaSource, errors } = await startHeldPlaying(t);
+    assert.equal(mediaSource.listenerCount('sourceclose'), 1, 'the player listens for its MediaSource closing');
+
+    // The browser detaches the MediaSource from the video element.
+    mediaSource.readyState = 'closed';
+    mediaSource.dispatch('sourceclose');
+    assert.equal(socket.pending('get-media-init').length, 2, 'the close asks for a fresh init segment');
+    assert.equal(player.getState().state, 'buffering');
+    assert.equal(player.getState().generation, -1);
+    assert.equal(mediaSource.listenerCount('sourceclose'), 0, 'the old MediaSource is let go');
+
+    // The relay pushes generation 1 again: a new MediaSource is built for it.
+    socket.serverEmit('media-init', { generation: 1, mimeType: MIME, initSegment: Uint8Array.of(1, 2) });
+    assert.equal(FakeMediaSource.instances.length, 2);
+    const rebuilt = FakeMediaSource.instances[1];
+    rebuilt.open();
+    await flushTasks();
+    sendFragment(socket, 1, 2);
+    await flushTasks();
+    assert.equal(rebuilt.sourceBuffers[0].appended.length, 2);
+
+    // The close the player itself causes when it stops is no failure.
+    player.stop();
+    assert.equal(rebuilt.listenerCount('sourceclose'), 0, 'stop() removes the sourceclose listener');
+    rebuilt.readyState = 'closed';
+    rebuilt.dispatch('sourceclose');
+    assert.equal(socket.pending('get-media-init').length, 2);
+    assert.equal(player.getState().state, 'stopped');
+    assert.deepEqual(errors, []);
+});
+
+test('VAL-094: a video element error is recovered the same way, and stop() removes its listener', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const { player, socket, video, sourceBuffer, errors } = await startHeldPlaying(t);
+    assert.equal(video.listenerCount('error'), 1, 'the player listens for the video element failing');
+
+    // A decoder failure: the element reports an error, and the next append would throw.
+    const broken = breakAppends(sourceBuffer);
+    video.dispatch('error');
+    sendFragment(socket, 1, 2);
+    await flushTasks();
+    assert.equal(socket.pending('get-media-init').length, 2, 'the error asks for a fresh init segment');
+    assert.equal(broken.calls, 0, 'nothing is appended to the failed SourceBuffer');
+    assert.equal(player.getState().state, 'buffering');
+    assert.equal(video.listenerCount('error'), 0, 'the listener goes with the MediaSource it was for');
+
+    const rebuilt = await answerRecovery(socket, 1);
+    assert.equal(video.listenerCount('error'), 1);
+    sendFragment(socket, 1, 3);
+    await flushTasks();
+    assert.equal(rebuilt.sourceBuffer.appended.length, 2);
+
+    player.stop();
+    assert.equal(video.listenerCount('error'), 0, 'stop() removes the video error listener');
+    video.dispatch('error');
+    assert.equal(socket.pending('get-media-init').length, 2);
+    assert.equal(player.getState().state, 'stopped');
+    assert.deepEqual(errors, []);
+});
+
+test('VAL-094: a full SourceBuffer (QuotaExceededError) is still trimmed and retried, not treated as a failure', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const { player, socket, video, sourceBuffer, errors } = await startHeldPlaying(t);
+    video.currentTime = 10;
+    sourceBuffer.buffered = timeRanges([[0, 10.5]]);
+
+    const append = sourceBuffer.appendBuffer.bind(sourceBuffer);
+    let quotaErrors = 1;
+    sourceBuffer.appendBuffer = (value) => {
+        if (quotaErrors > 0) {
+            quotaErrors -= 1;
+            throw new DOMException('The SourceBuffer is full', 'QuotaExceededError');
+        }
+        append(value);
+    };
+    sendFragment(socket, 1, 2);
+    await flushTasks();
+    assert.deepEqual(sourceBuffer.removed, [{ start: 0, end: 4 }], 'the back buffer is trimmed');
+    assert.equal(player.getState().queueLength, 1, 'the fragment waits for the retry');
+
+    t.mock.timers.tick(100);
+    await flushTasks();
+    assert.deepEqual([...sourceBuffer.appended.at(-1)], [2]);
+    assert.equal(socket.pending('get-media-init').length, 1, 'no recovery');
+    assert.deepEqual(errors, []);
+    assert.notEqual(player.getState().state, 'error');
+});

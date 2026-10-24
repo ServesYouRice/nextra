@@ -43,7 +43,7 @@ const MAX_INIT_TIMEOUT_RETRIES = 3;
  * @param {object} opts.socket - Socket.IO client instance
  * @param {string} opts.roomCode
  * @param {function} [opts.onStateChange] - ('connecting'|'buffering'|'playing'|'error'|'stopped')
- * @param {function} [opts.onError] - (message, err)
+ * @param {function} [opts.onError] - (message, err): the player gave up; its state turns 'error'
  * @returns {{ start, stop, getState }}
  */
 export function createFmp4RelayPlayer(opts) {
@@ -78,6 +78,14 @@ export function createFmp4RelayPlayer(opts) {
     // the latest request: stop(), a newer request and a terminal error all move
     // the count on, so an answer already in flight cannot act afterwards.
     let initRequestEpoch = 0;
+    // Rebuilds since media last went into a SourceBuffer (see
+    // handleSourceBufferFailure). Media appended to a rebuilt SourceBuffer ends
+    // the failure episode and sets this back to 0.
+    let failureRecoveries = 0;
+    // The append in progress is media, not an init segment (which alone does
+    // not show that a rebuilt SourceBuffer works).
+    let appendingMedia = false;
+    const initSegments = new WeakSet();
     let lastQueueDropWarnAt = 0;
     // The cushion of buffered media kept ahead of the playhead; see relayLiveSync.
     let targetSeconds = TARGET_START_SECONDS;
@@ -143,19 +151,48 @@ export function createFmp4RelayPlayer(opts) {
         const item = appendQueue.shift();
         queueBytes -= item.byteLength;
 
+        appendingMedia = !initSegments.has(item);
         try {
             sourceBuffer.appendBuffer(item);
         } catch (err) {
             isAppending = false;
+            appendingMedia = false;
             if (err.name === 'QuotaExceededError') {
                 trimBuffer();
                 appendQueue.unshift(item);
                 queueBytes += item.byteLength;
                 setTimeout(processQueue, 100);
             } else {
-                handleError('SourceBuffer append failed', err);
+                handleSourceBufferFailure('SourceBuffer append failed', err);
             }
         }
+    }
+
+    /**
+     * The SourceBuffer is broken: an append threw something other than
+     * QuotaExceededError (a full buffer, handled above), the SourceBuffer
+     * reported an error, the MediaSource closed under the player, or the video
+     * element failed. Per MSE every later append to it throws InvalidStateError.
+     *
+     * The broken MediaSource is let go at once, with the queue and the
+     * generation, so nothing more is queued for it or appended to it, and the
+     * player rebuilds from a fresh init segment. A failure episode lasts until
+     * media goes into a rebuilt SourceBuffer. It is rebuilt at most
+     * MAX_INIT_TIMEOUT_RETRIES times; the failure after that is reported once,
+     * as the player's error.
+     */
+    function handleSourceBufferFailure(msg, err) {
+        if (state === 'stopped') return;
+        if (failureRecoveries < MAX_INIT_TIMEOUT_RETRIES) {
+            failureRecoveries += 1;
+            console.warn(`[fmp4-player] ${msg}; rebuilding from a fresh init segment (${failureRecoveries}/${MAX_INIT_TIMEOUT_RETRIES})`, err || '');
+            resetAndRequestInit();
+            return;
+        }
+        cleanupMediaSource();
+        currentGeneration = -1;
+        lastSequence = 0;
+        handleError(msg, err);
     }
 
     function resetAndRequestInit() {
@@ -499,7 +536,9 @@ export function createFmp4RelayPlayer(opts) {
             lastStallAt = 0;
             lastSwitchAt = Date.now();
             clearQueue();
-            enqueue(toUint8Array(data.initSegment));
+            const initBuffer = toUint8Array(data.initSegment);
+            initSegments.add(initBuffer);
+            enqueue(initBuffer);
             processQueue();
             return;
         }
@@ -530,6 +569,8 @@ export function createFmp4RelayPlayer(opts) {
 
     function handleMediaChunk(data) {
         // data: { format, generation, tier, sequence, keyframeStart, chunk }
+        // After a SourceBuffer failure the player is on no generation until a
+        // fresh init arrives, so the failed one's fragments end here.
         if (data.generation !== currentGeneration) return;
         if (typeof data.sequence === 'number' && data.sequence <= lastSequence) return;
         if (typeof data.sequence === 'number') {
@@ -592,14 +633,18 @@ export function createFmp4RelayPlayer(opts) {
                 const onUpdateEnd = () => {
                     if (sourceBuffer !== currentSourceBuffer) return;
                     isAppending = false;
+                    // Media went in: whatever failed before, this SourceBuffer works.
+                    if (appendingMedia) {
+                        appendingMedia = false;
+                        failureRecoveries = 0;
+                    }
                     processQueue();
                     maybeStartPlayback();
                 };
 
                 const onSourceBufferError = () => {
                     if (sourceBuffer !== currentSourceBuffer) return;
-                    console.error('[fmp4-player] SourceBuffer error, attempting recovery');
-                    resetAndRequestInit();
+                    handleSourceBufferFailure('SourceBuffer error');
                 };
 
                 currentSourceBuffer.addEventListener('updateend', onUpdateEnd);
@@ -632,6 +677,7 @@ export function createFmp4RelayPlayer(opts) {
                 // Append init segment first
                 setState('buffering');
                 const initBuffer = toUint8Array(initSegment);
+                initSegments.add(initBuffer);
                 appendQueue.unshift(initBuffer);
                 queueBytes += initBuffer.byteLength;
                 processQueue();
@@ -640,9 +686,27 @@ export function createFmp4RelayPlayer(opts) {
             }
         };
 
+        // A MediaSource the player has let go of (stop(), or a rebuild) closes
+        // because of that, and its video element is loading something else.
+        // cleanupMediaSource removes these listeners before it tears anything
+        // down, and they check the MediaSource is still the player's.
+        const isPlayersMediaSource = () => state !== 'stopped' && mediaSource === currentMediaSource;
+        const onSourceClose = () => {
+            if (!isPlayersMediaSource()) return;
+            handleSourceBufferFailure('MediaSource closed unexpectedly');
+        };
+        const onVideoError = () => {
+            if (!isPlayersMediaSource()) return;
+            handleSourceBufferFailure('Video element error', videoElement.error);
+        };
+
         currentMediaSource.addEventListener('sourceopen', onSourceOpen);
+        currentMediaSource.addEventListener('sourceclose', onSourceClose);
+        videoElement.addEventListener('error', onVideoError);
         mediaSourceCleanupFns.push(() => {
             currentMediaSource.removeEventListener('sourceopen', onSourceOpen);
+            currentMediaSource.removeEventListener('sourceclose', onSourceClose);
+            try { videoElement.removeEventListener('error', onVideoError); } catch { }
             URL.revokeObjectURL(objectUrl);
         });
     }
@@ -652,6 +716,7 @@ export function createFmp4RelayPlayer(opts) {
         clearBufferingTimer();
         clearQueue();
         isAppending = false;
+        appendingMedia = false;
         started = false;
         sequenceMode = false;
         setPlaybackRate(1);
@@ -713,6 +778,7 @@ export function createFmp4RelayPlayer(opts) {
         // Answers to init requests still in flight must find a player that moved on.
         initRequestEpoch += 1;
         initTimeoutRetries = 0;
+        failureRecoveries = 0;
         cleanupFns.forEach(fn => { try { fn(); } catch { } });
         cleanupFns = [];
         cleanupMediaSource();
