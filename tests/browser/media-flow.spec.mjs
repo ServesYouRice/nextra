@@ -122,8 +122,15 @@ async function installViewerSocketControl(page) {
     });
 }
 
-async function joinAndWatchRelay(viewerPage, code) {
-    await viewerPage.goto(`https://nextra.cloudflare.test:3210/#watch/${code}`);
+// The server's port, read from the baseURL playwright.config.mjs sets from
+// NEXTRA_E2E_PORT, so a run on another port needs no change here.
+function serverPort(testInfo) {
+    const url = new URL(testInfo.project.use.baseURL);
+    return Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+}
+
+async function joinAndWatchRelay(viewerPage, code, testInfo) {
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
     await viewerPage.getByRole('button', { name: 'Watch Stream' }).click();
     await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible();
@@ -210,10 +217,10 @@ async function getOnlyRoom(request) {
     return metrics.rooms.list.length === 1 ? metrics.rooms.list[0] : null;
 }
 
-async function measureLiveWebRtcTopology() {
+async function measureLiveWebRtcTopology(testInfo) {
     const { stdout } = await execFileAsync(process.execPath, [
         'scripts/benchmark-runtime.js',
-        '--url=https://127.0.0.1:3210',
+        `--url=${testInfo.project.use.baseURL}`,
         '--scenario=webrtc',
         '--label=e2e-360p30-one-viewer',
         '--allow-insecure-tls',
@@ -250,7 +257,7 @@ test('Host preflight blocks an unavailable Browser capture path before room allo
         .toMatchObject({ rooms: { active: 0 } });
 });
 
-test('host and viewer receive decoded frames through direct WebRTC and can rejoin', async ({ browser, request }) => {
+test('host and viewer receive decoded frames through direct WebRTC and can rejoin', async ({ browser, request }, testInfo) => {
     const hostContext = await browser.newContext();
     const viewerContext = await browser.newContext();
     const hostPage = await hostContext.newPage();
@@ -263,7 +270,7 @@ test('host and viewer receive decoded frames through direct WebRTC and can rejoi
     await expect(viewerPage.getByRole('button', { name: 'Join Room' })).toBeVisible();
     await joinAndWatch(viewerPage, code);
 
-    const measurement = await measureLiveWebRtcTopology();
+    const measurement = await measureLiveWebRtcTopology(testInfo);
     expect(measurement.pass).toBe(true);
     expect(measurement.measurement.scenario).toBe('webrtc');
     expect(measurement.topology.producers).toBeGreaterThanOrEqual(1);
@@ -486,7 +493,7 @@ test('reload recovery keeps the room code and concurrent stop/unmount is idempot
     await context.close();
 });
 
-test('delayed relay-first viewers select one fresh recorder generation and clean up after rejoin', async ({ browser, request }) => {
+test('delayed relay-first viewers select one fresh recorder generation and clean up after rejoin', async ({ browser, request }, testInfo) => {
     const hostContext = await browser.newContext();
     const firstViewerContext = await browser.newContext();
     const secondViewerContext = await browser.newContext();
@@ -499,12 +506,12 @@ test('delayed relay-first viewers select one fresh recorder generation and clean
     const prewarmGeneration = (await getOnlyRoom(request)).mediaGeneration;
     await hostPage.waitForTimeout(2_000);
 
-    await joinAndWatchRelay(firstViewerPage, code);
+    await joinAndWatchRelay(firstViewerPage, code, testInfo);
     await expect.poll(async () => (await getOnlyRoom(request))?.mediaGeneration || 0)
         .toBeGreaterThan(prewarmGeneration);
     const firstAudienceGeneration = (await getOnlyRoom(request)).mediaGeneration;
 
-    await joinAndWatchRelay(secondViewerPage, code);
+    await joinAndWatchRelay(secondViewerPage, code, testInfo);
     await secondViewerPage.waitForTimeout(1_000);
     expect((await getOnlyRoom(request)).mediaGeneration).toBe(firstAudienceGeneration);
 
@@ -515,7 +522,7 @@ test('delayed relay-first viewers select one fresh recorder generation and clean
         return room ? room.mediaGeneration : 'room-missing';
     }).toBeNull();
 
-    await joinAndWatchRelay(firstViewerPage, code);
+    await joinAndWatchRelay(firstViewerPage, code, testInfo);
     await expect.poll(async () => (await getOnlyRoom(request))?.mediaGeneration || 0)
         .toBeGreaterThan(firstAudienceGeneration);
 
@@ -539,7 +546,7 @@ test('delayed relay-first viewers select one fresh recorder generation and clean
 // The host falls back from MP4 to VP8 when the server cannot frame its MP4
 // (relay-mp4-failed) or the MP4 recorder fails; the viewer's SourceBuffer was
 // made for MP4.
-test('a playing relay viewer follows the host recorder from MP4 to VP8', async ({ browser, request }) => {
+test('a playing relay viewer follows the host recorder from MP4 to VP8', async ({ browser, request }, testInfo) => {
     const hostContext = await browser.newContext();
     const viewerContext = await browser.newContext();
     const hostPage = await hostContext.newPage();
@@ -547,7 +554,7 @@ test('a playing relay viewer follows the host recorder from MP4 to VP8', async (
     await trackHostRecorders(hostPage);
 
     const code = await startHost(hostPage);
-    await joinAndWatchRelay(viewerPage, code);
+    await joinAndWatchRelay(viewerPage, code, testInfo);
     const relayMimeType = () => hostPage.evaluate(() => window.__nextraRecorders.at(-1)?.mimeType || '');
     test.skip(!(await relayMimeType()).startsWith('video/mp4'), 'the host browser does not record MP4');
     await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
@@ -574,7 +581,7 @@ test('a playing relay viewer follows the host recorder from MP4 to VP8', async (
 // MediaRecorder timeslices end inside a WebM element, so the chunk after one
 // finishes it. A viewer that is behind still holds old-generation chunks when
 // the new generation's init arrives, and drops them.
-test('a relay viewer that is behind keeps playing across a VP8 recorder restart', async ({ browser, request }) => {
+test('a relay viewer that is behind keeps playing across a VP8 recorder restart', async ({ browser, request }, testInfo) => {
     const hostContext = await browser.newContext();
     const viewerContext = await browser.newContext();
     const hostPage = await hostContext.newPage();
@@ -583,7 +590,7 @@ test('a relay viewer that is behind keeps playing across a VP8 recorder restart'
     await installHeldWebSocket(viewerPage);
 
     const code = await startHost(hostPage);
-    await joinAndWatchRelay(viewerPage, code);
+    await joinAndWatchRelay(viewerPage, code, testInfo);
     expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1)?.mimeType || '')).toMatch(/^video\/webm/);
     await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
     const firstGeneration = (await getRoomByCode(request, code)).mediaGeneration;
@@ -609,7 +616,7 @@ test('a relay viewer that is behind keeps playing across a VP8 recorder restart'
     await hostContext.close();
 });
 
-test('a relay start superseded by a socket reconnect leaves no stale playback, error or subscription', async ({ browser, request }) => {
+test('a relay start superseded by a socket reconnect leaves no stale playback, error or subscription', async ({ browser, request }, testInfo) => {
     const hostContext = await browser.newContext();
     const viewerContext = await browser.newContext();
     const hostPage = await hostContext.newPage();
@@ -617,7 +624,7 @@ test('a relay start superseded by a socket reconnect leaves no stale playback, e
     await installViewerSocketControl(viewerPage);
 
     const code = await startHost(hostPage);
-    await viewerPage.goto(`https://nextra.cloudflare.test:3210/#watch/${code}`);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
     const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
     await expect(watchButton).toBeEnabled();
@@ -793,6 +800,7 @@ test.beforeEach(async ({ browser }, testInfo) => {
             await new Promise((resolve) => setTimeout(resolve, 25));
         }
 
+        const port = serverPort(testInfo);
         const workerOctet = (testInfo.workerIndex % 250) + 1;
         const testOctet = (loopbackProxySequence % 250) + 2;
         const sourceAddress = `127.0.${workerOctet}.${testOctet}`;
@@ -803,14 +811,14 @@ test.beforeEach(async ({ browser }, testInfo) => {
             response.end();
         });
         proxy.on('connect', (request, downstream, head) => {
-            if (!['localhost:3210', 'nextra.cloudflare.test:3210'].includes(request.url)) {
+            if (![`localhost:${port}`, `nextra.cloudflare.test:${port}`].includes(request.url)) {
                 downstream.end('HTTP/1.1 403 Forbidden\r\n\r\n');
                 return;
             }
 
             const upstream = net.connect({
                 host: '127.0.0.1',
-                port: 3210,
+                port,
                 localAddress: sourceAddress,
             }, () => {
                 downstream.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -843,7 +851,7 @@ test.beforeEach(async ({ browser }, testInfo) => {
         browser.newContext = function newContext(options = {}) {
             return Reflect.apply(originalNewContext, browser, [{
                 ...options,
-                baseURL: 'https://localhost:3210',
+                baseURL: `https://localhost:${port}`,
                 proxy: { server: `http://127.0.0.1:${proxyPort}` },
             }]);
         };

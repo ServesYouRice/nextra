@@ -54,7 +54,8 @@ async function loadWorker(name) {
 }
 
 function testInfo(workerIndex, outputDir) {
-    return { workerIndex, project: { outputDir } };
+    // The hook reads the server's port back from the project's baseURL, as playwright.config.mjs sets it.
+    return { workerIndex, project: { outputDir, use: { baseURL: 'https://localhost:3210' } } };
 }
 
 async function list(directory) {
