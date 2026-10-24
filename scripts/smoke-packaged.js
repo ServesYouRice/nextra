@@ -44,11 +44,29 @@ const CAXA_PATTERN = /[\\/]caxa[\\/]applications[\\/]nextra-/;
 const CLOUDFLARED_PATTERN = /(^|[\\/])cloudflared(\.exe)?(\s|$)/i;
 const PROCESS_LIST_MAX_BUFFER = 8 * 1024 * 1024;
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 5000) {
+// One HTTP call, bounded by timeoutMs from the request to the end of the body. fetch() resolves
+// as soon as the response headers arrive, so the body is read (read = 'json' | 'text') or
+// dropped (read = 'none') before the abort timer is cleared; a server that sends headers and
+// then stalls makes the read reject with an AbortError instead of hanging a stage. Callers get
+// { status, ok, body } and never touch the Response, so they cannot read a body unbounded.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 5000, read = 'none') {
+    if (read !== 'json' && read !== 'text' && read !== 'none') {
+        throw new TypeError(`Unknown response read mode: ${read}`);
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        return await fetch(url, { ...options, signal: controller.signal });
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        let body = null;
+        if (read === 'json') {
+            body = await response.json();
+        } else if (read === 'text') {
+            body = await response.text();
+        } else {
+            // Not needed, but an unread body keeps its connection busy until the process ends.
+            await response.body?.cancel();
+        }
+        return { status: response.status, ok: response.ok, body };
     } finally {
         clearTimeout(timer);
     }
@@ -135,8 +153,7 @@ async function waitReady(attempts = 60) {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
         await sleep(500);
         try {
-            const response = await fetchWithTimeout(`${baseUrl}/readyz`, {}, 2000);
-            const body = await response.json();
+            const { body } = await fetchWithTimeout(`${baseUrl}/readyz`, {}, 2000, 'json');
             if (isReadyBody(body)) return body;
         } catch {
             // keep polling, matches PS1's catch {}
@@ -146,35 +163,30 @@ async function waitReady(attempts = 60) {
 }
 
 async function checkStaticShell() {
-    const response = await fetchWithTimeout(`${baseUrl}/`, {}, 5000);
-    const body = await response.text();
-    if (response.status !== 200 || !body.includes('<div id="root"')) {
+    const { status, body } = await fetchWithTimeout(`${baseUrl}/`, {}, 5000, 'text');
+    if (status !== 200 || !body.includes('<div id="root"')) {
         throw new Error('Packaged static application shell was not served.');
     }
 }
 
 async function checkSocketHandshake() {
-    const response = await fetchWithTimeout(`${baseUrl}/socket.io/?EIO=4&transport=polling`, {}, 5000);
-    const body = await response.text();
-    if (response.status !== 200 || !body.startsWith('0{')) {
+    const { status, body } = await fetchWithTimeout(`${baseUrl}/socket.io/?EIO=4&transport=polling`, {}, 5000, 'text');
+    if (status !== 200 || !body.startsWith('0{')) {
         throw new Error('Socket.IO handshake failed.');
     }
 }
 
 async function checkPackageInfo() {
-    const response = await fetchWithTimeout(`${baseUrl}/api/package-info`, {}, 5000);
-    const body = await response.json();
+    const { body } = await fetchWithTimeout(`${baseUrl}/api/package-info`, {}, 5000, 'json');
     for (const required of ['license', 'notices', 'sourceInstructions', 'sbom', 'ffmpeg']) {
         if (!body?.artifacts?.[required]) throw new Error(`Packaged artifact is missing ${required}.`);
     }
 }
 
 async function checkMediaWorkerReplacement() {
-    const beforeRestartResponse = await fetchWithTimeout(`${baseUrl}/api/metrics`, {}, 5000);
-    const beforeRestart = await beforeRestartResponse.json();
+    const { body: beforeRestart } = await fetchWithTimeout(`${baseUrl}/api/metrics`, {}, 5000, 'json');
 
-    const restartResponse = await fetchWithTimeout(`${baseUrl}/api/test/kill-media-worker`, { method: 'POST' }, 5000);
-    const restart = await restartResponse.json();
+    const { body: restart } = await fetchWithTimeout(`${baseUrl}/api/test/kill-media-worker`, { method: 'POST' }, 5000, 'json');
     if (restart.status !== 'terminating' || restart.workerPid !== beforeRestart.mediaWorker.pid) {
         throw new Error('Packaged media-worker replacement was not accepted.');
     }
@@ -184,10 +196,8 @@ async function checkMediaWorkerReplacement() {
     while (Date.now() < deadline) {
         await sleep(250);
         try {
-            const metricsResponse = await fetchWithTimeout(`${baseUrl}/api/metrics`, {}, 1000);
-            const readinessResponse = await fetchWithTimeout(`${baseUrl}/readyz`, {}, 1000);
-            const metrics = await metricsResponse.json();
-            const readiness = await readinessResponse.json();
+            const { body: metrics } = await fetchWithTimeout(`${baseUrl}/api/metrics`, {}, 1000, 'json');
+            const { body: readiness } = await fetchWithTimeout(`${baseUrl}/readyz`, {}, 1000, 'json');
             if (readiness.status === 'ready'
                 && metrics.process.pid !== beforeRestart.process.pid
                 && metrics.mediaWorker.pid !== beforeRestart.mediaWorker.pid) {
@@ -218,12 +228,12 @@ function runPackagedPlaywright() {
 }
 
 async function checkGracefulShutdown() {
-    await fetchWithTimeout(`${baseUrl}/api/test/shutdown`, { method: 'POST' }, 5000);
+    await fetchWithTimeout(`${baseUrl}/api/test/shutdown`, { method: 'POST' }, 5000, 'none');
     let stopped = false;
     for (let attempt = 0; attempt < 20; attempt += 1) {
         await sleep(500);
         try {
-            await fetchWithTimeout(`${baseUrl}/healthz`, {}, 1000);
+            await fetchWithTimeout(`${baseUrl}/healthz`, {}, 1000, 'none');
         } catch {
             stopped = true;
             break;
@@ -256,7 +266,7 @@ async function runStages() {
 
 async function cleanup(baselineSmokePids, baselineCloudflaredPids) {
     try {
-        await fetchWithTimeout(`${baseUrl}/api/test/shutdown`, { method: 'POST' }, 2000);
+        await fetchWithTimeout(`${baseUrl}/api/test/shutdown`, { method: 'POST' }, 2000, 'none');
     } catch {
         // best-effort, matches PS1's try {} catch {}
     }
@@ -319,7 +329,24 @@ async function main() {
     console.log('Packaged smoke passed.');
 }
 
-main().catch((err) => {
-    console.error(err.stack || String(err));
-    process.exitCode = 1;
-});
+// Only `node scripts/smoke-packaged.js` runs the smoke; tests require() the helpers below.
+if (require.main === module) {
+    main().catch((err) => {
+        console.error(err.stack || String(err));
+        process.exitCode = 1;
+    });
+}
+
+module.exports = {
+    fetchWithTimeout,
+    isReadyBody,
+    waitReady,
+    checkStaticShell,
+    checkSocketHandshake,
+    checkPackageInfo,
+    checkMediaWorkerReplacement,
+    checkGracefulShutdown,
+    runStages,
+    cleanup,
+    main,
+};
