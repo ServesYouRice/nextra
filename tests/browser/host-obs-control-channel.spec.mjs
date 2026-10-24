@@ -94,13 +94,18 @@ test.afterAll(async () => {
 
 // A stand-in for OBS's obs-websocket server on its default port. `mode` decides
 // what the next connections meet: 'down' refuses them like a closed OBS, 'up'
-// answers them, and 'hold' answers them but keeps the first stream-service
-// write pending until release() so a test can act while a configure is in flight.
+// answers them, and 'hold' answers them but keeps the stream-service write
+// pending until release() so a test can act while a configure is in flight
+// (once per connection: after release() it answers like 'up'). OBS has one
+// stream output: `streaming` and `server` are its state, and `log` lists every
+// request OBS carried out, across connections, in the order it did.
 async function installObsStub(page) {
     const obs = {
         mode: 'down',
         connections: [],
         streaming: false,
+        server: null,
+        log: [],
         held: [],
         get live() {
             return obs.connections.filter((connection) => !connection.closed);
@@ -110,7 +115,7 @@ async function installObsStub(page) {
         },
     };
     await page.routeWebSocket(/:4455\/?$/, (ws) => {
-        const connection = { mode: obs.mode, messages: [], closed: false };
+        const connection = { id: obs.connections.length, mode: obs.mode, messages: [], closed: false };
         obs.connections.push(connection);
         ws.onClose(() => { connection.closed = true; });
         if (obs.mode === 'down') {
@@ -126,12 +131,16 @@ async function installObsStub(page) {
                 return;
             }
             if (message.op !== 6) return;
-            const { requestType, requestId } = message.d;
+            const { requestType, requestId, requestData } = message.d;
             connection.messages.push(requestType);
             const reply = () => {
                 if (connection.closed) return;
                 if (requestType === 'StartStream') obs.streaming = true;
                 if (requestType === 'StopStream') obs.streaming = false;
+                if (requestType === 'SetStreamServiceSettings') {
+                    obs.server = requestData?.streamServiceSettings?.server ?? null;
+                }
+                obs.log.push({ connection: connection.id, requestType, server: obs.server });
                 ws.send(JSON.stringify({
                     op: 7,
                     d: {
@@ -144,12 +153,11 @@ async function installObsStub(page) {
                     },
                 }));
             };
-            // Only a held connection's first stream-service write waits; its
-            // later ones (the room, after the encoder-reset probe) are answered,
-            // so a configure that was released runs to its end.
-            if (connection.mode === 'hold' && requestType === 'SetStreamServiceSettings' && !connection.heldServiceWrite) {
-                connection.heldServiceWrite = true;
-                obs.held.push(reply);
+            if (connection.mode === 'hold' && requestType === 'SetStreamServiceSettings') {
+                obs.held.push(() => {
+                    connection.mode = 'up';
+                    reply();
+                });
             } else {
                 reply();
             }
@@ -219,8 +227,11 @@ test('a Retry that ends after Stop Sharing opens no control channel', async ({ p
 
     const connectionsBeforeStop = obs.connections.length;
     await page.getByRole('button', { name: 'Stop Sharing' }).click();
-    // Stop reaches OBS through a fresh connection: the retry has not given it a channel.
-    await expect.poll(() => obs.connections.length, { message: 'connections opened by Stop' }).toBe(connectionsBeforeStop + 1);
+    // The retry is still configuring OBS, so Stop sends nothing now: the retry
+    // stops OBS once it has ended, through a fresh connection (it has not given
+    // Stop a channel).
+    await page.waitForTimeout(500);
+    expect(obs.connections.length, 'connections opened by Stop').toBe(connectionsBeforeStop);
     obs.mode = 'up';
     const connectionsBeforeRelease = obs.connections.length;
     const retryConnection = obs.connections.find((connection) => connection.mode === 'hold');
@@ -229,6 +240,142 @@ test('a Retry that ends after Stop Sharing opens no control channel', async ({ p
     await expect.poll(() => retryConnection.closed, { message: 'retry connection ended' }).toBe(true);
     await page.waitForTimeout(500);
 
-    expect(obs.connections.length, 'connections opened after the retry ended').toBe(connectionsBeforeRelease);
-    expect(obs.live).toHaveLength(0);
+    expect(obs.connections.length, 'connections opened after the retry ended').toBe(connectionsBeforeRelease + 1);
+    expect(obs.connections.at(-1).messages, 'requests on that connection').toEqual(['StopStream']);
+    await expect.poll(() => obs.live.length, { message: 'open OBS connections' }).toBe(0);
+});
+
+// The WHIP URL the host view shows for its room, which is what a configure writes into OBS.
+async function whipUrlOnPage(page) {
+    const value = await page.locator('.copy-field', { hasText: 'WHIP URL' }).locator('.copy-field-value').textContent();
+    return value?.trim();
+}
+
+// Starts sharing in OBS mode on the host view that is open, with OBS holding the
+// configure at its stream-service write. Connections opened later are answered.
+async function startHeldObsConfigure(page, obs) {
+    await page.locator('#obsMode').check();
+    await page.locator('#obsApplySettings').uncheck();
+    obs.mode = 'hold';
+    await page.getByRole('button', { name: 'Start Sharing' }).click();
+    await expect.poll(() => obs.held.length, { message: 'configure reached the stream-service write' }).toBe(1);
+    const configure = obs.connections.at(-1);
+    obs.mode = 'up';
+    return { configure, whipUrl: await whipUrlOnPage(page) };
+}
+
+// Starts sharing again (OBS answering) and checks that the new session reached
+// its OBS step without OBS hearing from the page while the first setup runs.
+async function startAgainWhileFirstSetupRuns(page, obs, { connectionsBefore, firstWhipUrl }) {
+    await page.locator('#obsMode').check();
+    await page.locator('#obsApplySettings').uncheck();
+    await page.getByRole('button', { name: 'Start Sharing' }).click();
+    await expect(page.getByText('Streaming via OBS')).toBeVisible();
+    const whipUrl = await whipUrlOnPage(page);
+    expect(whipUrl, 'the new room\'s WHIP URL').not.toBe(firstWhipUrl);
+    // Long enough for a configure that does not wait to open its connection,
+    // and short: the held request times out in the page 5 s after it was sent.
+    await page.waitForTimeout(500);
+    expect.soft(obs.connections.length - connectionsBefore, 'OBS connections opened while the first setup still runs').toBe(0);
+    await expect.soft(page.locator('.obs-status-line.is-info'))
+        .toContainText('Waiting for the previous OBS setup to finish', { timeout: 500 });
+    return whipUrl;
+}
+
+// After the first setup is released: the first session's stop lands after
+// everything that setup did and before the new setup begins, nothing stops
+// the new stream, and OBS ends streaming to the new room with its control
+// channel the only connection left open.
+async function expectOnlyNewSessionStreams(page, obs, { firstConfigure, secondWhipUrl }) {
+    await expect(page.locator('.obs-status-line.is-ok')).toContainText('OBS configured', { timeout: 30_000 });
+    // Released before its request timed out, the first setup went on to start a stream.
+    expect(firstConfigure.messages, 'requests of the first setup').toContain('StartStream');
+    await expect.poll(() => obs.live.length, { message: 'open OBS connections (the new session\'s control channel)' }).toBe(1);
+    expect(obs.streaming, 'OBS streaming').toBe(true);
+    expect(obs.server, 'OBS stream target').toBe(secondWhipUrl);
+
+    const secondConfigure = obs.log.find((entry) => (
+        entry.requestType === 'SetStreamServiceSettings' && entry.server === secondWhipUrl
+    ))?.connection;
+    const firstEnd = obs.log.findLastIndex((entry) => entry.connection === firstConfigure.id);
+    const secondBegin = obs.log.findIndex((entry) => entry.connection === secondConfigure);
+    expect(firstEnd, 'the first setup ended before the second began').toBeLessThan(secondBegin);
+    expect(
+        obs.log.slice(firstEnd + 1, secondBegin).map((entry) => entry.requestType),
+        'requests between the two setups',
+    ).toEqual(['StopStream']);
+    const secondStart = obs.log.findLastIndex((entry) => (
+        entry.connection === secondConfigure && entry.requestType === 'StartStream'
+    ));
+    expect(
+        obs.log.slice(secondStart + 1).filter((entry) => entry.requestType === 'StopStream'),
+        'stops sent after the new session started its stream',
+    ).toHaveLength(0);
+}
+
+test('Stop Sharing while a Retry configures OBS stops OBS once that retry ends, not before it', async ({ page }) => {
+    const obs = await installObsStub(page);
+    await startObsSharing(page, server.baseUrl);
+
+    obs.mode = 'hold';
+    await page.getByRole('button', { name: 'Retry Auto-Configure OBS' }).click();
+    await expect.poll(() => obs.held.length, { message: 'retry reached the stream-service write' }).toBe(1);
+    const retryConnection = obs.connections.at(-1);
+    obs.mode = 'up';
+
+    await page.getByRole('button', { name: 'Stop Sharing' }).click();
+    await expect(page.getByRole('button', { name: 'Start Sharing' })).toBeVisible();
+    obs.release();
+    await expect.poll(() => retryConnection.closed, { message: 'retry connection ended' }).toBe(true);
+
+    // The retry went on to start OBS streaming at the room Stop ended, so one
+    // stop has to come after it.
+    await expect.poll(() => obs.streaming, { message: 'OBS streaming once the retry has ended' }).toBe(false);
+    const retryStart = obs.log.findLastIndex((entry) => (
+        entry.connection === retryConnection.id && entry.requestType === 'StartStream'
+    ));
+    expect(retryStart, 'the retry started the stream').toBeGreaterThan(-1);
+    expect(
+        obs.log.slice(retryStart + 1).filter((entry) => entry.requestType === 'StopStream'),
+        'stops sent after the retry started the stream',
+    ).toHaveLength(1);
+    await expect.poll(() => obs.live.length, { message: 'open OBS connections' }).toBe(0);
+});
+
+test('Start Sharing again while the stopped session still configures OBS waits for that setup, whose stop lands first', async ({ page }) => {
+    const obs = await installObsStub(page);
+    await page.goto(`${server.baseUrl}/#host`);
+    const first = await startHeldObsConfigure(page, obs);
+    const connectionsBefore = obs.connections.length;
+
+    await page.getByRole('button', { name: 'Stop Sharing' }).click();
+    const secondWhipUrl = await startAgainWhileFirstSetupRuns(page, obs, {
+        connectionsBefore,
+        firstWhipUrl: first.whipUrl,
+    });
+
+    obs.release();
+    await expectOnlyNewSessionStreams(page, obs, { firstConfigure: first.configure, secondWhipUrl });
+});
+
+test('Leave and Stop during OBS setup stops OBS once it ends, and a host view opened again configures OBS only after that stop', async ({ page }) => {
+    const obs = await installObsStub(page);
+    await page.goto(`${server.baseUrl}/#host`);
+    const first = await startHeldObsConfigure(page, obs);
+    const connectionsBefore = obs.connections.length;
+
+    await page.evaluate(() => { window.location.hash = '#privacy'; });
+    await page.getByRole('button', { name: 'Leave and Stop' }).click();
+    await expect(page.getByRole('heading', { name: /Privacy/i })).toBeVisible();
+    // The unmount teardown runs one task after the view is removed.
+    await page.waitForTimeout(250);
+
+    await page.evaluate(() => { window.location.hash = '#host'; });
+    const secondWhipUrl = await startAgainWhileFirstSetupRuns(page, obs, {
+        connectionsBefore,
+        firstWhipUrl: first.whipUrl,
+    });
+
+    obs.release();
+    await expectOnlyNewSessionStreams(page, obs, { firstConfigure: first.configure, secondWhipUrl });
 });
