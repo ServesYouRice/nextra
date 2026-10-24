@@ -197,11 +197,11 @@ export async function reclaimWithRetry({
  * reclaim-host gets two attempts, so after a first one the connection cut off,
  * the second waits for the socket to come back. If the host stops sharing or
  * leaves meanwhile, the teardown's host-stopped is buffered and reaches the
- * server first, from a socket that does not host the room yet, so it does
- * nothing; a reclaim sent after it would hand the room to a page that has
- * stopped. Whatever ends the session or the view aborts `signal`, and an
- * attempt not yet sent is then never sent (it rejects with the 'cancelled'
- * phase).
+ * server first, from a socket that does not host the room yet (it ends the
+ * room only by the token it carries, see hostStoppedPayload); a reclaim sent
+ * after it would hand a room it did not end to a page that has stopped.
+ * Whatever ends the session or the view aborts `signal`, and an attempt not
+ * yet sent is then never sent (it rejects with the 'cancelled' phase).
  *
  * @param {object} options
  * @param {(event: string, data: object, options: { signal?: AbortSignal }) => Promise<any>} options.request socketRequest on the host's socket.
@@ -211,6 +211,41 @@ export async function reclaimWithRetry({
  */
 export function reclaimAfterReconnect({ request, code, hostToken, signal }) {
     return request('reclaim-host', { code, hostToken }, signal ? { signal } : {});
+}
+
+/** How many of the page's latest Socket.IO connection ids a host-stopped names (the server takes up to 16). */
+export const HOST_STOP_SOCKET_IDS = 8;
+
+/**
+ * The page's latest Socket.IO connection ids, oldest first, with `id` added
+ * (HostView adds the socket's id on every 'connect'). Each connection has its
+ * own id, so every one of them is a connection this page opened.
+ *
+ * @param {readonly string[]} ids
+ * @param {unknown} id The socket's id; undefined while it is disconnected.
+ * @param {number} [limit]
+ * @returns {string[]}
+ */
+export function rememberSocketId(ids, id, limit = HOST_STOP_SOCKET_IDS) {
+    if (typeof id !== 'string' || id === '') return [...ids];
+    return [...ids.filter((known) => known !== id), id].slice(-limit);
+}
+
+/**
+ * What the host page's host-stopped carries, or undefined when the page holds
+ * no room. A stop made while the socket is down is buffered by Socket.IO and
+ * sent on the next connection, before 'connect': the server does not know that
+ * connection as the room's host, so the stop names the room, its host token
+ * and the page's latest connection ids, and the server ends the room when the
+ * token is the room's and the room is still hosted from one of them. A stop
+ * from the host's own connection ends its room as before.
+ *
+ * @param {{ code: string | null | undefined, hostToken: string | null | undefined, socketIds: readonly string[] }} session
+ * @returns {{ code: string, hostToken: string, hostSocketIds: string[] } | undefined}
+ */
+export function hostStoppedPayload({ code, hostToken, socketIds }) {
+    if (!code || !hostToken || socketIds.length === 0) return undefined;
+    return { code, hostToken, hostSocketIds: [...socketIds] };
 }
 
 /**
