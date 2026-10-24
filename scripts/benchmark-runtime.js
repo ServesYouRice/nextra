@@ -7,7 +7,8 @@ const {
     minimumRequirementsForScenario,
     validateBenchmarkDefinition,
     buildThresholdHeadroom,
-    evaluateTopology,
+    observeTopology,
+    evaluateTopologySamples,
     sumCpuComponents,
     cpuPercent,
     growthPercent,
@@ -183,15 +184,18 @@ async function main() {
     const eventLoopMax = maxOrNull(samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.max));
     const firstRelayBytes = relayBytesForwarded(first.metrics);
     const lastRelayBytes = relayBytesForwarded(last.metrics);
+    // `topology` keeps reporting the last sample (and the whole-window relay total); the
+    // requirements are checked against every sample, and the lowest value each one
+    // reached is reported as `topologyMinimums`.
     const observedTopology = {
-        rooms: last.metrics.rooms?.active || 0,
-        producers: last.metrics.sockets?.counters?.activeProducers || 0,
-        consumers: last.metrics.rooms?.totalMediasoupConsumers || 0,
-        viewers: last.metrics.rooms?.totalViewers || 0,
-        relayViewers: last.metrics.rooms?.totalRelayViewers || 0,
-        fallbackPipelines: last.metrics.sockets?.counters?.activeFallbackPipelines || 0,
+        ...observeTopology(last.metrics),
         relayBytesForwarded: Math.max(0, lastRelayBytes - firstRelayBytes),
     };
+    const topologyEvaluation = evaluateTopologySamples(
+        samples.map(({ at, metrics }) => ({ at, topology: observeTopology(metrics) })),
+        requirements,
+        { relayBytesForwarded: observedTopology.relayBytesForwarded },
+    );
     const observed = {
         ackP50Ms: percentile(ackLatencies, 50),
         ackP95Ms: percentile(ackLatencies, 95),
@@ -221,6 +225,7 @@ async function main() {
         },
         expectedTopology: requirements,
         topology: { clients, ...observedTopology },
+        topologyMinimums: topologyEvaluation.minimums,
         samples: samples.length,
         acknowledgements: ackLatencies.length,
         errors: errors.length,
@@ -228,7 +233,7 @@ async function main() {
         thresholds,
         headroomPercent: buildThresholdHeadroom(observed, thresholds),
     };
-    const failures = evaluateTopology(observedTopology, requirements);
+    const failures = [...topologyEvaluation.failures];
     if (errors.length > 0) failures.push(`${errors.length} signalling acknowledgements failed`);
     if (summary.observed.ackP95Ms > thresholds.ackP95Ms) failures.push('ack p95 exceeded');
     failures.push(...evaluateResourceThresholds(observed, thresholds));

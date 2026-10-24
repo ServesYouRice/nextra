@@ -174,22 +174,91 @@ function evaluateChurnThresholds(observed, thresholds) {
     return failures;
 }
 
+// Load the server reports at one moment. Each of these must hold in every sample of
+// the measured window.
+const PER_SAMPLE_TOPOLOGY_CHECKS = [
+    ['rooms', 'rooms'],
+    ['producers', 'producers'],
+    ['consumers', 'mediasoup consumers'],
+    ['relayViewers', 'relay viewers'],
+    ['fallbackPipelines', 'fallback pipelines'],
+];
+// Counted over the whole window (last reading minus first), so one sample cannot hold it.
+const WHOLE_WINDOW_TOPOLOGY_CHECKS = [
+    ['relayBytesForwarded', 'relay bytes forwarded during measurement'],
+];
+const TOPOLOGY_CHECKS = [...PER_SAMPLE_TOPOLOGY_CHECKS, ...WHOLE_WINDOW_TOPOLOGY_CHECKS];
+// The fields observeTopology reports; viewers has no requirement but is reported.
+const OBSERVED_TOPOLOGY_FIELDS = ['rooms', 'producers', 'consumers', 'viewers', 'relayViewers', 'fallbackPipelines'];
+
 function evaluateTopology(topology, requirements) {
     const failures = [];
-    const checks = [
-        ['rooms', 'rooms'],
-        ['producers', 'producers'],
-        ['consumers', 'mediasoup consumers'],
-        ['relayViewers', 'relay viewers'],
-        ['fallbackPipelines', 'fallback pipelines'],
-        ['relayBytesForwarded', 'relay bytes forwarded during measurement'],
-    ];
-    for (const [field, label] of checks) {
+    for (const [field, label] of TOPOLOGY_CHECKS) {
         if ((topology[field] || 0) < (requirements[field] || 0)) {
             failures.push(`required ${requirements[field]} ${label}, observed ${topology[field] || 0}`);
         }
     }
     return failures;
+}
+
+// The load one /api/metrics sample reports. A field the server did not report counts
+// as no load, so a requirement for it fails instead of passing unchecked.
+function observeTopology(metrics) {
+    return {
+        rooms: metrics?.rooms?.active || 0,
+        producers: metrics?.sockets?.counters?.activeProducers || 0,
+        consumers: metrics?.rooms?.totalMediasoupConsumers || 0,
+        viewers: metrics?.rooms?.totalViewers || 0,
+        relayViewers: metrics?.rooms?.totalRelayViewers || 0,
+        fallbackPipelines: metrics?.sockets?.counters?.activeFallbackPipelines || 0,
+    };
+}
+
+// Checks the required load against every sample of the measured window, not only the
+// last one: a topology that was missing for most of the window and recovered just
+// before the end must not pass with performance figures taken while it was missing.
+//
+// samples: [{ at?, topology }] in measurement order, topology as observeTopology
+//   returns it. windowTotals: values counted over the whole window, such as
+//   { relayBytesForwarded }; these are checked once, with the message evaluateTopology
+//   gives. Returns { failures, minimums }: the lowest value of each observed field
+//   across the samples (null when there is no sample), and one failure per unmet
+//   requirement naming the sample where it was first unmet.
+function evaluateTopologySamples(samples, requirements, windowTotals = {}) {
+    const minimums = {};
+    for (const field of OBSERVED_TOPOLOGY_FIELDS) {
+        // A loop, not Math.min(...values): a long window has too many samples to spread.
+        let lowest = null;
+        for (const { topology } of samples) {
+            const value = topology?.[field] || 0;
+            if (lowest === null || value < lowest) lowest = value;
+        }
+        minimums[field] = lowest;
+    }
+    const failures = [];
+    for (const [field, label] of PER_SAMPLE_TOPOLOGY_CHECKS) {
+        const required = requirements[field] || 0;
+        if (samples.length === 0) {
+            if (required > 0) failures.push(`required ${required} ${label} in every sample, no sample observed`);
+            continue;
+        }
+        const firstUnmet = samples.findIndex(({ topology }) => (topology?.[field] || 0) < required);
+        if (firstUnmet === -1) continue;
+        const { at } = samples[firstUnmet];
+        const time = Number.isFinite(at) && Number.isFinite(new Date(at).getTime())
+            ? ` (${new Date(at).toISOString()})`
+            : '';
+        failures.push(
+            `required ${required} ${label} in every sample, lowest observed ${minimums[field]}, `
+            + `first unmet at sample ${firstUnmet + 1} of ${samples.length}${time}`,
+        );
+    }
+    for (const [field, label] of WHOLE_WINDOW_TOPOLOGY_CHECKS) {
+        if ((windowTotals[field] || 0) < (requirements[field] || 0)) {
+            failures.push(`required ${requirements[field]} ${label}, observed ${windowTotals[field] || 0}`);
+        }
+    }
+    return { failures, minimums };
 }
 
 module.exports = {
@@ -199,6 +268,8 @@ module.exports = {
     calculateHeadroomPercent,
     buildThresholdHeadroom,
     evaluateTopology,
+    observeTopology,
+    evaluateTopologySamples,
     finiteOrNull,
     sumCpuComponents,
     cpuPercent,
