@@ -6,6 +6,7 @@ const {
     parseH264ProfileLevelId, isSameH264Profile, isH264Compatible,
 } = require('../lib/whep');
 const config = require('../config');
+const ortc = require('mediasoup/ortc');
 
 // --- Sample SDP offer (recvonly, video + audio) ---
 const SAMPLE_OFFER = [
@@ -1009,7 +1010,7 @@ describe('WHEP header extension and RTCP feedback negotiation', () => {
 
             // transport-cc is negotiated, so goog-remb is dropped by the consumer and stays out.
             assert.deepEqual(answerFeedback(sections[0], 102), ['nack', 'nack pli', 'transport-cc']);
-            assert.deepEqual(answerFeedback(sections[1], 111), ['transport-cc']);
+            assert.deepEqual(answerFeedback(sections[1], 110), ['transport-cc']);
         });
 
         it('negotiates no extension for a Chrome-like offer whose ids differ from the router ids, and says nothing unoffered', () => {
@@ -1027,15 +1028,15 @@ describe('WHEP header extension and RTCP feedback negotiation', () => {
 
             // Without transport-cc or abs-send-time the consumer drops transport-cc and goog-remb feedback.
             assert.deepEqual(answerFeedback(sections[0], 102), ['nack', 'nack pli', 'ccm fir']);
-            assert.deepEqual(answerFeedback(sections[1], 111), []);
+            assert.deepEqual(answerFeedback(sections[1], 110), []);
         });
 
         it('keeps the answered payload types and codecs when extensions and feedback are filtered', () => {
             const { sections } = negotiate(chromeLikeOffer());
             assert.match(sections[0][0], /^m=video 9 UDP\/TLS\/RTP\/SAVPF 102$/);
             assert.ok(sections[0].includes('a=rtpmap:102 H264/90000'));
-            assert.match(sections[1][0], /^m=audio 9 UDP\/TLS\/RTP\/SAVPF 111$/);
-            assert.ok(sections[1].includes('a=rtpmap:111 opus/48000/2'));
+            assert.match(sections[1][0], /^m=audio 9 UDP\/TLS\/RTP\/SAVPF 110$/);
+            assert.ok(sections[1].includes('a=rtpmap:110 opus/48000/2'));
         });
     });
 });
@@ -1199,16 +1200,20 @@ describe('WHEP H.264 profile-level-id matching', () => {
             });
 
             it(`answer matcher: ${row.name} => ${row.match ? 'match' : 'no match'}`, () => {
-                // The consumer sends payload type 102; the offer carries H.264 as 96.
-                const parsed = parseViewerOffer(h264Offer([{ pt: 96, params: offer }]));
-                const answer = createViewerAnswer(parsed, [consumerOf(router)], mockTransportParams);
-                if (row.match) {
-                    assert.ok(answer.includes('a=rtpmap:96 H264/90000'), 'answered with the offer payload type');
-                    assert.ok(!answer.includes('a=rtpmap:102 '), 'no consumer payload type');
-                } else {
-                    assert.ok(!answer.includes('a=rtpmap:96 '), 'no offer codec matched, so the offer payload type is unused');
-                    assert.ok(answer.includes('a=rtpmap:102 H264/90000'), 'falls back to the consumer payload type');
-                }
+                // The consumer sends payload type 102; the offer carries H.264 as 96 and asks for
+                // nack pli on it. The answer declares the consumer's 102 either way; whether the
+                // offer entry matched shows in the feedback, which the offer lists under its 96.
+                const parsed = parseViewerOffer(h264Offer([{ pt: 96, params: offer }], ['a=rtcp-fb:96 nack pli']));
+                const consumer = consumerOf(router);
+                consumer.rtpParameters.codecs[0].rtcpFeedback = [{ type: 'nack', parameter: 'pli' }];
+                const answer = createViewerAnswer(parsed, [consumer], mockTransportParams);
+                assert.ok(answer.includes('a=rtpmap:102 H264/90000'), 'answered with the consumer payload type');
+                assert.ok(!answer.includes('a=rtpmap:96 '), 'never with the offer payload type');
+                assert.equal(
+                    answer.includes('a=rtcp-fb:102 nack pli'),
+                    row.match,
+                    row.match ? 'the matched offer entry gives its feedback' : 'no offer entry matched, so none of its feedback'
+                );
             });
 
             it(`capability filter: ${row.name} => ${row.match ? 'match' : 'no match'}`, () => {
@@ -1372,6 +1377,478 @@ describe('WHEP H.264 profile-level-id matching', () => {
 
         it('matches nothing for an offer whose only entries are Baseline or Constrained High', () => {
             assert.deepEqual(profilesFor([['42001f', '1'], ['640c1f', '1']]), []);
+        });
+    });
+});
+
+// ====================================================================
+// Answered payload types: the consumer's own. mediasoup stamps the router's payload
+// types on a consumer's RTP and cannot renumber them, so the answer declares those
+// (owner decision for section-189067a43c5f50160f1b8635/Q-001: option a).
+// ====================================================================
+describe('WHEP answer payload types follow the consumer', () => {
+    const OFFER_HEAD = [
+        'v=0',
+        'o=- 123456 2 IN IP4 127.0.0.1',
+        's=-',
+        't=0 0',
+        'a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99',
+        'a=setup:actpass',
+        'a=ice-ufrag:testufrag',
+        'a=ice-pwd:testpwd1234567890123456',
+    ];
+
+    // sections: [{ kind, mid, payloadTypes: [..], lines: [rtpmap, fmtp, rtcp-fb lines] }]
+    function buildOffer(sections) {
+        const lines = [...OFFER_HEAD, `a=group:BUNDLE ${sections.map((s) => s.mid).join(' ')}`];
+        for (const s of sections) {
+            lines.push(
+                `m=${s.kind} 9 UDP/TLS/RTP/SAVPF ${s.payloadTypes.join(' ')}`,
+                'c=IN IP4 0.0.0.0',
+                `a=mid:${s.mid}`,
+                'a=recvonly',
+                'a=rtcp-mux',
+                ...s.lines
+            );
+        }
+        lines.push('');
+        return lines.join('\r\n');
+    }
+
+    // The lines of one offered codec: rtpmap, fmtp when given, and one rtcp-fb per feedback.
+    function codecLines(pt, rtpmap, fmtpText, feedback = []) {
+        const lines = [`a=rtpmap:${pt} ${rtpmap}`];
+        if (fmtpText) lines.push(`a=fmtp:${pt} ${fmtpText}`);
+        for (const fb of feedback) lines.push(`a=rtcp-fb:${pt} ${fb}`);
+        return lines;
+    }
+
+    function sectionsOf(answer) {
+        const sections = [];
+        for (const line of answer.split('\r\n').filter((l) => l !== '')) {
+            if (line.startsWith('m=')) sections.push([line]);
+            else if (sections.length > 0) sections[sections.length - 1].push(line);
+        }
+        return sections;
+    }
+
+    function feedbackOf(sectionLines, pt) {
+        return sectionLines
+            .filter((l) => l.startsWith(`a=rtcp-fb:${pt} `))
+            .map((l) => l.slice(`a=rtcp-fb:${pt} `.length));
+    }
+
+    // VAL-034: the payload types an answer section declares (m-line, rtpmap, fmtp, rtcp-fb,
+    // and the apt of each RTX) are exactly the payload types of that section's consumer.
+    function assertAnswerUsesConsumerPayloadTypes(sectionLines, consumer) {
+        const codecs = consumer.rtpParameters.codecs;
+        const consumerPts = codecs.map((c) => c.payloadType);
+        assert.deepEqual(sectionLines[0].split(' ').slice(3).map(Number), consumerPts, `m-line ${sectionLines[0]}`);
+
+        const rtpmap = new Map();
+        const fmtp = new Map();
+        for (const line of sectionLines) {
+            let m = line.match(/^a=rtpmap:(\d+) (.+)$/);
+            if (m) rtpmap.set(Number(m[1]), m[2]);
+            m = line.match(/^a=fmtp:(\d+) (.+)$/);
+            if (m) fmtp.set(Number(m[1]), m[2]);
+            m = line.match(/^a=rtcp-fb:(\d+) /);
+            if (m) assert.ok(consumerPts.includes(Number(m[1])), `${line} names a payload type the consumer does not send`);
+        }
+        assert.deepEqual([...rtpmap.keys()], consumerPts, 'rtpmap payload types');
+        for (const pt of fmtp.keys()) assert.ok(consumerPts.includes(pt), `a=fmtp:${pt} names a payload type the consumer does not send`);
+        for (const codec of codecs) {
+            const name = codec.mimeType.split('/')[1];
+            assert.equal(
+                rtpmap.get(codec.payloadType),
+                `${name}/${codec.clockRate}${codec.channels ? `/${codec.channels}` : ''}`,
+                `rtpmap of payload type ${codec.payloadType}`
+            );
+            if (/\/rtx$/i.test(codec.mimeType)) {
+                assert.equal(fmtp.get(codec.payloadType), `apt=${codec.parameters.apt}`, `apt of RTX payload type ${codec.payloadType}`);
+            }
+        }
+    }
+
+    const H264_FMTP = 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f';
+    const h264Params = () => ({ 'level-asymmetry-allowed': 1, 'packetization-mode': 1, 'profile-level-id': '42e01f' });
+
+    // A consumer as mediasoup builds it for an H.264 producer on this router: H.264 at 102
+    // and its RTX at 103 (apt 102), the router's numbers.
+    function routerH264Consumer(rtcpFeedback = []) {
+        return {
+            kind: 'video',
+            rtpParameters: {
+                codecs: [
+                    { payloadType: 102, mimeType: 'video/H264', clockRate: 90000, parameters: h264Params(), rtcpFeedback },
+                    { payloadType: 103, mimeType: 'video/rtx', clockRate: 90000, parameters: { apt: 102 }, rtcpFeedback: [] },
+                ],
+                headerExtensions: [],
+                encodings: [{ ssrc: 1111, rtx: { ssrc: 1112 } }],
+            },
+        };
+    }
+
+    function routerOpusConsumer(rtcpFeedback = []) {
+        return {
+            kind: 'audio',
+            rtpParameters: {
+                codecs: [{
+                    payloadType: 110,
+                    mimeType: 'audio/opus',
+                    clockRate: 48000,
+                    channels: 2,
+                    parameters: { minptime: 10, useinbandfec: 1 },
+                    rtcpFeedback,
+                }],
+                headerExtensions: [],
+                encodings: [{ ssrc: 2222 }],
+            },
+        };
+    }
+
+    describe('with consumers whose router payload types differ from the offer', () => {
+        it('answers the primary codec and its RTX (apt included) with the consumer payload types', () => {
+            const offer = buildOffer([{
+                kind: 'video',
+                mid: '0',
+                payloadTypes: [96, 97],
+                lines: [...codecLines(96, 'H264/90000', H264_FMTP), ...codecLines(97, 'rtx/90000', 'apt=96')],
+            }]);
+            const consumer = routerH264Consumer();
+            const [video] = sectionsOf(createViewerAnswer(parseViewerOffer(offer), [consumer], mockTransportParams));
+
+            assert.equal(video[0], 'm=video 9 UDP/TLS/RTP/SAVPF 102 103');
+            assert.ok(video.includes('a=rtpmap:102 H264/90000'));
+            assert.ok(video.includes(`a=fmtp:102 ${H264_FMTP}`));
+            assert.ok(video.includes('a=rtpmap:103 rtx/90000'));
+            assert.ok(video.includes('a=fmtp:103 apt=102'), 'RTX apt names the payload type the consumer sends H.264 on');
+            assert.ok(!video.some((l) => /^a=(rtpmap|fmtp):(96|97) /.test(l)), 'the offer numbering is not answered');
+            assertAnswerUsesConsumerPayloadTypes(video, consumer);
+        });
+
+        it('answers the audio codec with the consumer payload type', () => {
+            const offer = buildOffer([
+                { kind: 'video', mid: '0', payloadTypes: [96], lines: codecLines(96, 'H264/90000', H264_FMTP) },
+                { kind: 'audio', mid: '1', payloadTypes: [111], lines: codecLines(111, 'opus/48000/2', 'minptime=10;useinbandfec=1') },
+            ]);
+            const consumers = [routerH264Consumer(), routerOpusConsumer()];
+            const [video, audio] = sectionsOf(createViewerAnswer(parseViewerOffer(offer), consumers, mockTransportParams));
+
+            assert.equal(audio[0], 'm=audio 9 UDP/TLS/RTP/SAVPF 110');
+            assert.ok(audio.includes('a=rtpmap:110 opus/48000/2'));
+            assert.ok(!audio.some((l) => l.startsWith('a=rtpmap:111 ')));
+            assertAnswerUsesConsumerPayloadTypes(video, consumers[0]);
+            assertAnswerUsesConsumerPayloadTypes(audio, consumers[1]);
+        });
+
+        it('writes the feedback the offer lists for the matching codec under the consumer payload type', () => {
+            const offer = buildOffer([{
+                kind: 'video',
+                mid: '0',
+                payloadTypes: [96, 97],
+                lines: [
+                    ...codecLines(96, 'H264/90000', H264_FMTP, ['nack', 'nack pli']),
+                    ...codecLines(97, 'rtx/90000', 'apt=96'),
+                ],
+            }]);
+            const consumer = routerH264Consumer([
+                { type: 'nack', parameter: '' },
+                { type: 'nack', parameter: 'pli' },
+                { type: 'ccm', parameter: 'fir' },
+            ]);
+            const [video] = sectionsOf(createViewerAnswer(parseViewerOffer(offer), [consumer], mockTransportParams));
+
+            assert.deepEqual(feedbackOf(video, 102), ['nack', 'nack pli'], 'ccm fir was not offered');
+            assert.deepEqual(feedbackOf(video, 96), []);
+            assertAnswerUsesConsumerPayloadTypes(video, consumer);
+        });
+
+        it('keeps the consumer numbering where the offer uses those numbers for other codecs', () => {
+            // Like Chrome: the router's H.264 102 / RTX 103 are VP8 and its RTX in this offer, and
+            // the offer asks for goog-remb on VP8 only. The answer says what the wire carries, and
+            // the feedback is the one offered for the H.264 entry, not for the offer's 102.
+            const offer = buildOffer([{
+                kind: 'video',
+                mid: '0',
+                payloadTypes: [96, 97, 102, 103],
+                lines: [
+                    ...codecLines(96, 'H264/90000', H264_FMTP, ['nack pli']),
+                    ...codecLines(97, 'rtx/90000', 'apt=96'),
+                    ...codecLines(102, 'VP8/90000', null, ['goog-remb']),
+                    ...codecLines(103, 'rtx/90000', 'apt=102'),
+                ],
+            }]);
+            const consumer = routerH264Consumer([
+                { type: 'nack', parameter: 'pli' },
+                { type: 'goog-remb', parameter: '' },
+            ]);
+            const [video] = sectionsOf(createViewerAnswer(parseViewerOffer(offer), [consumer], mockTransportParams));
+
+            assert.equal(video[0], 'm=video 9 UDP/TLS/RTP/SAVPF 102 103');
+            assert.ok(video.includes('a=rtpmap:102 H264/90000'));
+            assert.ok(!video.some((l) => l.includes('VP8')), 'one meaning per payload type: no VP8 in the answer');
+            assert.ok(video.includes('a=fmtp:103 apt=102'));
+            assert.deepEqual(feedbackOf(video, 102), ['nack pli']);
+            assertAnswerUsesConsumerPayloadTypes(video, consumer);
+        });
+    });
+
+    describe('with an offer that already uses the router payload types', () => {
+        it('yields the same answer as before', () => {
+            const offer = buildOffer([
+                {
+                    kind: 'video',
+                    mid: '0',
+                    payloadTypes: [102, 103],
+                    lines: [
+                        ...codecLines(102, 'H264/90000', H264_FMTP, ['nack', 'nack pli']),
+                        ...codecLines(103, 'rtx/90000', 'apt=102'),
+                    ],
+                },
+                {
+                    kind: 'audio',
+                    mid: '1',
+                    payloadTypes: [110],
+                    lines: codecLines(110, 'opus/48000/2', 'minptime=10;useinbandfec=1', ['transport-cc']),
+                },
+            ]);
+            const consumers = [
+                routerH264Consumer([
+                    { type: 'nack', parameter: '' },
+                    { type: 'nack', parameter: 'pli' },
+                    { type: 'ccm', parameter: 'fir' },
+                ]),
+                routerOpusConsumer([{ type: 'transport-cc', parameter: '' }]),
+            ];
+            const answer = createViewerAnswer(parseViewerOffer(offer), consumers, mockTransportParams);
+            const common = (mid) => [
+                'c=IN IP4 0.0.0.0',
+                'a=rtcp:9 IN IP4 0.0.0.0',
+                'a=ice-ufrag:serverufrag',
+                'a=ice-pwd:serverpwd',
+                `a=fingerprint:sha-256 ${mockTransportParams.dtlsParameters.fingerprints[0].value}`,
+                'a=setup:passive',
+                `a=mid:${mid}`,
+                'a=sendonly',
+                'a=rtcp-mux',
+                'a=rtcp-rsize',
+            ];
+            const candidate = ['a=candidate:1 1 UDP 2130706431 192.168.1.100 40000 typ host', 'a=end-of-candidates'];
+            // The answer the code gave before this change, for the same input.
+            assert.deepEqual(sectionsOf(answer), [
+                [
+                    'm=video 9 UDP/TLS/RTP/SAVPF 102 103',
+                    ...common('0'),
+                    'a=rtpmap:102 H264/90000',
+                    `a=fmtp:102 ${H264_FMTP}`,
+                    'a=rtcp-fb:102 nack',
+                    'a=rtcp-fb:102 nack pli',
+                    'a=rtpmap:103 rtx/90000',
+                    'a=fmtp:103 apt=102',
+                    'a=ssrc-group:FID 1111 1112',
+                    'a=ssrc:1111 cname:whep',
+                    'a=ssrc:1112 cname:whep',
+                    ...candidate,
+                ],
+                [
+                    'm=audio 9 UDP/TLS/RTP/SAVPF 110',
+                    ...common('1'),
+                    'a=rtpmap:110 opus/48000/2',
+                    'a=fmtp:110 minptime=10;useinbandfec=1',
+                    'a=rtcp-fb:110 transport-cc',
+                    'a=ssrc:2222 cname:whep',
+                    ...candidate,
+                ],
+            ]);
+            assert.ok(answer.includes('\r\na=group:BUNDLE 0 1\r\n'));
+        });
+    });
+
+    // Offer -> buildViewerRtpCapabilities -> the consumer rtpParameters mediasoup's own ortc code
+    // derives (what Transport.consume() hands the worker) -> createViewerAnswer.
+    describe('with consumers built by the mediasoup ortc code from config.MEDIA_CODECS', () => {
+        const routerCapabilities = ortc.generateRouterRtpCapabilities(structuredClone(config.MEDIA_CODECS));
+        const VIDEO_FB = ['goog-remb', 'transport-cc', 'ccm fir', 'nack', 'nack pli'];
+
+        // The recvonly offer of Chromium 153 (codec subset, its numbering): VP8 96, VP9 profile 2
+        // at 100, H.264 42001f at 102, H.264 42e01f at 108, opus 111, telephone-event/48000 at 110.
+        const chromeOffer = () => buildOffer([
+            {
+                kind: 'video',
+                mid: '0',
+                payloadTypes: [96, 97, 100, 101, 102, 103, 108, 109, 116, 117, 45, 46],
+                lines: [
+                    ...codecLines(96, 'VP8/90000', null, VIDEO_FB),
+                    ...codecLines(97, 'rtx/90000', 'apt=96'),
+                    ...codecLines(100, 'VP9/90000', 'profile-id=2', VIDEO_FB),
+                    ...codecLines(101, 'rtx/90000', 'apt=100'),
+                    ...codecLines(102, 'H264/90000', 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f', VIDEO_FB),
+                    ...codecLines(103, 'rtx/90000', 'apt=102'),
+                    ...codecLines(108, 'H264/90000', H264_FMTP, VIDEO_FB),
+                    ...codecLines(109, 'rtx/90000', 'apt=108'),
+                    ...codecLines(116, 'H264/90000', 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f', VIDEO_FB),
+                    ...codecLines(117, 'rtx/90000', 'apt=116'),
+                    ...codecLines(45, 'AV1/90000', 'level-idx=5;profile=0;tier=0', VIDEO_FB),
+                    ...codecLines(46, 'rtx/90000', 'apt=45'),
+                ],
+            },
+            {
+                kind: 'audio',
+                mid: '1',
+                payloadTypes: [111, 63, 110],
+                lines: [
+                    ...codecLines(111, 'opus/48000/2', 'minptime=10;useinbandfec=1', ['transport-cc']),
+                    ...codecLines(63, 'red/48000/2', '111/111'),
+                    ...codecLines(110, 'telephone-event/48000'),
+                ],
+            },
+        ]);
+
+        // The recvonly offer of Firefox 155 (codec subset, its numbering): VP8 120, H.264 42e01f at
+        // 126, AV1 99 with its RTX at 100, opus 109.
+        const firefoxOffer = () => buildOffer([
+            {
+                kind: 'video',
+                mid: '0',
+                payloadTypes: [120, 124, 126, 127, 99, 100],
+                lines: [
+                    ...codecLines(120, 'VP8/90000', 'max-fs=12288;max-fr=60', ['nack', 'nack pli', 'ccm fir', 'goog-remb', 'transport-cc']),
+                    ...codecLines(124, 'rtx/90000', 'apt=120'),
+                    ...codecLines(126, 'H264/90000', 'profile-level-id=42e01f;level-asymmetry-allowed=1;packetization-mode=1', ['nack', 'nack pli', 'ccm fir']),
+                    ...codecLines(127, 'rtx/90000', 'apt=126'),
+                    ...codecLines(99, 'AV1/90000', null, ['nack', 'nack pli']),
+                    ...codecLines(100, 'rtx/90000', 'apt=99'),
+                ],
+            },
+            {
+                kind: 'audio',
+                mid: '1',
+                payloadTypes: [109],
+                lines: codecLines(109, 'opus/48000/2', 'maxplaybackrate=48000;stereo=1;useinbandfec=1'),
+            },
+        ]);
+
+        // Producers as they reach the router: the host browser's VP8 with RTX, OBS's H.264 over
+        // WHIP (no RTX), opus. Each in the producer's own numbering, as mediasoup receives it.
+        const PRODUCERS = {
+            vp8: {
+                kind: 'video',
+                rtpParameters: {
+                    mid: '0',
+                    codecs: [
+                        { mimeType: 'video/VP8', payloadType: 96, clockRate: 90000, parameters: {}, rtcpFeedback: [{ type: 'nack' }, { type: 'nack', parameter: 'pli' }] },
+                        { mimeType: 'video/rtx', payloadType: 97, clockRate: 90000, parameters: { apt: 96 }, rtcpFeedback: [] },
+                    ],
+                    headerExtensions: [],
+                    encodings: [{ ssrc: 5001, rtx: { ssrc: 5002 } }],
+                    rtcp: { cname: 'host' },
+                },
+            },
+            h264: {
+                kind: 'video',
+                rtpParameters: {
+                    mid: '0',
+                    codecs: [{ mimeType: 'video/H264', payloadType: 96, clockRate: 90000, parameters: h264Params(), rtcpFeedback: [{ type: 'nack', parameter: 'pli' }] }],
+                    headerExtensions: [],
+                    encodings: [{ ssrc: 6001 }],
+                    rtcp: { cname: 'obs' },
+                },
+            },
+            opus: {
+                kind: 'audio',
+                rtpParameters: {
+                    mid: '1',
+                    codecs: [{ mimeType: 'audio/opus', payloadType: 111, clockRate: 48000, channels: 2, parameters: { useinbandfec: 1 }, rtcpFeedback: [] }],
+                    headerExtensions: [],
+                    encodings: [{ ssrc: 7001 }],
+                    rtcp: { cname: 'host' },
+                },
+            },
+        };
+
+        // What Transport.produce() and Transport.consume() compute in mediasoup.
+        function consumableOf(producer) {
+            const params = structuredClone(producer.rtpParameters);
+            ortc.validateAndNormalizeRtpParameters(params);
+            const mapping = ortc.getProducerRtpParametersMapping(params, routerCapabilities);
+            return ortc.getConsumableRtpParameters(producer.kind, params, routerCapabilities, mapping);
+        }
+
+        function consume(producer, viewerCapabilities) {
+            const caps = structuredClone(viewerCapabilities);
+            ortc.validateAndNormalizeRtpCapabilities(caps);
+            const consumable = consumableOf(producer);
+            assert.ok(ortc.canConsume(consumable, caps), `the viewer can consume the ${producer.rtpParameters.codecs[0].mimeType} producer`);
+            const rtpParameters = ortc.getConsumerRtpParameters({
+                consumableRtpParameters: consumable,
+                remoteRtpCapabilities: caps,
+                pipe: false,
+                enableRtx: producer.kind === 'video',
+            });
+            return { kind: producer.kind, rtpParameters };
+        }
+
+        function negotiate(offerText, producers) {
+            const parsed = parseViewerOffer(offerText);
+            const capabilities = buildViewerRtpCapabilities(parsed, routerCapabilities);
+            const consumers = producers.map((producer) => consume(producer, capabilities));
+            const sections = sectionsOf(createViewerAnswer(parsed, consumers, mockTransportParams));
+            return { consumers, sections };
+        }
+
+        const codecSummary = (consumer) => consumer.rtpParameters.codecs
+            .map((c) => `${c.payloadType} ${c.mimeType}${c.parameters.apt !== undefined ? ` apt=${c.parameters.apt}` : ''}`);
+
+        it('router numbering: VP8 100 + RTX 101, H.264 42e01f 102 + RTX 103, opus 110', () => {
+            const pts = routerCapabilities.codecs.map((c) => `${c.preferredPayloadType} ${c.mimeType}`);
+            for (const entry of ['100 video/VP8', '101 video/rtx', '102 video/H264', '103 video/rtx', '110 audio/opus']) {
+                assert.ok(pts.includes(entry), `${entry} in ${pts.join(', ')}`);
+            }
+        });
+
+        it('Chromium offer, host VP8 and opus: the answer declares 100/101 and 110, the payload types sent', () => {
+            const { consumers, sections } = negotiate(chromeOffer(), [PRODUCERS.vp8, PRODUCERS.opus]);
+            assert.deepEqual(codecSummary(consumers[0]), ['100 video/VP8', '101 video/rtx apt=100']);
+            assert.deepEqual(codecSummary(consumers[1]), ['110 audio/opus']);
+            assertAnswerUsesConsumerPayloadTypes(sections[0], consumers[0]);
+            assertAnswerUsesConsumerPayloadTypes(sections[1], consumers[1]);
+            // The VP8 feedback the offer lists under its 96, without what the consumer dropped
+            // (no transport-cc or abs-send-time extension is negotiated for these ids).
+            assert.deepEqual(feedbackOf(sections[0], 100), ['nack', 'nack pli', 'ccm fir']);
+        });
+
+        it('Chromium offer, OBS H.264: the answer declares 102/103, not the offer 108/109', () => {
+            const { consumers, sections } = negotiate(chromeOffer(), [PRODUCERS.h264]);
+            assert.deepEqual(codecSummary(consumers[0]), ['102 video/H264', '103 video/rtx apt=102']);
+            assertAnswerUsesConsumerPayloadTypes(sections[0], consumers[0]);
+            assert.ok(sections[0].includes(`a=fmtp:102 ${H264_FMTP}`));
+        });
+
+        it('Firefox offer, host VP8, OBS H.264 and opus: the answer declares the consumer payload types', () => {
+            for (const video of [PRODUCERS.vp8, PRODUCERS.h264]) {
+                const { consumers, sections } = negotiate(firefoxOffer(), [video, PRODUCERS.opus]);
+                assertAnswerUsesConsumerPayloadTypes(sections[0], consumers[0]);
+                assertAnswerUsesConsumerPayloadTypes(sections[1], consumers[1]);
+                assert.equal(consumers[1].rtpParameters.codecs[0].payloadType, 110);
+            }
+        });
+
+        it('an offer numbered like the router gets the router numbers, as before', () => {
+            const offer = buildOffer([
+                {
+                    kind: 'video',
+                    mid: '0',
+                    payloadTypes: [100, 101],
+                    lines: [...codecLines(100, 'VP8/90000', null, ['nack', 'nack pli']), ...codecLines(101, 'rtx/90000', 'apt=100')],
+                },
+                { kind: 'audio', mid: '1', payloadTypes: [110], lines: codecLines(110, 'opus/48000/2', 'useinbandfec=1') },
+            ]);
+            const { consumers, sections } = negotiate(offer, [PRODUCERS.vp8, PRODUCERS.opus]);
+            assert.equal(sections[0][0], 'm=video 9 UDP/TLS/RTP/SAVPF 100 101');
+            assert.equal(sections[1][0], 'm=audio 9 UDP/TLS/RTP/SAVPF 110');
+            assertAnswerUsesConsumerPayloadTypes(sections[0], consumers[0]);
+            assertAnswerUsesConsumerPayloadTypes(sections[1], consumers[1]);
         });
     });
 });
