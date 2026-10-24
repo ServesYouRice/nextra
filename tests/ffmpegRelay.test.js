@@ -186,6 +186,82 @@ test('a replayed GOP is not mistaken for FFmpeg falling behind', () => {
     assert.equal(relay.writeVideoFrame(Buffer.alloc(64), 6000), false);
 });
 
+// A stdin whose queue grows with every write, as a pipe that FFmpeg has not read
+// from yet does. `drain()` is FFmpeg catching up.
+function queueingProcess() {
+    const proc = fakeProcess();
+    proc.stdin.write = (buffer) => {
+        proc.writes.push(buffer);
+        proc.stdin.writableLength += buffer.length;
+        return true;
+    };
+    proc.drain = () => { proc.stdin.writableLength = 0; };
+    return proc;
+}
+
+test('a replayed GOP of the declared size is written whole to a fresh process (VAL-013)', () => {
+    const relay = createRelay('h264', { hasAudio: false });
+    relay._running = true;
+    relay._process = queueingProcess();
+    let videoGaps = 0;
+    relay.on('video-gap', () => { videoGaps += 1; });
+
+    // Ten 1 MiB frames, 10 MiB in all, written back to back into an empty stdin.
+    const frames = 10;
+    const frameBytes = 1024 * 1024;
+    relay.beginBurst(frames * frameBytes);
+    for (let i = 0; i < frames; i += 1) {
+        assert.equal(relay.writeVideoFrame(Buffer.alloc(frameBytes), i * 3000), true, `frame ${i} of the burst`);
+    }
+
+    assert.equal(relay._process.writes.length, frames);
+    assert.ok(relay._process.stdin.writableLength > 4 * 1024 * 1024, 'the burst is held by stdin, past the normal cap');
+    assert.equal(relay.totalStdinDroppedBytes, 0);
+    assert.equal(videoGaps, 0);
+});
+
+test('the normal cap and the video-gap return once the burst has been written and has drained (VAL-013)', () => {
+    const relay = createRelay('h264', { hasAudio: false });
+    relay._running = true;
+    relay._process = queueingProcess();
+    let videoGaps = 0;
+    relay.on('video-gap', () => { videoGaps += 1; });
+
+    const frameBytes = 1024 * 1024;
+    relay.beginBurst(6 * frameBytes);
+    for (let i = 0; i < 6; i += 1) assert.equal(relay.writeVideoFrame(Buffer.alloc(frameBytes), i * 3000), true);
+    // Written, not yet read: the live frame that follows is still taken.
+    assert.equal(relay.writeVideoFrame(Buffer.alloc(64), 6 * 3000), true);
+
+    // FFmpeg has worked through the burst: the 4 MiB cap is back.
+    relay._process.drain();
+    assert.equal(relay.writeVideoFrame(Buffer.alloc(64), 7 * 3000), true);
+    relay._process.stdin.writableLength = 5 * 1024 * 1024;
+    assert.equal(relay.writeVideoFrame(Buffer.alloc(512), 8 * 3000), false);
+    assert.equal(relay.totalStdinDroppedBytes, 512);
+    assert.equal(videoGaps, 0);
+
+    // Once it catches up the gap is reported, as it is without a burst.
+    relay._process.drain();
+    assert.equal(relay.writeVideoFrame(Buffer.alloc(64), 9 * 3000), false);
+    assert.equal(videoGaps, 1);
+    assert.equal(relay.writeVideoFrame(Buffer.alloc(64), 10 * 3000), true);
+});
+
+test('a burst that is declared but not yet written keeps its allowance while stdin is empty (VAL-013)', () => {
+    const relay = createRelay('h264', { hasAudio: false });
+    relay._running = true;
+    relay._process = queueingProcess();
+
+    relay.beginBurst(8 * 1024 * 1024);
+    // Two frames in, stdin is still under the normal cap: the other six are due.
+    assert.equal(relay.writeVideoFrame(Buffer.alloc(1024 * 1024), 0), true);
+    assert.equal(relay.writeVideoFrame(Buffer.alloc(1024 * 1024), 3000), true);
+    relay._process.stdin.writableLength = 9 * 1024 * 1024;
+    assert.equal(relay.writeVideoFrame(Buffer.alloc(1024 * 1024), 6000), true);
+    assert.equal(relay.totalStdinDroppedBytes, 0);
+});
+
 test('audio can be placed after a replayed GOP on the video timeline', () => {
     const relay = createRelay('h264');
     const { OggOpusMuxer } = require('../lib/oggOpusMuxer');
@@ -607,4 +683,26 @@ test('the relay\'s own stop() and a reconfigure never trigger a restart (VAL-011
     await flush();
     assert.equal(fake.relays.length, 3);
     assert.equal(relay.restartCount, 0);
+});
+
+test('stop() and a new start() clear an unfinished burst allowance (VAL-013)', async (t) => {
+    quietLogs(t);
+    const fake = loadRelayWithFakeSpawn();
+    const relay = createLifecycleRelay(fake);
+
+    await relay.start();
+    relay.beginBurst(10 * 1024 * 1024);
+    relay.stop();
+    await flush();
+    assert.equal(relay._burstRemainingBytes, 0, 'stop() clears the burst');
+
+    // A burst announced on the old process must not follow a new one.
+    relay.beginBurst(10 * 1024 * 1024);
+    await relay.start();
+    assert.equal(relay._burstRemainingBytes, 0, 'start() clears the burst');
+    fake.relays[1].stdin.writableLength = 5 * 1024 * 1024;
+    assert.equal(relay.writeVideoFrame(Buffer.alloc(512), 0), false, 'the normal cap applies to the new process');
+    assert.equal(relay.totalStdinDroppedBytes, 512);
+    relay.stop();
+    await flush();
 });
