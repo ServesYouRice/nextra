@@ -716,8 +716,7 @@ async function canBindIpv6Loopback() {
 // Starts the real server with WHIP on, binding the given hosts. `getOutput`
 // returns what it printed so far; `stop` asks it to shut down and cleans up.
 async function startAddressFamilyServer({ bindHost, whipBindHost, port, whipPort, t }) {
-    let rtcPort = await reserveTcpPort();
-    while (rtcPort === port || rtcPort === whipPort) rtcPort = await reserveTcpPort();
+    const { rtcPort } = await claimServerPorts();
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-address-family-'));
     await fs.writeFile(path.join(tempDir, 'index.html'), '<!doctype html><div id="root"></div>');
     let output = '';
@@ -791,9 +790,8 @@ test('BIND_HOST=::1 and WHIP_BIND_HOST=::1 advertise bracketed IPv6 URLs that re
         t.skip('IPv6 loopback is not available on this machine');
         return;
     }
-    const port = await reserveTcpPortOn('::1');
-    let whipPort = await reserveTcpPortOn('::1');
-    while (whipPort === port) whipPort = await reserveTcpPortOn('::1');
+    const { port } = await claimServerPorts();
+    const { port: whipPort } = await claimServerPorts();
     const baseUrl = `http://[::1]:${port}`;
     const { getOutput, stop } = await startAddressFamilyServer({ bindHost: '::1', whipBindHost: '::1', port, whipPort, t });
     let socket = null;
@@ -848,14 +846,12 @@ test('a second Nextra on the same IPv6 loopback port finds the running one inste
         t.skip('IPv6 loopback is not available on this machine');
         return;
     }
-    const port = await reserveTcpPortOn('::1');
-    let whipPort = await reserveTcpPortOn('::1');
-    while (whipPort === port) whipPort = await reserveTcpPortOn('::1');
+    const { port } = await claimServerPorts();
+    const { port: whipPort } = await claimServerPorts();
     const baseUrl = `http://[::1]:${port}`;
     const first = await startAddressFamilyServer({ bindHost: '::1', whipBindHost: '::1', port, whipPort, t });
 
-    let secondRtcPort = await reserveTcpPort();
-    while (secondRtcPort === port || secondRtcPort === whipPort) secondRtcPort = await reserveTcpPort();
+    const { rtcPort: secondRtcPort } = await claimServerPorts();
     let secondOutput = '';
     const second = spawn(process.execPath, ['server.js'], {
         cwd: projectRoot,
@@ -882,9 +878,8 @@ test('a second Nextra on the same IPv6 loopback port finds the running one inste
 });
 
 test('BIND_HOST=localhost and WHIP_BIND_HOST=localhost advertise the loopback address the listeners really bound', { concurrency: false, timeout: 60_000 }, async (t) => {
-    const port = await reserveTcpPort();
-    let whipPort = await reserveTcpPort();
-    while (whipPort === port) whipPort = await reserveTcpPort();
+    const { port } = await claimServerPorts();
+    const { port: whipPort } = await claimServerPorts();
     const { getOutput, stop } = await startAddressFamilyServer({ bindHost: 'localhost', whipBindHost: 'localhost', port, whipPort, t });
     let shutdownUrl = null;
 
@@ -908,9 +903,8 @@ test('BIND_HOST=localhost and WHIP_BIND_HOST=localhost advertise the loopback ad
 });
 
 test('the default IPv4 binding still advertises 127.0.0.1 for the host page and WHIP', { concurrency: false, timeout: 60_000 }, async (t) => {
-    const port = await reserveTcpPort();
-    let whipPort = await reserveTcpPort();
-    while (whipPort === port) whipPort = await reserveTcpPort();
+    const { port } = await claimServerPorts();
+    const { port: whipPort } = await claimServerPorts();
     const baseUrl = `http://127.0.0.1:${port}`;
     const { getOutput, stop } = await startAddressFamilyServer({ bindHost: '127.0.0.1', whipBindHost: '127.0.0.1', port, whipPort, t });
 
