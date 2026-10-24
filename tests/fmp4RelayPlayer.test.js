@@ -502,7 +502,9 @@ test('fMP4 relay player bounds an overflowing queue and requests a fresh generat
     assert.equal(player.getState().queueLength, 0);
     assert.equal(player.getState().queueBytes, 0);
     assert.ok(states.includes('buffering'));
-    assert.equal(states.at(-1), 'error');
+    // FakeSocket answers the fresh-init request with "unavailable". That is
+    // retried (see the VAL-093 tests), not a terminal error.
+    assert.equal(states.at(-1), 'buffering');
 });
 
 test('fMP4 relay player reports an unsupported browser when MediaSource is missing', { concurrency: false }, async (t) => {
@@ -570,4 +572,241 @@ test('fMP4 relay player uses ManagedMediaSource and disables remote playback whe
     assert.equal(video.disableRemotePlayback, true);
     assert.equal(video.src, 'blob:managed-1');
     player.stop();
+});
+
+// A socket that keeps every acknowledgement until the test answers it, so a test
+// decides when a get-media-init (or fallback-consume-start) reply arrives.
+class HeldAckSocket extends EventEmitter {
+    constructor() {
+        super();
+        this.requests = [];
+    }
+
+    emit(event, ...args) {
+        if (event === 'get-media-init' || event === 'fallback-consume-start') {
+            this.requests.push({ event, payload: args[0], ack: args[1] });
+            return true;
+        }
+        return super.emit(event, ...args);
+    }
+
+    serverEmit(event, payload) {
+        return super.emit(event, payload);
+    }
+
+    pending(event) {
+        return this.requests.filter((request) => request.event === event);
+    }
+}
+
+function initAnswer(generation) {
+    return {
+        success: true,
+        initSegment: Uint8Array.of(1, 2),
+        init: { generation, mimeType: MIME },
+    };
+}
+
+async function startHeldPlayer(t) {
+    const { createFmp4RelayPlayer } = await import('../src/lib/fmp4RelayPlayer.js');
+    const socket = new HeldAckSocket();
+    const video = new FakeVideoElement();
+    const states = [];
+    const errors = [];
+    const player = createFmp4RelayPlayer({
+        videoElement: video,
+        socket,
+        roomCode: 'ABC123',
+        onStateChange: (state) => states.push(state),
+        onError: (message) => errors.push(message),
+    });
+    t.after(() => player.stop());
+    player.start();
+    return { player, socket, video, states, errors };
+}
+
+// Plays generation 1 (pushed by the server), leaving the first get-media-init unanswered.
+async function startHeldPlaying(t) {
+    const context = await startHeldPlayer(t);
+    context.socket.serverEmit('media-init', { generation: 1, mimeType: MIME, initSegment: Uint8Array.of(1, 2) });
+    const mediaSource = FakeMediaSource.instances.at(-1);
+    mediaSource.open();
+    await flushTasks();
+    context.socket.serverEmit('media-chunk', { generation: 1, sequence: 1, keyframeStart: true, chunk: Uint8Array.of(3, 4) });
+    await flushTasks();
+    return { ...context, mediaSource, sourceBuffer: mediaSource.sourceBuffers[0] };
+}
+
+function assertPlayerStayedStopped({ player, video, states, errors }, before) {
+    assert.equal(FakeMediaSource.instances.length, before.mediaSources, 'no MediaSource is built after stop()');
+    assert.equal(video.src, '', 'the video element is left empty');
+    assert.equal(player.getState().state, 'stopped');
+    assert.equal(player.getState().generation, -1);
+    assert.deepEqual(states.slice(before.states), [], 'no state change after stop()');
+    assert.deepEqual(errors, [], 'no error after stop()');
+}
+
+test('VAL-092: an init answer that arrives after stop() leaves a stopped player alone', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const context = await startHeldPlayer(t);
+    const { player, socket } = context;
+    const [request] = socket.pending('get-media-init');
+    player.stop();
+    const before = { mediaSources: FakeMediaSource.instances.length, states: context.states.length };
+
+    request.ack(initAnswer(3));
+    assertPlayerStayedStopped(context, before);
+
+    request.ack({ success: false });
+    assertPlayerStayedStopped(context, before);
+    t.mock.timers.tick(120_000);
+    assert.equal(socket.pending('get-media-init').length, 1, 'a stopped player asks for nothing more');
+    assertPlayerStayedStopped(context, before);
+});
+
+test('VAL-092: a reset recovery answer that arrives after stop() leaves a stopped player alone', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const context = await startHeldPlaying(t);
+    const { player, socket, sourceBuffer } = context;
+
+    sourceBuffer.dispatch('error');
+    const requests = socket.pending('get-media-init');
+    assert.equal(requests.length, 2, 'the SourceBuffer error asked for a fresh init');
+    player.stop();
+    const before = { mediaSources: FakeMediaSource.instances.length, states: context.states.length };
+
+    requests[1].ack(initAnswer(2));
+    assertPlayerStayedStopped(context, before);
+
+    requests[1].ack({ success: false });
+    assertPlayerStayedStopped(context, before);
+    t.mock.timers.tick(120_000);
+    assert.equal(socket.pending('get-media-init').length, 2);
+    assertPlayerStayedStopped(context, before);
+});
+
+test('VAL-092: an init answer from before stop() is ignored by the same player started again', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const { player, socket } = await startHeldPlayer(t);
+    const [before] = socket.pending('get-media-init');
+    player.stop();
+    player.start();
+    const [, after] = socket.pending('get-media-init');
+    assert.ok(after, 'start() asked again');
+
+    before.ack(initAnswer(5));
+    assert.equal(FakeMediaSource.instances.length, 0, 'the answer of the earlier run builds nothing');
+    assert.equal(player.getState().generation, -1);
+
+    after.ack(initAnswer(5));
+    assert.equal(FakeMediaSource.instances.length, 1);
+    assert.equal(player.getState().generation, 5);
+});
+
+test('VAL-092: an init answer that a newer request has replaced is ignored', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const { player, socket } = await startHeldPlayer(t);
+    const [older] = socket.pending('get-media-init');
+
+    // Nothing came back in time: the player asks again.
+    t.mock.timers.tick(15_000);
+    const [consume] = socket.pending('fallback-consume-start');
+    consume.ack({});
+    const [, newer] = socket.pending('get-media-init');
+    assert.ok(newer, 'the timeout sent a newer request');
+
+    older.ack(initAnswer(4));
+    assert.equal(FakeMediaSource.instances.length, 0, 'the older answer builds nothing');
+    assert.equal(player.getState().generation, -1);
+
+    newer.ack(initAnswer(4));
+    assert.equal(FakeMediaSource.instances.length, 1);
+    assert.equal(player.getState().generation, 4);
+});
+
+test('VAL-093: reset recovery retries an init segment that is not available yet', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const { player, socket, sourceBuffer, states, errors } = await startHeldPlaying(t);
+
+    sourceBuffer.dispatch('error');
+    assert.equal(socket.pending('get-media-init').length, 2);
+    socket.pending('get-media-init')[1].ack({ success: false });
+    assert.deepEqual(errors, [], 'one unavailable answer is not the end');
+    assert.equal(player.getState().state, 'buffering');
+
+    t.mock.timers.tick(2000);
+    assert.equal(socket.pending('get-media-init').length, 3, 'the bounded retry asks again');
+    socket.pending('get-media-init')[2].ack(initAnswer(2));
+    assert.equal(FakeMediaSource.instances.length, 2, 'the recovery rebuilds the player');
+    assert.equal(player.getState().generation, 2);
+
+    FakeMediaSource.instances[1].open();
+    await flushTasks();
+    // The recovery succeeded: neither the retry nor the timeout is left to fire.
+    t.mock.timers.tick(120_000);
+    assert.deepEqual(errors, []);
+    assert.equal(socket.pending('get-media-init').length, 3);
+    assert.equal(socket.pending('fallback-consume-start').length, 0);
+    assert.notEqual(states.at(-1), 'error');
+});
+
+test('VAL-093: reset recovery whose answer never arrives retries, then reports one error', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const { player, socket, sourceBuffer, errors } = await startHeldPlaying(t);
+
+    sourceBuffer.dispatch('error');
+    assert.equal(socket.pending('get-media-init').length, 2);
+
+    // Three retries, as the normal bootstrap makes, each one answered with nothing.
+    for (let retry = 1; retry <= 3; retry += 1) {
+        t.mock.timers.tick(15_000);
+        assert.deepEqual(errors, [], `retry ${retry} is not an error`);
+        assert.equal(player.getState().state, 'buffering');
+        assert.equal(socket.pending('fallback-consume-start').length, retry, 'the timeout asks the server to start again');
+        socket.pending('fallback-consume-start')[retry - 1].ack({});
+        assert.equal(socket.pending('get-media-init').length, 2 + retry);
+    }
+
+    t.mock.timers.tick(15_000);
+    assert.deepEqual(errors, ['Relay init segment did not arrive in time']);
+    assert.equal(player.getState().state, 'error');
+
+    // The error is reported once, and nothing retries after it, not even when
+    // the last request is answered late with "unavailable".
+    socket.pending('get-media-init')[4].ack({ success: false });
+    t.mock.timers.tick(120_000);
+    assert.equal(errors.length, 1);
+    assert.equal(socket.pending('get-media-init').length, 5);
+});
+
+test('VAL-093: stop() during reset recovery clears the retry and timeout timers', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+
+    // An unavailable answer leaves a retry timer, and the init timeout runs too.
+    const unavailable = await startHeldPlaying(t);
+    unavailable.sourceBuffer.dispatch('error');
+    unavailable.socket.pending('get-media-init')[1].ack({ success: false });
+    unavailable.player.stop();
+    t.mock.timers.tick(120_000);
+    assert.equal(unavailable.socket.pending('get-media-init').length, 2, 'the retry timer is gone');
+    assert.equal(unavailable.socket.pending('fallback-consume-start').length, 0, 'the timeout is gone');
+    assert.deepEqual(unavailable.errors, []);
+    assert.equal(unavailable.player.getState().state, 'stopped');
+
+    // No answer at all leaves only the init timeout.
+    const silent = await startHeldPlaying(t);
+    silent.sourceBuffer.dispatch('error');
+    silent.player.stop();
+    t.mock.timers.tick(120_000);
+    assert.equal(silent.socket.pending('fallback-consume-start').length, 0);
+    assert.equal(silent.socket.pending('get-media-init').length, 2);
+    assert.deepEqual(silent.errors, []);
+    assert.equal(silent.player.getState().state, 'stopped');
 });

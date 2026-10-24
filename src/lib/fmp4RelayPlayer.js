@@ -74,6 +74,10 @@ export function createFmp4RelayPlayer(opts) {
     let initTimeoutTimer = null;
     let bufferingTimer = null;
     let initTimeoutRetries = 0;
+    // Counts get-media-init requests. An answer counts only while it belongs to
+    // the latest request: stop(), a newer request and a terminal error all move
+    // the count on, so an answer already in flight cannot act afterwards.
+    let initRequestEpoch = 0;
     let lastQueueDropWarnAt = 0;
     // The cushion of buffered media kept ahead of the playhead; see relayLiveSync.
     let targetSeconds = TARGET_START_SECONDS;
@@ -98,6 +102,8 @@ export function createFmp4RelayPlayer(opts) {
 
     function handleError(msg, err) {
         clearInitWaiters();
+        // No answer to an earlier init request may retry or recover after this.
+        initRequestEpoch += 1;
         clearBufferingTimer();
         console.error(`[fmp4-player] ${msg}`, err || '');
         onError?.(msg, err);
@@ -153,6 +159,7 @@ export function createFmp4RelayPlayer(opts) {
     }
 
     function resetAndRequestInit() {
+        if (state === 'stopped') return;
         // Full cleanup (handles abort + endOfStream + null-out)
         cleanupMediaSource();
         // Reject late fragments from the overflowed generation until a fresh
@@ -160,16 +167,13 @@ export function createFmp4RelayPlayer(opts) {
         currentGeneration = -1;
         lastSequence = 0;
         setState('buffering');
-        socket.emit('get-media-init', { roomCode, format: 'fmp4' }, (response) => {
-            if (response && response.success && response.initSegment) {
-                handleMediaInit(response.init
-                    ? { ...response.init, initSegment: response.initSegment }
-                    : response
-                );
-            } else {
-                handleError('Failed to recover — init segment unavailable');
-            }
-        });
+        // Recovery follows the same bounded policy as the first bootstrap: an
+        // unavailable answer is retried, and a missing one runs into the init
+        // timeout, which retries a few times before the one terminal error.
+        clearInitRetryTimer();
+        initTimeoutRetries = 0;
+        armInitTimeout();
+        requestCurrentInit({ silentUnavailable: false, retryOnUnavailable: true });
     }
 
     function trimBuffer() {
@@ -425,7 +429,10 @@ export function createFmp4RelayPlayer(opts) {
 
     function requestCurrentInit({ silentUnavailable = false, retryOnUnavailable = true } = {}) {
         if (state === 'stopped') return;
+        const epoch = ++initRequestEpoch;
         socket.emit('get-media-init', { roomCode, format: 'fmp4' }, (response) => {
+            // The player was stopped, asked again or failed since this request.
+            if (state === 'stopped' || epoch !== initRequestEpoch) return;
             if (response && response.success && response.initSegment) {
                 handleMediaInit(response.init
                     ? { ...response.init, initSegment: response.initSegment }
@@ -561,13 +568,16 @@ export function createFmp4RelayPlayer(opts) {
             cleanupMediaSource();
         }
 
-        mediaSource = createRelayMediaSource(videoElement);
-        const objectUrl = URL.createObjectURL(mediaSource);
+        const currentMediaSource = createRelayMediaSource(videoElement);
+        mediaSource = currentMediaSource;
+        const objectUrl = URL.createObjectURL(currentMediaSource);
         videoElement.src = objectUrl;
 
         const onSourceOpen = () => {
+            // Stopped, or rebuilt since: this MediaSource is no longer the player's.
+            if (state === 'stopped' || mediaSource !== currentMediaSource) return;
             try {
-                const currentSourceBuffer = mediaSource.addSourceBuffer(mimeType);
+                const currentSourceBuffer = currentMediaSource.addSourceBuffer(mimeType);
                 sourceBuffer = currentSourceBuffer;
                 // Sequence mode lays fragments end to end as they arrive. The
                 // server skips fragments for a viewer that falls behind and
@@ -630,9 +640,9 @@ export function createFmp4RelayPlayer(opts) {
             }
         };
 
-        mediaSource.addEventListener('sourceopen', onSourceOpen);
+        currentMediaSource.addEventListener('sourceopen', onSourceOpen);
         mediaSourceCleanupFns.push(() => {
-            mediaSource.removeEventListener('sourceopen', onSourceOpen);
+            currentMediaSource.removeEventListener('sourceopen', onSourceOpen);
             URL.revokeObjectURL(objectUrl);
         });
     }
@@ -700,6 +710,8 @@ export function createFmp4RelayPlayer(opts) {
     function stop() {
         setState('stopped');
         clearInitWaiters();
+        // Answers to init requests still in flight must find a player that moved on.
+        initRequestEpoch += 1;
         initTimeoutRetries = 0;
         cleanupFns.forEach(fn => { try { fn(); } catch { } });
         cleanupFns = [];
