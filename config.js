@@ -342,7 +342,8 @@ const config = {
     RELAY_VIDEO_BITS_PER_SECOND: parseIntEnv(process.env.RELAY_VIDEO_BITS_PER_SECOND, 45000000),
     // Per-socket cap on bytes queued in the engine.io write buffer before a
     // relay viewer is considered too slow (WebM viewers are kicked to recover;
-    // fMP4 viewers just skip fragments and seek past the gap client-side).
+    // fMP4 viewers just skip fragments and seek past the gap client-side). A late
+    // viewer's bootstrap, sent once at its start, is not counted.
     RELAY_SOCKET_MAX_BUFFERED_BYTES: parseIntEnv(process.env.RELAY_SOCKET_MAX_BUFFERED_BYTES, 16 * 1024 * 1024),
     // What one connection through the public link carries, in kbps. 0 measures
     // it when the link comes up; set it to skip the measurement.

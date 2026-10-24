@@ -384,7 +384,7 @@ Notes:
 | `RELAY_VIDEO_BITS_PER_SECOND` | `45000000` | Max relay video bitrate ceiling. No tuning is needed: a relay viewer that falls behind skips ahead to the next keyframe, and when every relay viewer falls behind the host lowers the relay bitrate (down to 2.5 Mbps) and raises it 25% after every 30 quiet seconds |
 | `RELAY_FLUSH_INTERVAL_MS` | `300` | Relay socket flush interval in ms |
 | `RELAY_PUBLIC_LINK_KBPS` | `0` | What one connection through the public link carries, in kbps. `0` measures it when the link comes up; set a value to skip the measurement. The OBS relay starts at 70% of it |
-| `RELAY_SOCKET_MAX_BUFFERED_BYTES` | `16777216` | Per-viewer relay send-buffer hard cap; a viewer past it is disconnected and rejoins (MP4 relay viewers normally skip ahead long before this) |
+| `RELAY_SOCKET_MAX_BUFFERED_BYTES` | `16777216` | Per-viewer relay send-buffer hard cap; a viewer past it is disconnected and rejoins (MP4 relay viewers normally skip ahead long before this). A late viewer's bootstrap, sent once at its start, is not counted |
 | `MAX_CONNECTIONS_PER_IP` | `60` | Rate limit: connections per IP |
 | `SOCKET_PING_TIMEOUT_MS` | `60000` | Grace period before a quiet watcher socket is considered disconnected |
 | `METRICS_BROADCAST_INTERVAL_MS` | `5000` | Room metrics broadcast interval |
