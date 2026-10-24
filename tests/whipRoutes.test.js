@@ -415,7 +415,7 @@ function createFakeTransport(id, plan = {}) {
 // A WHIP router on a real HTTP server with fake transports (one plan per POST, in order), a
 // fake Socket.IO server, spies for host metrics and relay prewarm, and a spy on the room's
 // media-pipeline ownWhip().
-async function startWhipHarness(hostId, transportPlans = []) {
+async function startWhipHarness(hostId, transportPlans = [], mediasoupRouter = {}) {
     const originalWhipEnabled = config.WHIP_ENABLED;
     config.WHIP_ENABLED = true;
     const room = await createRoom(hostId, { ingestMode: 'obs' });
@@ -444,7 +444,7 @@ async function startWhipHarness(hostId, transportPlans = []) {
     });
 
     const app = express();
-    app.use('/whip', createWhipRouter({}, {
+    app.use('/whip', createWhipRouter(mediasoupRouter, {
         createWebRtcTransport: async () => {
             const transport = createFakeTransport(`transport-${transports.length + 1}`, transportPlans[transports.length]);
             transports.push(transport);
@@ -1091,6 +1091,102 @@ test('ICE flapping before DTLS connects leaves no grace period or reconnecting f
         assertSessionLive(h, transport, resourceId);
     } finally {
         t.mock.timers.reset();
+        await h.close();
+    }
+});
+
+// Raw SPS/PPS and sprop as an earlier session's stream capture left them on the room.
+function seedPreviousSessionParameterSets(room) {
+    room.fallbackH264Sprop = 'c3BzLXByZXZpb3Vz,cHBzLXByZXZpb3Vz';
+    room.fallbackH264Sps = Buffer.from([0x67, 0x42, 0xe0, 0x1f]);
+    room.fallbackH264Pps = Buffer.from([0x68, 0xce, 0x3c, 0x80]);
+}
+
+test('closeWhipSession clears the SPS/PPS and sprop a session captured', { concurrency: false }, async () => {
+    const h = await startWhipHarness('whip-close-clears-sps', [{}]);
+    try {
+        seedPreviousSessionParameterSets(h.room);
+        closeWhipSession(h.room);
+        assert.equal(h.room.fallbackH264Sprop, null);
+        assert.equal(h.room.fallbackH264Sps, null);
+        assert.equal(h.room.fallbackH264Pps, null);
+    } finally {
+        await h.close();
+    }
+});
+
+test('a new WHIP session whose offer carries sprop starts its fallback relay without the previous session\'s SPS/PPS', { concurrency: false }, async () => {
+    const h = await startWhipHarness('whip-new-session-no-old-sps', [{}]);
+    const relayInputs = [];
+    try {
+        seedPreviousSessionParameterSets(h.room);
+        setMediaLifecycle({
+            startFallbackRelay: async (room) => {
+                relayInputs.push({ sprop: room.fallbackH264Sprop, sps: room.fallbackH264Sps, pps: room.fallbackH264Pps });
+            },
+        });
+        const response = await h.post();
+        assert.equal(response.status, 201);
+        const [transport] = h.transports;
+        transport.emit('dtlsstatechange', 'connected');
+        await flush();
+        assert.equal(relayInputs.length, 1, 'the fallback relay is prewarmed once');
+        assert.deepEqual(relayInputs[0], {
+            sprop: 'Z0LgH9oBQBbsBEAAAAMAQAAADyPGDKA=,aM4G4g==',
+            sps: null,
+            pps: null,
+        });
+    } finally {
+        await h.close();
+    }
+});
+
+// An RTP packet carrying SPS and PPS in one STAP-A aggregate.
+function spsPpsRtpPacket() {
+    const sps = Buffer.from([0x67, 0x42, 0xe0, 0x1f, 0xda, 0x01, 0x40, 0x16, 0xe8, 0x40]);
+    const pps = Buffer.from([0x68, 0xce, 0x3c, 0x80]);
+    const head = Buffer.alloc(12);
+    head[0] = 0x80;
+    head[1] = 96;
+    return Buffer.concat([head, Buffer.from([0x78, 0x00, sps.length]), sps, Buffer.from([0x00, pps.length]), pps]);
+}
+
+test('a sprop stream capture whose producer was replaced writes no SPS/PPS to the room and stops', { concurrency: false }, async () => {
+    const directConsumers = [];
+    const mediasoupRouter = {
+        createDirectTransport: async () => ({
+            consume: async () => {
+                const consumer = new EventEmitter();
+                consumer.closed = false;
+                consumer.requestKeyFrame = async () => {};
+                consumer.close = () => { consumer.closed = true; };
+                directConsumers.push(consumer);
+                return consumer;
+            },
+            close() {},
+        }),
+    };
+    const h = await startWhipHarness('whip-capture-replaced-producer', [{}], mediasoupRouter);
+    try {
+        // An offer without sprop-parameter-sets, so the capture runs after the session connects.
+        const response = await h.post(undefined, obsOffer());
+        assert.equal(response.status, 201);
+        h.transports[0].emit('dtlsstatechange', 'connected');
+        await flush();
+        await waitFor(() => directConsumers.length === 1, 'the sprop stream capture to consume the producer');
+        await flush();
+        const [consumer] = directConsumers;
+
+        // The session is replaced while the capture is still listening.
+        closeWhipSession(h.room);
+        consumer.emit('rtp', spsPpsRtpPacket());
+        await flush();
+
+        assert.equal(h.room.fallbackH264Sprop, null);
+        assert.equal(h.room.fallbackH264Sps, null);
+        assert.equal(h.room.fallbackH264Pps, null);
+        assert.equal(consumer.closed, true, 'the stale capture is stopped');
+    } finally {
         await h.close();
     }
 });
