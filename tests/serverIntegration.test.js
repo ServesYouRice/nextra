@@ -585,6 +585,69 @@ test('unexpected unhandled rejection logs its shutdown reason and exits for supe
     assert.match(output, /external supervisor must restart Nextra/);
 });
 
+// Requests over an agent that keeps its socket open, so a later request can follow
+// an earlier one within milliseconds on a connection that already exists.
+function requestOnAgent(agent, port, method, requestPath) {
+    return new Promise((resolve, reject) => {
+        const request = require('node:http').request({
+            agent,
+            host: '127.0.0.1',
+            port,
+            path: requestPath,
+            method,
+        }, (response) => {
+            response.resume();
+            response.once('end', () => resolve(response.statusCode));
+        });
+        request.setTimeout(5_000, () => request.destroy(new Error(`${method} ${requestPath} timed out`)));
+        request.once('error', reject);
+        request.end();
+    });
+}
+
+test('a fatal error during a graceful shutdown still ends the process with a failure code', { concurrency: false, timeout: 30_000 }, async (t) => {
+    const { port, rtcPort } = await claimServerPorts();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const testDistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-fatal-graceful-dist-'));
+    await fs.writeFile(path.join(testDistDir, 'index.html'), '<!doctype html><div id="root"></div>');
+    let output = '';
+    const agent = new (require('node:http').Agent)({ keepAlive: true, maxSockets: 1 });
+    let socket = null;
+    const child = spawn(process.execPath, ['server.js'], {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: createServerTestEnv({ port, rtcPort, distDir: testDistDir }),
+    });
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+
+    t.after(async () => {
+        socket?.close();
+        agent.destroy();
+        if (child.exitCode === null) child.kill();
+        await fs.rm(testDistDir, { recursive: true, force: true });
+    });
+
+    await waitForReady(baseUrl, child, () => output);
+    socket = await connectSocket(baseUrl);
+    const roomEnded = waitForSocketEvent(socket, 'room-ended');
+    // Open the connection before the shutdown starts: the graceful path stops
+    // accepting new ones 150 ms after it begins.
+    assert.equal(await requestOnAgent(agent, port, 'GET', '/healthz'), 200);
+    assert.equal(await requestOnAgent(agent, port, 'POST', '/api/test/shutdown'), 202);
+    assert.equal(await requestOnAgent(agent, port, 'POST', '/api/test/unhandled-rejection'), 202, output);
+
+    const exit = await waitForExit(child);
+    // The exit event can come before the last output has been read.
+    if (!child.stdout.destroyed || !child.stderr.destroyed) await new Promise((resolve) => child.once('close', resolve));
+    assert.equal(exit.code, 1, output);
+    // The stop was the graceful one when the error arrived: rooms were told so.
+    assert.equal((await roomEnded).code, 'server-shutdown');
+    assert.match(output, /shutdownReason=unhandled-rejection/);
+    assert.match(output, /external supervisor must restart Nextra/);
+});
+
 // Requests a path from the spawned server over HTTP or HTTPS (self-signed
 // certificate accepted) and returns the status, headers and body.
 function requestFromServer(baseUrl, requestPath, method = 'GET') {

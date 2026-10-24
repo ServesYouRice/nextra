@@ -64,6 +64,7 @@ const {
 const { resolveExecutablePath } = require('./lib/executable');
 const { renderOpenMetrics } = require('./lib/openMetrics');
 const { decideWorkerDeathAction } = require('./lib/workerRecovery');
+const { createShutdownCoordinator } = require('./lib/shutdownCoordinator');
 const { ROOM_STATE_CODES, createRoomState } = require('./lib/roomState');
 const { ExpiringTracker } = require('./lib/expiringTracker');
 const { execFile, execFileSync } = require('child_process');
@@ -1366,22 +1367,28 @@ async function startWhipHttpServer(whipRouter) {
     }
 
     let appServer = null;
-    let isShuttingDown = false;
-    requestFatalShutdown = async (shutdownReason) => {
-        if (isShuttingDown) return;
-        isShuttingDown = true;
-        serviceReady = false;
-        if (ioServer) {
-            ioServer.emit('room-ended', createRoomState(
-                ROOM_STATE_CODES.SERVER_FATAL,
-                'The server stopped unexpectedly. This room ended; create or join a new room after it restarts.'
-            ));
-            await new Promise((resolve) => setTimeout(resolve, 150));
-        }
-        cleanupGlobalResources();
-        console.error(`[fatal] exiting after ${shutdownReason}; an external supervisor must restart Nextra.`);
-        process.exit(1);
-    };
+    // One coordinator owns both ways the process ends (a requested stop and a fatal
+    // error), so a fatal error during a graceful shutdown still ends it with 1.
+    const shutdownCoordinator = createShutdownCoordinator({
+        notifyRoomsEnded: (kind) => {
+            if (!ioServer) return false;
+            ioServer.emit('room-ended', kind === 'fatal'
+                ? createRoomState(
+                    ROOM_STATE_CODES.SERVER_FATAL,
+                    'The server stopped unexpectedly. This room ended; create or join a new room after it restarts.'
+                )
+                : createRoomState(
+                    ROOM_STATE_CODES.SERVER_SHUTDOWN,
+                    'The server stopped. This room ended; create or join a new room.'
+                ));
+            return true;
+        },
+        onShutdownStart: () => { serviceReady = false; },
+        cleanup: cleanupGlobalResources,
+        closeServer: (onClosed) => appServer.close(onClosed),
+        exit: (code) => process.exit(code),
+    });
+    requestFatalShutdown = (shutdownReason) => shutdownCoordinator.requestFatal(shutdownReason);
     if (config.LOCAL_HTTPS) {
         const { cert, key } = await getOrCreateCert();
         appServer = https.createServer({ cert, key }, app);
@@ -1431,7 +1438,7 @@ async function startWhipHttpServer(whipRouter) {
     // then replace the process so new rooms can be created.
     setWorkerDeathHandler(() => {
         const recoveryAction = decideWorkerDeathAction({
-            isShuttingDown,
+            isShuttingDown: shutdownCoordinator.isShuttingDown(),
             uptimeSeconds: process.uptime(),
             minimumUptimeSeconds: config.WORKER_RECOVERY_MIN_UPTIME_SECONDS,
         });
@@ -1649,40 +1656,24 @@ async function startWhipHttpServer(whipRouter) {
         openBrowser(getHostPageUrl());
     });
 
-    async function shutdown(signal) {
-        if (isShuttingDown) return;
-        isShuttingDown = true;
-        serviceReady = false;
-        console.log(`\n${signal} received. Shutting down gracefully...`);
-        if (ioServer) {
-            ioServer.emit('room-ended', createRoomState(
-                ROOM_STATE_CODES.SERVER_SHUTDOWN,
-                'The server stopped. This room ended; create or join a new room.'
-            ));
-            await new Promise((resolve) => setTimeout(resolve, 150));
-        }
-        cleanupGlobalResources();
-
-        appServer.close(() => {
-            console.log('Server closed.');
-            process.exit(0);
+    // The coordinator arms the force-exit timer first (open connections, such as
+    // the prewarmed relay or socket.io clients, can keep the listener from closing)
+    // and turns an error inside the shutdown into the fatal path. The catch below
+    // is for a rejection that still gets past it.
+    requestGracefulShutdown = (signal) => shutdownCoordinator.requestGraceful(signal);
+    const onStopSignal = (signal) => {
+        requestGracefulShutdown(signal).catch((err) => {
+            handleUnexpectedProcessError('graceful-shutdown-failed', err);
         });
+    };
 
-        // Force exit if open connections (e.g. the prewarmed relay or socket.io
-        // clients) keep the server from closing. This is an intentional shutdown,
-        // so exit 0 — a non-zero code is misreported as a startup failure.
-        setTimeout(() => process.exit(0), 5000);
-    }
-
-    requestGracefulShutdown = shutdown;
-
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => onStopSignal('SIGINT'));
+    process.on('SIGTERM', () => onStopSignal('SIGTERM'));
     // Windows console-close (SIGHUP) and Ctrl+Break (SIGBREAK) take the same
     // shutdown path so the worker dying during teardown is flagged as an
     // intentional stop and never triggers the auto-restart.
-    process.on('SIGHUP', () => shutdown('SIGHUP'));
-    process.on('SIGBREAK', () => shutdown('SIGBREAK'));
+    process.on('SIGHUP', () => onStopSignal('SIGHUP'));
+    process.on('SIGBREAK', () => onStopSignal('SIGBREAK'));
 })().catch((err) => {
     console.error(`Fatal startup error: ${err?.stack || err?.message || err}`);
     cleanupGlobalResources();
