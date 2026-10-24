@@ -72,9 +72,9 @@ function fakeObsWebSocket(onRequest) {
     };
 }
 
-function fakeObs({ refuseStart = null, stallColorSpace = false } = {}) {
+function fakeObs({ refuseStart = null, stallColorSpace = false, encoderId = 'obs_nvenc_h264_tex' } = {}) {
     const status = { outputActive: false, outputReconnecting: false };
-    const profile = new Map([['Output/Mode', 'Advanced'], ['AdvOut/Encoder', 'obs_nvenc_h264_tex']]);
+    const profile = new Map([['Output/Mode', 'Advanced'], ['AdvOut/Encoder', encoderId]]);
     let stalled = false;
     const WebSocketImpl = fakeObsWebSocket((ws, request) => {
         const { requestType, requestData = {} } = request;
@@ -189,7 +189,8 @@ const encoderFileBefore = '{\r\n  "rate_control": "VBR",\r\n  "device": 1,\r\n  
 const failedSetups = [
     {
         name: 'a refused auto-start',
-        obs: () => fakeObs({ refuseStart: 'output busy' }),
+        // OBS already holds the AV1 encoder, so no restart is needed and the auto-start is attempted.
+        obs: () => fakeObs({ refuseStart: 'output busy', encoderId: 'obs_nvenc_av1_tex' }),
         overrides: { autoStart: true },
         failure: /^OBS configured, but auto-start failed: output busy /,
     },
