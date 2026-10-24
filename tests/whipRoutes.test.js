@@ -346,6 +346,201 @@ test('WHIP offers with a=ssrc for every produced section still reach the transpo
     }
 });
 
+// ── A start that is turned away leaves the running start's claim and the pending-start slot as they were ──
+
+// Resolves with the response, or with a stand-in when the request was admitted after all and now waits at a gated
+// transport: a regression then fails an assertion instead of hanging the test.
+async function responseOrStuck(request, ms = 1000) {
+    let timer;
+    const stuck = new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ status: 'admitted and still allocating', json: async () => ({}) }), ms);
+    });
+    try {
+        return await Promise.race([request, stuck]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+test('WHIP starts turned away with 409 while another is allocating leave that start\'s claim on the room in place', { concurrency: false }, async () => {
+    const originalWhipEnabled = config.WHIP_ENABLED;
+    config.WHIP_ENABLED = true;
+    const room = await createRoom('whip-claim-kept-host', { ingestMode: 'obs' });
+    const releases = [];
+    let transportCalls = 0;
+    let notifyEntered = null;
+    const waitForEntered = () => new Promise((resolve) => { notifyEntered = resolve; });
+    const app = express();
+    app.use('/whip', createWhipRouter({}, {
+        createWebRtcTransport: async () => {
+            transportCalls += 1;
+            notifyEntered?.();
+            notifyEntered = null;
+            await new Promise((resolve) => releases.push(resolve));
+            throw new Error('injected transport failure');
+        },
+    }));
+    const { server, baseUrl } = await listen(app);
+    const post = () => fetch(`${baseUrl}/whip/broadcast/${room.code}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp', Authorization: `Bearer ${room.hostToken}` },
+        body: VIDEO_OFFER,
+    });
+
+    try {
+        const firstEntered = waitForEntered();
+        const firstRequest = post();
+        await firstEntered;
+        assert.equal(room.whipStarting, true);
+        const claimedGeneration = room.whipGeneration;
+        assert.ok(claimedGeneration, 'the running start holds a session generation');
+        const assertClaimKept = () => {
+            assert.equal(room.whipStarting, true, 'the running start still holds its claim');
+            assert.equal(room.whipGeneration, claimedGeneration);
+            assert.equal(transportCalls, 1);
+        };
+
+        const secondResponse = await responseOrStuck(post());
+        assert.equal(secondResponse.status, 409);
+        assert.match((await secondResponse.json()).error, /already starting/);
+        assertClaimKept();
+
+        // The claim is still there for the next request: a third start is turned away too, not admitted
+        const thirdResponse = await responseOrStuck(post());
+        assert.equal(thirdResponse.status, 409);
+        assertClaimKept();
+
+        releases.shift()?.();
+        assert.equal((await firstRequest).status, 500);
+        assert.equal(room.whipStarting, false);
+        assert.equal(room.whipTransport, null);
+
+        // Once the winner is done the room is free again: the next start is admitted, then claims the room itself
+        const nextEntered = waitForEntered();
+        const nextRequest = post();
+        await nextEntered;
+        assert.equal(transportCalls, 2);
+        assert.equal(room.whipStarting, true);
+        releases.shift()?.();
+        assert.equal((await nextRequest).status, 500);
+        assert.equal(room.whipStarting, false);
+    } finally {
+        releases.splice(0).forEach((release) => release());
+        destroyRoom(room.code);
+        config.WHIP_ENABLED = originalWhipEnabled;
+        await new Promise((resolve) => server.close(resolve));
+    }
+});
+
+test('public WHIP starts turned away with 409 or 503 leave the running start\'s claim and the pending-start slot in place', { concurrency: false }, async () => {
+    const previous = {
+        enabled: config.WHIP_ENABLED,
+        publicEnabled: config.PUBLIC_WHIP_ENABLED,
+        rateMax: config.PUBLIC_WHIP_RATE_LIMIT_MAX,
+        pendingMax: config.PUBLIC_WHIP_MAX_PENDING_STARTS,
+    };
+    config.WHIP_ENABLED = true;
+    config.PUBLIC_WHIP_ENABLED = true;
+    config.PUBLIC_WHIP_RATE_LIMIT_MAX = 10;
+    config.PUBLIC_WHIP_MAX_PENDING_STARTS = 1;
+    const firstRoom = await createRoom('public-whip-kept-a', { ingestMode: 'obs' });
+    const secondRoom = await createRoom('public-whip-kept-b', { ingestMode: 'obs' });
+    const releases = [];
+    let enteredCount = 0;
+    let notifyEntered = null;
+    const waitForEntered = () => new Promise((resolve) => { notifyEntered = resolve; });
+    const app = express();
+    app.use('/whip', createWhipRouter({}, {
+        publicEndpoint: true,
+        getClientIp: (req) => req.headers['x-test-ip'] || 'unknown',
+        createWebRtcTransport: async () => {
+            enteredCount += 1;
+            notifyEntered?.();
+            notifyEntered = null;
+            await new Promise((resolve) => releases.push(resolve));
+            throw new Error('injected public transport failure');
+        },
+    }));
+    const { server, baseUrl } = await listen(app);
+    // Every request comes from its own address, so the per-IP limit of 10 is never what turns one away
+    const postRoom = (room, ip) => fetch(`${baseUrl}/whip/broadcast/${room.code}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/sdp',
+            Authorization: `Bearer ${room.hostToken}`,
+            'x-test-ip': ip,
+        },
+        body: VIDEO_OFFER,
+    });
+
+    try {
+        const firstEntered = waitForEntered();
+        const firstRequest = postRoom(firstRoom, '198.51.100.1');
+        await firstEntered;
+        assert.equal(enteredCount, 1);
+        assert.equal(firstRoom.whipStarting, true);
+        const claimedGeneration = firstRoom.whipGeneration;
+        assert.ok(claimedGeneration, 'the running start holds a session generation');
+        const assertWinnerIntact = () => {
+            assert.equal(firstRoom.whipStarting, true, 'the running start still holds its claim');
+            assert.equal(firstRoom.whipGeneration, claimedGeneration);
+            assert.equal(enteredCount, 1, 'no further start reached the transport');
+        };
+
+        // 503: the pending-start slot is taken, and being turned away does not give it back
+        const overlap = await responseOrStuck(postRoom(secondRoom, '198.51.100.2'));
+        assert.equal(overlap.status, 503);
+        assert.match((await overlap.json()).error, /capacity/);
+        assertWinnerIntact();
+
+        // 409 on the room that is starting: turned away before it takes a slot, so it must not give one back either
+        const sameRoom = await responseOrStuck(postRoom(firstRoom, '198.51.100.5'));
+        assert.equal(sameRoom.status, 409);
+        assertWinnerIntact();
+
+        // Still full after both: a further start from another address is turned away as well
+        const further = await responseOrStuck(postRoom(secondRoom, '198.51.100.4'));
+        assert.equal(further.status, 503);
+        assertWinnerIntact();
+
+        releases.shift()?.();
+        assert.equal((await firstRequest).status, 500);
+        assert.equal(firstRoom.whipStarting, false);
+        assert.equal(firstRoom.whipTransport, null);
+
+        const secondEntered = waitForEntered();
+        const afterRelease = postRoom(secondRoom, '198.51.100.3');
+        await secondEntered;
+        assert.equal(enteredCount, 2);
+        assert.equal(secondRoom.whipStarting, true);
+        releases.shift()?.();
+        assert.equal((await afterRelease).status, 500);
+        assert.equal(secondRoom.whipStarting, false);
+
+        // The slot count is back to exactly zero (not negative): two overlapping starts admit one and turn the other away
+        const winnerEntered = waitForEntered();
+        const winnerRequest = postRoom(firstRoom, '198.51.100.6');
+        await winnerEntered;
+        assert.equal(enteredCount, 3);
+        const loser = await responseOrStuck(postRoom(secondRoom, '198.51.100.7'));
+        assert.equal(loser.status, 503);
+        assert.equal(enteredCount, 3);
+        releases.shift()?.();
+        assert.equal((await winnerRequest).status, 500);
+        assert.equal(firstRoom.whipStarting, false);
+        assert.equal(secondRoom.whipStarting, false);
+    } finally {
+        releases.splice(0).forEach((release) => release());
+        destroyRoom(firstRoom.code);
+        destroyRoom(secondRoom.code);
+        config.WHIP_ENABLED = previous.enabled;
+        config.PUBLIC_WHIP_ENABLED = previous.publicEnabled;
+        config.PUBLIC_WHIP_RATE_LIMIT_MAX = previous.rateMax;
+        config.PUBLIC_WHIP_MAX_PENDING_STARTS = previous.pendingMax;
+        await new Promise((resolve) => server.close(resolve));
+    }
+});
+
 // ── Session generations: a stale startup or producer completion never touches a newer session ──
 
 // OBS's video + audio offer, with sprop-parameter-sets so going live does not start the stream capture.
