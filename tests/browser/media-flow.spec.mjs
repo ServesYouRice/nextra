@@ -224,6 +224,111 @@ async function installHeldWebSocket(page) {
     });
 }
 
+// Stands in for SourceBuffer failures on a viewer. The next append can reach
+// the SourceBuffer as bytes it cannot parse (a real append error: 'error' on
+// the SourceBuffer, then the MediaSource ends), or throw a DOMException of a
+// given name before it starts; appends can also be made never to finish. It
+// records the SourceBuffer removals and counts an append of a chunk that was
+// refused before.
+async function installRelayAppendFaults(page) {
+    await page.addInitScript(() => {
+        const faults = {
+            corruptNext: false,
+            corrupted: 0,
+            throwNext: '',
+            thrown: 0,
+            swallow: false,
+            swallowed: 0,
+            retried: 0,
+            removes: [],
+        };
+        let refused = null;
+        window.__nextraAppendFaults = faults;
+        const nativeAppend = SourceBuffer.prototype.appendBuffer;
+        const nativeRemove = SourceBuffer.prototype.remove;
+        SourceBuffer.prototype.appendBuffer = function appendBuffer(data) {
+            if (faults.throwNext) {
+                const name = faults.throwNext;
+                faults.throwNext = '';
+                faults.thrown += 1;
+                refused = data;
+                throw new DOMException(`Injected ${name}`, name);
+            }
+            if (faults.swallow) {
+                faults.swallowed += 1;
+                return undefined;
+            }
+            if (refused && data === refused) {
+                faults.retried += 1;
+                refused = null;
+            }
+            if (faults.corruptNext) {
+                faults.corruptNext = false;
+                faults.corrupted += 1;
+                return nativeAppend.call(this, new Uint8Array(data.byteLength));
+            }
+            return nativeAppend.call(this, data);
+        };
+        SourceBuffer.prototype.remove = function remove(start, end) {
+            faults.removes.push([start, end]);
+            return nativeRemove.call(this, start, end);
+        };
+    });
+}
+
+// Delivers every relay media chunk the viewer receives `copies` times, so its
+// queue fills many times faster than the recorder produces. A Socket.IO binary
+// event is a text frame (451-["media-chunk",{...placeholder}]) followed by its
+// binary attachment; the pair is handed to Socket.IO again.
+async function installMediaChunkFlood(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const flood = { copies: 1, flooded: 0 };
+        window.__nextraChunkFlood = flood;
+        window.WebSocket = class FloodedWebSocket extends NativeWebSocket {
+            get onmessage() {
+                return super.onmessage;
+            }
+
+            set onmessage(handler) {
+                let chunkHeader = null;
+                super.onmessage = typeof handler === 'function'
+                    ? (event) => {
+                        if (typeof event.data === 'string') {
+                            chunkHeader = event.data.startsWith('451-["media-chunk"') ? event : null;
+                            handler.call(this, event);
+                            return;
+                        }
+                        handler.call(this, event);
+                        if (chunkHeader && flood.copies > 1) {
+                            for (let copy = 1; copy < flood.copies; copy += 1) {
+                                handler.call(this, chunkHeader);
+                                handler.call(this, event);
+                            }
+                            flood.flooded += 1;
+                        }
+                        chunkHeader = null;
+                    }
+                    : handler;
+            }
+        };
+    });
+}
+
+// A relay viewer whose playback failed: the reason is shown, nothing reports
+// relay mode, Watch Stream is offered again, the MediaSource is gone from the
+// video element, and the server no longer sends the viewer relay media.
+async function expectRelayStoppedVisibly(viewerPage, request, code, reason) {
+    await expect(viewerPage.getByRole('alert')).toContainText(reason, { timeout: 10_000 });
+    await expect(viewerPage.getByText(/relay mode active/i)).toHaveCount(0);
+    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toBeEnabled();
+    expect(await viewerPage.locator('video').evaluate((video) => ({
+        src: video.getAttribute('src') || '',
+        hasStream: Boolean(video.srcObject),
+    }))).toEqual({ src: '', hasStream: false });
+    await expect.poll(async () => (await getRoomByCode(request, code))?.relayViewerCount).toBe(0);
+}
+
 async function getRoomByCode(request, code) {
     const metrics = await (await request.get('/api/metrics')).json();
     return metrics.rooms.list.find((room) => room.code === code) || null;
@@ -719,6 +824,134 @@ test('a relay viewer that is behind keeps playing across a VP8 recorder restart'
     const atRelease = await videoTime(viewerPage);
     await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atRelease + 3);
     expect(await viewerPage.locator('video').evaluate((video) => video.error?.code ?? null)).toBeNull();
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// Bytes the SourceBuffer cannot parse fire 'error' on it and end the
+// MediaSource. The player used to clear its append lock and nothing else, so
+// the picture froze under "relay mode active" until 240 chunks had piled up.
+test('a relay viewer whose stream turns unreadable is told why, gets Watch Stream back and can watch again', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installRelayAppendFaults(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(viewerPage, code, testInfo);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
+
+    await viewerPage.evaluate(() => { window.__nextraAppendFaults.corruptNext = true; });
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraAppendFaults.corrupted)).toBe(1);
+    await expectRelayStoppedVisibly(viewerPage, request, code, 'The browser could not read the relay stream');
+
+    // Watch Stream starts the relay again.
+    await viewerPage.getByRole('button', { name: 'Watch Stream' }).click();
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible();
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect.poll(async () => (await getRoomByCode(request, code))?.relayViewerCount).toBe(1);
+
+    // The MediaSource closing under the player, which nothing in Nextra asked
+    // for, ends playback the same way.
+    await viewerPage.locator('video').evaluate((video) => {
+        video.removeAttribute('src');
+        video.load();
+    });
+    await expectRelayStoppedVisibly(viewerPage, request, code, 'The browser closed the relay stream');
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The player used to take a chunk off its queue before appendBuffer() and only
+// log a synchronous failure, so the chunk was lost and playback went on
+// without it, whatever the error.
+test('a relay viewer whose SourceBuffer is full evicts and appends the same chunk again; any other refused append ends playback visibly', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installRelayAppendFaults(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(viewerPage, code, testInfo);
+    // An eviction keeps the 10 s before the playhead, so there must be more than that.
+    await expect.poll(async () => videoTime(viewerPage), { timeout: 25_000 }).toBeGreaterThan(11);
+
+    await viewerPage.evaluate(() => { window.__nextraAppendFaults.throwNext = 'QuotaExceededError'; });
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraAppendFaults.thrown)).toBe(1);
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraAppendFaults.retried),
+        'the refused chunk is appended again').toBe(1);
+    const { removes, currentTime } = await viewerPage.evaluate(() => ({
+        removes: window.__nextraAppendFaults.removes,
+        currentTime: document.querySelector('video').currentTime,
+    }));
+    expect(removes).toHaveLength(1);
+    expect(removes[0][0]).toBe(0);
+    expect(removes[0][1]).toBeGreaterThan(0);
+    expect(removes[0][1]).toBeLessThanOrEqual(currentTime - 10);
+    const atRetry = await videoTime(viewerPage);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atRetry + 2);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible();
+
+    await viewerPage.evaluate(() => { window.__nextraAppendFaults.throwNext = 'InvalidStateError'; });
+    await expectRelayStoppedVisibly(viewerPage, request, code, 'The browser refused relay media (InvalidStateError)');
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// A direct viewer whose WebRTC cannot connect falls back to the relay; that
+// relay start overflows its queue before anything buffers (appends never
+// finish, and every chunk arrives 30 times). The overflow used to be reported
+// as "cleaned up before media buffered": the attempt's cleanup settled the
+// start with its own generic error before the overflow could.
+test('a relay start that falls behind before it plays reports that, not a generic cleanup error', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installWebRtcStall(viewerPage);
+    await installRelayAppendFaults(viewerPage);
+    await installMediaChunkFlood(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
+    await expect(watchButton).toBeEnabled();
+    await viewerPage.evaluate(() => {
+        window.__nextraStall.blockIce = true;
+        window.__nextraAppendFaults.swallow = true;
+        window.__nextraChunkFlood.copies = 30;
+    });
+
+    await watchButton.click();
+    await expect(viewerPage.getByRole('alert'))
+        .toContainText('Relay playback fell behind and must be restarted.', { timeout: 30_000 });
+    expect(await viewerPage.evaluate(() => window.__nextraChunkFlood.flooded)).toBeGreaterThan(0);
+    await expect(viewerPage.getByText(/relay mode active|WebRTC mode active/i)).toHaveCount(0);
+    await expect(watchButton).toBeEnabled();
+    await expect.poll(async () => getRoomByCode(request, code)).toMatchObject({
+        relayViewerCount: 0,
+        mediasoupConsumerCount: 0,
+    });
 
     await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
     await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
