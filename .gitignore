@@ -51,7 +51,9 @@ cloudflared
 !README.md
 !SOURCE.md
 !THIRD_PARTY_NOTICES.md
-!.arbitra/**/*.md
+
+# arbitra's saved plans list open defects, so they stay on this machine.
+.arbitra/
 
 # Local scratch and the maintainer's local hosting notes stay out of git.
 /testing/
