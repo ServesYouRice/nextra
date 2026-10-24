@@ -66,6 +66,10 @@ export function createFmp4RelayPlayer(opts) {
     let mediaSourceCleanupFns = [];
     let consecutiveDrops = 0;
     const MAX_CONSECUTIVE_DROPS = 15;
+    // A fragment was dropped, so the GOP it belonged to is incomplete: whatever
+    // follows it cannot be decoded. Nothing is queued again until a fragment
+    // that starts on a keyframe arrives.
+    let awaitingKeyframe = false;
     let liveSyncTimer = null;
     let lastPlayTime = -1;
     let stallTicks = 0;
@@ -581,38 +585,60 @@ export function createFmp4RelayPlayer(opts) {
         switchReserve = 0;
     }
 
+    /**
+     * A fragment the player will not queue: the queue is full, or the player is
+     * waiting for a keyframe. Fragments that keep being turned away mean the
+     * player is not keeping up with the stream; at the limit it starts over from
+     * a fresh init segment.
+     */
+    function dropFragment(data, reason) {
+        consecutiveDrops++;
+        const now = Date.now();
+        if (now - lastQueueDropWarnAt > 1000 || consecutiveDrops >= MAX_CONSECUTIVE_DROPS) {
+            lastQueueDropWarnAt = now;
+            console.warn(`[fmp4-player] ${reason}, dropping fragment`, data.sequence, `(${consecutiveDrops} consecutive)`);
+        }
+        if (consecutiveDrops >= MAX_CONSECUTIVE_DROPS) {
+            consecutiveDrops = 0;
+            resetAndRequestInit();
+        }
+    }
+
     function handleMediaChunk(data) {
         // data: { format, generation, tier, sequence, keyframeStart, chunk }
         // After a SourceBuffer failure the player is on no generation until a
         // fresh init arrives, so the failed one's fragments end here.
         if (data.generation !== currentGeneration) return;
         if (typeof data.sequence === 'number' && data.sequence <= lastSequence) return;
-        if (typeof data.sequence === 'number') {
-            lastSequence = data.sequence;
-            // The server times this against when it sent the fragment: it is how
-            // it knows how far behind this viewer really is.
-            socket.emit('relay-ack', { generation: data.generation, sequence: data.sequence });
-        }
+        if (typeof data.sequence === 'number') lastSequence = data.sequence;
 
         if (appendQueue.length >= MAX_QUEUE_SIZE || queueBytes >= MAX_QUEUE_BYTES) {
-            consecutiveDrops++;
-            const now = Date.now();
-            if (now - lastQueueDropWarnAt > 1000 || consecutiveDrops >= MAX_CONSECUTIVE_DROPS) {
-                lastQueueDropWarnAt = now;
-                console.warn('[fmp4-player] Queue full, dropping fragment', data.sequence, `(${consecutiveDrops} consecutive)`);
-            }
-            if (consecutiveDrops >= MAX_CONSECUTIVE_DROPS) {
-                consecutiveDrops = 0;
-                resetAndRequestInit();
-            }
+            // This fragment is lost, and with it the rest of its GOP.
+            awaitingKeyframe = true;
+            dropFragment(data, 'Queue full');
             return;
         }
-        consecutiveDrops = 0;
+        if (awaitingKeyframe && data.keyframeStart !== true) {
+            // Its reference frames were dropped: appending it would hand the
+            // decoder inter-frames it cannot decode. This holds after the
+            // reset that follows too, so the rebuilt SourceBuffer begins on a
+            // keyframe.
+            dropFragment(data, 'Waiting for a keyframe');
+            return;
+        }
 
         const buffer = toUint8Array(data.chunk);
         if (buffer.byteLength === 0) return;
+        awaitingKeyframe = false;
+        consecutiveDrops = 0;
 
         enqueue(buffer);
+        // The server times this against when it sent the fragment: it is how it
+        // knows how far behind this viewer really is. A fragment that was
+        // dropped did not arrive in the sense that matters, so it is not acked.
+        if (typeof data.sequence === 'number') {
+            socket.emit('relay-ack', { generation: data.generation, sequence: data.sequence });
+        }
         processQueue();
     }
 
@@ -807,6 +833,8 @@ export function createFmp4RelayPlayer(opts) {
         initTimeoutRetries = 0;
         failureRecoveries = 0;
         userPaused = false;
+        awaitingKeyframe = false;
+        consecutiveDrops = 0;
         cleanupFns.forEach(fn => { try { fn(); } catch { } });
         cleanupFns = [];
         cleanupMediaSource();

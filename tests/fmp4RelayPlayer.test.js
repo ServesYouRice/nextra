@@ -1239,3 +1239,231 @@ test('VAL-095: a pause before stop() does not carry into the same player started
     await flushTasks();
     assert.equal(plays.count, 1, 'the new run starts playing');
 });
+
+// Overflow drops and acknowledgements (VAL-107, VAL-108). A SourceBuffer that
+// holds its updates keeps the append queue filling, and finishAppend frees one
+// slot at a time.
+async function startFillablePlayer(t, options) {
+    installMediaSource(t);
+    FakeSourceBuffer.holdUpdates = true;
+    const context = await startPlayer(t, options);
+    const acks = [];
+    context.socket.on('relay-ack', (ack) => acks.push(ack));
+    context.socket.serverEmit('media-init', { generation: 1, mimeType: MIME, initSegment: Uint8Array.of(1) });
+    const mediaSource = FakeMediaSource.instances[0];
+    mediaSource.open();
+    await flushTasks();
+    return { ...context, acks, mediaSource, sourceBuffer: mediaSource.sourceBuffers[0] };
+}
+
+function sendChunk(socket, sequence, keyframeStart, generation = 1) {
+    socket.serverEmit('media-chunk', { generation, sequence, keyframeStart, chunk: Uint8Array.of(sequence % 255) });
+}
+
+// Sends sequences 1..600 (a keyframe fragment first): the append queue is full.
+function fillQueue(socket) {
+    for (let sequence = 1; sequence <= 600; sequence += 1) sendChunk(socket, sequence, sequence === 1);
+}
+
+// The SourceBuffer finishes the append it holds and takes the next one off the queue.
+function finishAppend(sourceBuffer) {
+    sourceBuffer.updating = false;
+    sourceBuffer.dispatch('updateend');
+}
+
+function initRequests(socket) {
+    return socket.requests.filter(({ event }) => event === 'get-media-init').length;
+}
+
+test('VAL-107: after an overflow drop, fragments are discarded until one starts on a keyframe', { concurrency: false }, async (t) => {
+    const { player, socket, sourceBuffer } = await startFillablePlayer(t);
+    fillQueue(socket);
+    assert.equal(player.getState().queueLength, 600);
+
+    // The queue is full: this one is dropped.
+    sendChunk(socket, 601, false);
+    assert.equal(player.getState().queueLength, 600);
+
+    // A slot frees up. The fragments that follow continue a GOP whose start was
+    // thrown away: none of them may be appended.
+    finishAppend(sourceBuffer);
+    assert.equal(player.getState().queueLength, 599);
+    sendChunk(socket, 602, false);
+    sendChunk(socket, 603, false);
+    assert.equal(player.getState().queueLength, 599, 'a mid-GOP fragment is not queued');
+
+    // The next keyframe fragment is.
+    sendChunk(socket, 604, true);
+    assert.equal(player.getState().queueLength, 600);
+
+    // Whatever follows the keyframe continues from it and is queued.
+    finishAppend(sourceBuffer);
+    sendChunk(socket, 605, false);
+    assert.equal(player.getState().queueLength, 600);
+});
+
+test('VAL-107: interleaved drops never let a mid-GOP fragment in', { concurrency: false }, async (t) => {
+    const { player, socket, sourceBuffer } = await startFillablePlayer(t);
+    fillQueue(socket);
+
+    // One drop, a free slot, a fragment that must wait for a keyframe; again and
+    // again. The accepted keyframe in between is what ends each wait.
+    let sequence = 601;
+    for (let round = 0; round < 3; round += 1) {
+        sendChunk(socket, sequence++, false); // full: dropped
+        finishAppend(sourceBuffer);
+        const room = player.getState().queueLength;
+        sendChunk(socket, sequence++, false); // room, but no keyframe yet
+        assert.equal(player.getState().queueLength, room, `round ${round}: the mid-GOP fragment is discarded`);
+        sendChunk(socket, sequence++, true);
+        assert.equal(player.getState().queueLength, room + 1, `round ${round}: the keyframe is accepted`);
+    }
+});
+
+test('VAL-107: a keyframe fragment that is itself dropped does not end the wait', { concurrency: false }, async (t) => {
+    const { player, socket, sourceBuffer } = await startFillablePlayer(t);
+    fillQueue(socket);
+
+    sendChunk(socket, 601, true); // a keyframe, but the queue is full: dropped, and its GOP is lost
+    finishAppend(sourceBuffer);
+    sendChunk(socket, 602, false);
+    assert.equal(player.getState().queueLength, 599, 'the rest of a GOP whose keyframe was dropped is not queued');
+    sendChunk(socket, 603, true);
+    assert.equal(player.getState().queueLength, 600);
+});
+
+test('VAL-107: a stall that keeps discarding fragments still ends in a fresh init request', { concurrency: false }, async (t) => {
+    const states = [];
+    const { player, socket, sourceBuffer } = await startFillablePlayer(t, { onStateChange: (state) => states.push(state) });
+    fillQueue(socket);
+    const before = initRequests(socket);
+
+    sendChunk(socket, 601, false); // drop 1
+    finishAppend(sourceBuffer);
+    // Fragments discarded while waiting for a keyframe count as drops too: 13
+    // more make 14, one short of the limit of 15.
+    for (let sequence = 602; sequence <= 614; sequence += 1) sendChunk(socket, sequence, false);
+    assert.equal(initRequests(socket), before, 'one short of the limit: no request yet');
+    assert.equal(player.getState().queueLength, 599, 'nothing was queued while waiting');
+
+    sendChunk(socket, 615, false);
+    assert.equal(initRequests(socket), before + 1, 'the 15th consecutive drop asks for a fresh init segment');
+    assert.equal(player.getState().queueLength, 0);
+    assert.equal(states.at(-1), 'buffering');
+});
+
+test('VAL-107: a keyframe ends the wait and the count of consecutive drops starts over', { concurrency: false }, async (t) => {
+    const { socket, sourceBuffer } = await startFillablePlayer(t);
+    fillQueue(socket);
+    const before = initRequests(socket);
+
+    // Ten fragments dropped or discarded, then a keyframe: below the limit of 15.
+    sendChunk(socket, 601, false);
+    finishAppend(sourceBuffer);
+    for (let sequence = 602; sequence <= 610; sequence += 1) sendChunk(socket, sequence, false);
+    sendChunk(socket, 611, true);
+    // A second episode of the same size must not add up to the first.
+    sendChunk(socket, 612, false); // the queue is full again
+    finishAppend(sourceBuffer);
+    for (let sequence = 613; sequence <= 621; sequence += 1) sendChunk(socket, sequence, false);
+    sendChunk(socket, 622, true);
+    assert.equal(initRequests(socket), before, 'two episodes of 10 drops are not 20 in a row');
+});
+
+test('VAL-107: the wait for a keyframe holds for the SourceBuffer built after the reset', { concurrency: false }, async (t) => {
+    const { socket, sourceBuffer } = await startFillablePlayer(t);
+    fillQueue(socket);
+    sendChunk(socket, 601, false);
+    finishAppend(sourceBuffer);
+    for (let sequence = 602; sequence <= 615; sequence += 1) sendChunk(socket, sequence, false);
+    // The 15th drop reset the player; the server answers with a fresh init.
+    const mediaSources = FakeMediaSource.instances.length;
+    socket.serverEmit('media-init', { generation: 2, mimeType: MIME, initSegment: Uint8Array.of(9) });
+    assert.equal(FakeMediaSource.instances.length, mediaSources + 1);
+    FakeMediaSource.instances.at(-1).open();
+    await flushTasks();
+    const rebuilt = FakeMediaSource.instances.at(-1).sourceBuffers[0];
+    FakeSourceBuffer.holdUpdates = false;
+    finishAppend(rebuilt);
+    await flushTasks();
+    const appendedBefore = rebuilt.appended.length;
+
+    sendChunk(socket, 1, false, 2);
+    await flushTasks();
+    assert.equal(rebuilt.appended.length, appendedBefore, 'a mid-GOP fragment is not appended to the new SourceBuffer');
+    sendChunk(socket, 2, true, 2);
+    await flushTasks();
+    assert.deepEqual([...rebuilt.appended.at(-1)], [2]);
+});
+
+test('VAL-107: with no drop, fragments that do not start on a keyframe are queued as before', { concurrency: false }, async (t) => {
+    const { player, socket } = await startFillablePlayer(t);
+    sendChunk(socket, 1, true);
+    sendChunk(socket, 2, false);
+    sendChunk(socket, 3, undefined);
+    assert.equal(player.getState().queueLength, 3);
+});
+
+test('VAL-107: stop() ends the wait for a keyframe: the same player started again takes any fragment', { concurrency: false }, async (t) => {
+    const { player, socket } = await startFillablePlayer(t);
+    fillQueue(socket);
+    sendChunk(socket, 601, false); // dropped: waiting for a keyframe
+    player.stop();
+
+    player.start();
+    socket.serverEmit('media-init', { generation: 2, mimeType: MIME, initSegment: Uint8Array.of(1, 2) });
+    FakeMediaSource.instances.at(-1).open();
+    await flushTasks();
+    sendChunk(socket, 1, false, 2);
+    assert.equal(player.getState().queueLength, 1);
+});
+
+test('VAL-108: relay-ack is sent for the fragments that were queued, not for dropped ones', { concurrency: false }, async (t) => {
+    const { player, socket, sourceBuffer, acks } = await startFillablePlayer(t);
+    fillQueue(socket);
+    assert.equal(acks.length, 600);
+    assert.deepEqual(acks[0], { generation: 1, sequence: 1 });
+    assert.deepEqual(acks.at(-1), { generation: 1, sequence: 600 });
+
+    // Dropped for a full queue.
+    sendChunk(socket, 601, true);
+    assert.equal(acks.length, 600, 'a fragment dropped for a full queue is not acknowledged');
+
+    // Discarded while waiting for a keyframe.
+    finishAppend(sourceBuffer);
+    sendChunk(socket, 602, false);
+    assert.equal(acks.length, 600, 'a fragment discarded while waiting for a keyframe is not acknowledged');
+
+    // Queued.
+    sendChunk(socket, 603, true);
+    assert.equal(player.getState().queueLength, 600);
+    assert.equal(acks.length, 601);
+    assert.deepEqual(acks.at(-1), { generation: 1, sequence: 603 });
+});
+
+test('VAL-108: relay-ack count equals the number of fragments queued through an overflow and a reset', { concurrency: false }, async (t) => {
+    const { player, socket, acks } = await startFillablePlayer(t);
+    for (let sequence = 1; sequence <= 700; sequence += 1) sendChunk(socket, sequence, sequence === 1);
+    // 600 were queued; 601..615 were dropped and the 15th reset the player; the
+    // rest belong to a generation the player has let go of.
+    assert.equal(player.getState().queueLength, 0, 'the reset emptied the queue');
+    assert.equal(acks.length, 600);
+    assert.deepEqual(acks.map(({ sequence }) => sequence), Array.from({ length: 600 }, (_, i) => i + 1));
+});
+
+test('VAL-108: a fragment seen twice is queued and acknowledged once', { concurrency: false }, async (t) => {
+    const { player, socket, acks } = await startFillablePlayer(t);
+    sendChunk(socket, 1, true);
+    sendChunk(socket, 2, false);
+    sendChunk(socket, 2, false);
+    sendChunk(socket, 1, true);
+    assert.equal(player.getState().queueLength, 2);
+    assert.deepEqual(acks.map(({ sequence }) => sequence), [1, 2]);
+});
+
+test('VAL-108: an empty fragment is not queued and not acknowledged', { concurrency: false }, async (t) => {
+    const { player, socket, acks } = await startFillablePlayer(t);
+    socket.serverEmit('media-chunk', { generation: 1, sequence: 1, keyframeStart: true, chunk: new Uint8Array(0) });
+    assert.equal(player.getState().queueLength, 0);
+    assert.deepEqual(acks, []);
+});
