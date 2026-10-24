@@ -351,6 +351,11 @@ const config = {
     // Avoid restarting during an immediate startup crash loop. Tests can set 0
     // when they intentionally kill a fully initialized worker.
     WORKER_RECOVERY_MIN_UPTIME_SECONDS: parseIntEnv(process.env.WORKER_RECOVERY_MIN_UPTIME_SECONDS, 30),
+    // Set when a service manager, systemd or a container restart policy restarts
+    // Nextra after it exits. A mediasoup worker death after the minimum uptime then
+    // ends the process with exit code 1 and starts no replacement of its own; without
+    // it, Nextra starts a visible replacement process itself.
+    EXTERNAL_SUPERVISOR: parseBoolEnv(process.env.EXTERNAL_SUPERVISOR, false),
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),
     OPERATOR_TOKEN: (process.env.OPERATOR_TOKEN || '').trim(),
