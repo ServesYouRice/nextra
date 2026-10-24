@@ -666,3 +666,41 @@ test('isIngestModeMismatch: only a mode other than the waiting room\'s own is a 
     assert.equal(isIngestModeMismatch({ recoveredRoom: null, ingestMode: 'obs' }), false);
     assert.equal(isIngestModeMismatch({ recoveredRoom: undefined, ingestMode: 'browser' }), false);
 });
+
+test('rememberSocketId keeps the page\'s latest connection ids, oldest first, once each', async () => {
+    const { rememberSocketId, HOST_STOP_SOCKET_IDS } = await loadRecovery();
+
+    let ids = [];
+    ids = rememberSocketId(ids, 'first');
+    // A disconnected socket has no id: nothing is added.
+    ids = rememberSocketId(ids, undefined);
+    ids = rememberSocketId(ids, '');
+    ids = rememberSocketId(ids, 'second');
+    ids = rememberSocketId(ids, 'first');
+    assert.deepEqual(ids, ['second', 'first']);
+
+    const frozen = Object.freeze(['a', 'b', 'c']);
+    assert.deepEqual(rememberSocketId(frozen, 'd', 3), ['b', 'c', 'd']);
+    assert.deepEqual(frozen, ['a', 'b', 'c'], 'the list given is left as it was');
+
+    for (let n = 0; n < HOST_STOP_SOCKET_IDS + 5; n += 1) ids = rememberSocketId(ids, `id-${n}`);
+    assert.equal(ids.length, HOST_STOP_SOCKET_IDS);
+    assert.equal(ids.at(-1), `id-${HOST_STOP_SOCKET_IDS + 4}`);
+    assert.ok(HOST_STOP_SOCKET_IDS <= 16, 'no more than the server takes');
+});
+
+test('hostStoppedPayload names the room, its token and the page\'s connections, or nothing without a room', async () => {
+    const { hostStoppedPayload } = await loadRecovery();
+    const socketIds = ['old', 'new'];
+
+    const payload = hostStoppedPayload({ code: 'ABCDEF', hostToken: 't'.repeat(48), socketIds });
+    assert.deepEqual(payload, { code: 'ABCDEF', hostToken: 't'.repeat(48), hostSocketIds: ['old', 'new'] });
+    // A copy: a later 'connect' does not change a stop already buffered.
+    socketIds.push('newer');
+    assert.deepEqual(payload.hostSocketIds, ['old', 'new']);
+
+    assert.equal(hostStoppedPayload({ code: null, hostToken: 't'.repeat(48), socketIds }), undefined);
+    assert.equal(hostStoppedPayload({ code: 'ABCDEF', hostToken: null, socketIds }), undefined);
+    assert.equal(hostStoppedPayload({ code: 'ABCDEF', hostToken: '', socketIds }), undefined);
+    assert.equal(hostStoppedPayload({ code: 'ABCDEF', hostToken: 't'.repeat(48), socketIds: [] }), undefined);
+});

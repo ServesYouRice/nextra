@@ -20,10 +20,12 @@ import { obsOperationQueue } from './lib/obsOperationQueue.mjs';
 import {
     START_PHASES,
     createCancellableWait,
+    hostStoppedPayload,
     isIngestModeMismatch,
     reclaimAfterReconnect,
     reclaimWithRetry,
     recoveredRoomIngestMode,
+    rememberSocketId,
     shouldStopObsAfterFailedReclaim,
     shouldTeardownAfterStartFailure,
 } from './lib/hostRecovery.mjs';
@@ -531,6 +533,8 @@ export default function HostView() {
     const resumeRoomRef = useRef(null);
     // The AbortController of onReconnect's reclaim for the room being shared.
     const reconnectReclaimRef = useRef(null);
+    // The ids of this page's latest Socket.IO connections (rememberSocketId).
+    const socketIdsRef = useRef([]);
     const pageHidingRef = useRef(false);
     const isSharingRef = useRef(false);
     const releaseNavGuardRef = useRef(null);
@@ -1051,6 +1055,31 @@ export default function HostView() {
         releaseHostSession();
     }, [releaseHostSession]);
 
+    useEffect(() => {
+        const remember = () => {
+            socketIdsRef.current = rememberSocketId(socketIdsRef.current, socket.id);
+        };
+        remember();
+        socket.on('connect', remember);
+        return () => socket.off('connect', remember);
+    }, [socket]);
+
+    // The host's stop of the room this page holds; call it before cleanup(),
+    // which forgets the room. A stop made while the socket is down goes out on
+    // the next connection, which the server does not know as the room's host,
+    // so it names the room, its host token and this page's connections
+    // (hostStoppedPayload). A start's compensating stop (createStartAttempt)
+    // stays bare: it acts on the socket's own room.
+    const sendHostStopped = useCallback(() => {
+        const payload = hostStoppedPayload({
+            code: roomCodeRef.current,
+            hostToken: hostTokenRef.current,
+            socketIds: socketIdsRef.current,
+        });
+        if (payload) socket.emit('host-stopped', payload);
+        else socket.emit('host-stopped');
+    }, [socket]);
+
     // Ends the start operation that owns the session and returns it, the
     // token of the session the caller tears down.
     const endStartOperation = useCallback((reason) => {
@@ -1116,7 +1145,7 @@ export default function HostView() {
             const token = startGuard.activeOperation;
             startGuard.invalidate('pagehide');
             stopObsIngest(token, { unloading: true });
-            socket.emit('host-stopped');
+            sendHostStopped();
             cleanup();
         };
         // Prompt only; tearing the room down here would strand the host on a
@@ -1152,12 +1181,12 @@ export default function HostView() {
                     const token = startGuard.activeOperation;
                     startGuard.invalidate('unmount');
                     stopObsIngest(token);
-                    socket.emit('host-stopped');
+                    sendHostStopped();
                     cleanup();
                 }
             }, 0);
         };
-    }, [socket, cleanup, stopObsIngest]);
+    }, [socket, cleanup, sendHostStopped, stopObsIngest]);
 
     useEffect(() => {
         // Lasts while this room is shared. Aborted by this cleanup (Stop
@@ -1618,7 +1647,7 @@ export default function HostView() {
                     // reclaim it.
                     if (pageHidingRef.current && reloadRecoveryEnabledRef.current) return;
                     isSharingRef.current = false;
-                    socket.emit('host-stopped');
+                    sendHostStopped();
                     cleanup();
                 });
             }
@@ -1810,7 +1839,7 @@ export default function HostView() {
             // A failure after OBS auto-configuration can leave OBS streaming at
             // the room this catch is about to destroy.
             stopObsIngest(endStartOperation('start-failed'));
-            socket.emit('host-stopped');
+            sendHostStopped();
             cleanup();
         } finally {
             // Every exit settles the room step, so a newer start never waits on
@@ -1825,6 +1854,7 @@ export default function HostView() {
         ingestMode,
         cleanup,
         endStartOperation,
+        sendHostStopped,
         stopObsIngest,
         runObsConfigure,
         establishObsControlChannel,
@@ -2031,9 +2061,9 @@ export default function HostView() {
         // a navigation issued in this same task is not warned about a room that
         // is already gone.
         isSharingRef.current = false;
-        socket.emit('host-stopped');
+        sendHostStopped();
         cleanup();
-    }, [socket, cleanup, endStartOperation, stopObsIngest, viewerCount, whepViewerCount]);
+    }, [cleanup, endStartOperation, sendHostStopped, stopObsIngest, viewerCount, whepViewerCount]);
 
     const handleObsTryAv1Change = useCallback((enabled) => {
         setObsTryAv1(enabled);
