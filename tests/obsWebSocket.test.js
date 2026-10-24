@@ -862,6 +862,238 @@ test('a setup whose stream cannot be confirmed stopped says its rollback is inco
     }
 });
 
+// A fake OBS for the setup-deadline tests. Every request is logged as it
+// arrives ('SetStreamServiceSettings' with the service type it writes) and the
+// socket logs 'close', so the order of the two can be asserted. An idle stream
+// is answered; `onServiceWrite(ws, request, count)` is called for each service
+// write, and the write is answered unless it returns 'stall'.
+function deadlineObs(onServiceWrite = () => {}) {
+    const log = [];
+    const status = { outputActive: false, outputReconnecting: false };
+    let serviceWrites = 0;
+    const Base = fakeObsWebSocket((ws, request) => {
+        const { requestType, requestData } = request;
+        log.push(requestType === 'SetStreamServiceSettings' ? `${requestType}:${requestData.streamServiceType}` : requestType);
+        if (requestType === 'GetStreamStatus') {
+            queueMicrotask(() => ws.respond(request, { ...status }));
+            return;
+        }
+        if (requestType === 'StartStream' || requestType === 'StopStream') {
+            status.outputActive = requestType === 'StartStream';
+        }
+        if (requestType === 'GetStreamServiceSettings') {
+            queueMicrotask(() => ws.respond(request, {
+                streamServiceType: 'rtmp_custom',
+                streamServiceSettings: { server: 'rtmp://previous.example/live' },
+            }));
+            return;
+        }
+        if (requestType === 'SetStreamServiceSettings') {
+            serviceWrites += 1;
+            if (onServiceWrite(ws, request, serviceWrites) === 'stall') return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    });
+    class DeadlineObsSocket extends Base {
+        close() {
+            if (!this.closed) log.push('close');
+            super.close();
+        }
+    }
+    return { WebSocketImpl: DeadlineObsSocket, log };
+}
+
+const deadlineSetup = {
+    whipUrl: 'http://127.0.0.1:8889/whip/room',
+    bearerToken: 'token',
+};
+
+test('a setup that runs out of time rolls back over the open connection before it closes', async () => {
+    // OBS never answers the first service write, so the setup is stuck in it
+    // when the deadline passes. OBS may well have applied it.
+    const obs = deadlineObs((ws, request, count) => (count === 1 ? 'stall' : undefined));
+    const { configureObsStream } = await obsWebSocketModule;
+
+    const result = await configureObsStream({
+        ...deadlineSetup,
+        connectionOptions: connectionOptions(obs.WebSocketImpl, {
+            requestTimeoutMs: 5000,
+            transactionTimeoutMs: 50,
+        }),
+    });
+
+    assert.deepEqual(obs.log, [
+        'GetStreamStatus',
+        'GetStreamServiceSettings',
+        'SetStreamServiceSettings:whip_custom',
+        'SetStreamServiceSettings:rtmp_custom',
+        'close',
+    ]);
+    assert.deepEqual(result, {
+        success: false,
+        message: 'OBS setup timed out after 50ms. OBS settings were restored.',
+    });
+});
+
+test('a rollback that fails at the deadline is reported next to the timeout', async () => {
+    const obs = deadlineObs((ws, request, count) => {
+        if (count === 1) return 'stall';
+        ws.respond(request, {}, { result: false, comment: 'restore denied' });
+        return 'stall';
+    });
+    const { configureObsStream } = await obsWebSocketModule;
+
+    const result = await configureObsStream({
+        ...deadlineSetup,
+        connectionOptions: connectionOptions(obs.WebSocketImpl, {
+            requestTimeoutMs: 5000,
+            transactionTimeoutMs: 50,
+        }),
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.message, /^OBS setup timed out after 50ms\./);
+    assert.match(result.message, /Rollback incomplete: SetStreamServiceSettings: restore denied/);
+    assert.doesNotMatch(result.message, /were restored/);
+});
+
+test('a rollback that never finishes cannot hold the setup past its hard cap', async () => {
+    // The restore is never answered and its own request deadline is far away.
+    const obs = deadlineObs((ws, request, count) => (count <= 2 ? 'stall' : undefined));
+    const { configureObsStream } = await obsWebSocketModule;
+    const startedAt = Date.now();
+
+    const result = await configureObsStream({
+        ...deadlineSetup,
+        connectionOptions: connectionOptions(obs.WebSocketImpl, {
+            requestTimeoutMs: 10000,
+            transactionTimeoutMs: 50,
+            deadlineGraceMs: 80,
+        }),
+    });
+
+    assert.ok(Date.now() - startedAt < 5000, 'settled by the hard cap, not by the request deadline');
+    assert.deepEqual(obs.log.slice(-2), ['SetStreamServiceSettings:rtmp_custom', 'close']);
+    assert.equal(result.success, false);
+    assert.match(result.message, /^OBS setup timed out after 50ms\./);
+    assert.match(result.message, /Rollback incomplete: .*80ms/);
+});
+
+test('a rollback already under way when the deadline passes is not cut off', async () => {
+    // The setup fails by itself (OBS has no AV1 encoder) and the restore is
+    // answered after the deadline. The result stays the failure it was.
+    const obs = deadlineObs((ws, request, count) => {
+        if (count !== 2) return undefined;
+        setTimeout(() => ws.respond(request), 700);
+        return 'stall';
+    });
+    const { configureObsStream } = await obsWebSocketModule;
+
+    const result = await configureObsStream({
+        ...deadlineSetup,
+        encoderSettings: { videoCodec: 'av1', obsEncoderIds: [] },
+        connectionOptions: connectionOptions(obs.WebSocketImpl, {
+            requestTimeoutMs: 5000,
+            transactionTimeoutMs: 600,
+            deadlineGraceMs: 3000,
+        }),
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.message, /No AV1 OBS encoders/);
+    assert.match(result.message, /settings were restored.*use H\.264/i);
+    assert.doesNotMatch(result.message, /timed out/);
+    assert.equal(obs.log.at(-1), 'close');
+});
+
+test('setup work still running when the deadline passes sends nothing while the rollback runs', async () => {
+    // The short test stream that clears a stale encoder is between two polls
+    // when the deadline passes, and the restore is slower than its next poll.
+    const obs = deadlineObs((ws, request, count) => {
+        if (count !== 2) return undefined;
+        setTimeout(() => ws.respond(request), 250);
+        return 'stall';
+    });
+    const { configureObsStream } = await obsWebSocketModule;
+
+    const result = await configureObsStream({
+        ...deadlineSetup,
+        connectionOptions: connectionOptions(obs.WebSocketImpl, {
+            requestTimeoutMs: 5000,
+            transactionTimeoutMs: 150,
+            deadlineGraceMs: 3000,
+        }),
+    });
+
+    assert.deepEqual(obs.log, [
+        'GetStreamStatus',
+        'GetStreamServiceSettings',
+        'SetStreamServiceSettings:whip_custom',
+        'StartStream',
+        'GetStreamStatus',
+        'StopStream',
+        'SetStreamServiceSettings:rtmp_custom',
+        'close',
+    ]);
+    assert.match(result.message, /^OBS setup timed out after 150ms\. OBS settings were restored\.$/);
+});
+
+test('a mutation still unanswered when the rollback begins is rolled back', async () => {
+    const calls = [];
+    let answerLate = null;
+    const sendRequest = (requestType, requestData) => {
+        calls.push({ requestType, requestData });
+        if (requestType === 'GetVideoSettings') {
+            return Promise.resolve({ requestStatus: { result: true }, responseData: { outputWidth: 1920, outputHeight: 1080 } });
+        }
+        if (requestType === 'SetVideoSettings' && calls.filter((c) => c.requestType === requestType).length === 1) {
+            return new Promise((resolve) => { answerLate = resolve; });
+        }
+        return Promise.resolve({ requestStatus: { result: true } });
+    };
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(sendRequest);
+
+    const stalled = transaction.request('SetVideoSettings', { outputWidth: 1280, outputHeight: 720 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(await transaction.rollback(), []);
+    // The answer that arrives afterwards changes nothing.
+    answerLate({ requestStatus: { result: true } });
+    await stalled;
+
+    assert.deepEqual(calls.filter((c) => c.requestType === 'SetVideoSettings'), [
+        { requestType: 'SetVideoSettings', requestData: { outputWidth: 1280, outputHeight: 720 } },
+        { requestType: 'SetVideoSettings', requestData: { outputWidth: 1920, outputHeight: 1080 } },
+    ]);
+    assert.deepEqual(await transaction.rollback(), []);
+    assert.equal(calls.filter((c) => c.requestType === 'SetVideoSettings').length, 2);
+});
+
+test('a mutation whose snapshot is still being read when the rollback begins is never sent', async () => {
+    const calls = [];
+    let answerSnapshot = null;
+    const sendRequest = (requestType, requestData) => {
+        calls.push({ requestType, requestData });
+        if (requestType === 'GetVideoSettings') {
+            return new Promise((resolve) => {
+                answerSnapshot = () => resolve({ requestStatus: { result: true }, responseData: { outputWidth: 1920 } });
+            });
+        }
+        return Promise.resolve({ requestStatus: { result: true } });
+    };
+    const { createObsConfigurationTransaction } = await obsWebSocketModule;
+    const transaction = createObsConfigurationTransaction(sendRequest);
+
+    const late = transaction.request('SetVideoSettings', { outputWidth: 1280 });
+    const rejected = assert.rejects(late, /already complete/);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(await transaction.rollback(), []);
+    answerSnapshot();
+    await rejected;
+
+    assert.deepEqual(calls.map((c) => c.requestType), ['GetVideoSettings']);
+});
+
 test('configureObsStream restores the previous service after a later validation failure', async () => {
     const serviceWrites = [];
     const WebSocketImpl = fakeObsWebSocket(withStream((ws, request) => {

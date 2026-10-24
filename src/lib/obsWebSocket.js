@@ -21,6 +21,14 @@ const STREAM_STOP_POLL_ATTEMPTS = 10;
 // OBS needs a moment to finish resetting its video pipeline after the video
 // settings change; starting the encoder before then can crash OBS.
 const VIDEO_SETTLE_MS = 1200;
+// What a transaction's deadline handler (the rollback) gets, after the deadline,
+// before the connection is closed on it: the stop gate at its slowest (every
+// poll, 2.5 s) and the video settle time before a restart (1.2 s), plus room
+// for three requests that run into their own deadline. Past that OBS is not
+// answering and more waiting restores nothing.
+const OBS_WS_DEADLINE_GRACE = STREAM_STOP_POLL_INTERVAL_MS * STREAM_STOP_POLL_ATTEMPTS
+    + VIDEO_SETTLE_MS
+    + 3 * OBS_WS_REQUEST_TIMEOUT;
 
 async function sha256Base64(input) {
     const encoder = new TextEncoder();
@@ -33,6 +41,14 @@ async function sha256Base64(input) {
  * Connect to OBS WebSocket, authenticate, and run a callback with the ws + a request helper.
  * Pass a non-finite `transactionTimeoutMs` to hold the connection open until the
  * callback settles it; see openObsControlChannel().
+ *
+ * The callback's third argument is `{ signal, onDeadline }`. When the transaction
+ * deadline passes, a callback that registered a handler with `onDeadline` is
+ * not cut off: `signal` is aborted and the handler is called with the timeout
+ * result, to clean up over the still-open connection and settle through
+ * `done`. It has `deadlineGraceMs` for that; after it the connection is closed
+ * and the transaction settles with the timeout. Without a handler the deadline
+ * settles the transaction at once.
  * @returns {Promise<{ success: boolean, message: string }>}
  */
 export function withObsConnection(password, callback, {
@@ -41,6 +57,7 @@ export function withObsConnection(password, callback, {
     connectTimeoutMs = OBS_WS_CONNECT_TIMEOUT,
     requestTimeoutMs = OBS_WS_REQUEST_TIMEOUT,
     transactionTimeoutMs = OBS_WS_TRANSACTION_TIMEOUT,
+    deadlineGraceMs = OBS_WS_DEADLINE_GRACE,
 } = {}) {
     return new Promise((resolve) => {
         if (typeof WebSocketImpl !== 'function') {
@@ -53,6 +70,9 @@ export function withObsConnection(password, callback, {
         let settled = false;
         let connectTimeout = null;
         let transactionTimeout = null;
+        let deadlineGraceTimeout = null;
+        let deadlineHandler = null;
+        const deadlineController = new AbortController();
         const pendingRequests = new Map();
         let reqCounter = 0;
 
@@ -69,9 +89,33 @@ export function withObsConnection(password, callback, {
             settled = true;
             clearTimeout(connectTimeout);
             clearTimeout(transactionTimeout);
+            clearTimeout(deadlineGraceTimeout);
             rejectPendingRequests(new Error(result?.message || 'OBS WebSocket transaction ended.'));
             try { ws.close(); } catch {}
             resolve(result);
+        };
+
+        const expireTransaction = () => {
+            const timedOut = {
+                success: false,
+                message: `OBS setup timed out after ${transactionTimeoutMs}ms.`,
+            };
+            if (!deadlineHandler) {
+                done(timedOut);
+                return;
+            }
+            // The handler settles the transaction itself, over the open
+            // connection. If it does not in time, the connection goes anyway.
+            deadlineGraceTimeout = setTimeout(() => {
+                done({
+                    ...timedOut,
+                    message: `${timedOut.message} Rollback incomplete: not finished ${deadlineGraceMs}ms later, so the connection was closed.`,
+                });
+            }, deadlineGraceMs);
+            deadlineController.abort(new Error(timedOut.message));
+            Promise.resolve()
+                .then(() => deadlineHandler(timedOut))
+                .catch(() => done(timedOut));
         };
 
         connectTimeout = setTimeout(() => {
@@ -163,15 +207,13 @@ export function withObsConnection(password, callback, {
                 identified = true;
                 clearTimeout(connectTimeout);
                 if (Number.isFinite(transactionTimeoutMs)) {
-                    transactionTimeout = setTimeout(() => {
-                        done({
-                            success: false,
-                            message: `OBS setup timed out after ${transactionTimeoutMs}ms.`,
-                        });
-                    }, transactionTimeoutMs);
+                    transactionTimeout = setTimeout(expireTransaction, transactionTimeoutMs);
                 }
                 Promise.resolve()
-                    .then(() => callback(sendRequest, done))
+                    .then(() => callback(sendRequest, done, {
+                        signal: deadlineController.signal,
+                        onDeadline: (handler) => { deadlineHandler = handler; },
+                    }))
                     .catch((error) => done({
                         success: false,
                         message: error instanceof Error ? error.message : String(error),
@@ -464,8 +506,10 @@ function affectsVideo(step) {
 /**
  * Wrap mutating OBS requests with a snapshot of the value they replace. The
  * resulting rollback runs successful mutations, and ones whose answer never
- * arrived, in reverse order and deliberately uses the raw request function so
- * rollback operations are not recorded again.
+ * arrived (or has not yet when the rollback begins), in reverse order and
+ * deliberately uses the raw request function so rollback operations are not
+ * recorded again. Once it has begun, no further request is sent through the
+ * transaction.
  *
  * Rollback treats a StopStream as a gate: OBS answers it before the output has
  * really stopped, so it polls until the output is idle and, if that cannot be
@@ -488,6 +532,9 @@ export function createObsConfigurationTransaction(sendRequest, {
     videoSettleMs = VIDEO_SETTLE_MS,
 } = {}) {
     const rollbackSteps = [];
+    // Steps for requests that were sent and have no answer yet. A rollback that
+    // begins now treats them like ones that timed out: OBS may still apply them.
+    const unanswered = new Set();
     let finished = false;
 
     async function snapshotMutation(requestType, requestData) {
@@ -563,7 +610,16 @@ export function createObsConfigurationTransaction(sendRequest, {
             };
         }
 
+        // The rollback may have begun while the snapshot was being read; a
+        // mutation sent now would land after, and outside, the restore.
+        if (finished) {
+            throw new Error('OBS configuration transaction is already complete.');
+        }
+
         const undo = inverse || streamInverse(requestType);
+        // What a rollback replays if this request gets no answer; see the catch.
+        const ifUnanswered = inverse || (requestType === 'StartStream' ? undo : null);
+        if (ifUnanswered) unanswered.add(ifUnanswered);
         let response;
         try {
             response = await sendRequest(requestType, requestData);
@@ -578,14 +634,16 @@ export function createObsConfigurationTransaction(sendRequest, {
             // restores. A stop that timed out is left out: its inverse is a
             // start, and one OBS refuses because the stream never stopped
             // would be reported as a failed rollback.
-            if (inverse) rollbackSteps.push(inverse);
-            else if (requestType === 'StartStream') rollbackSteps.push(undo);
+            // (If the rollback began first, it took the step along already.)
+            if (ifUnanswered && !finished) rollbackSteps.push(ifUnanswered);
             throw error;
+        } finally {
+            unanswered.delete(ifUnanswered);
         }
         // OBS answered that it refused the request: nothing changed.
         if (!successfulResponse(response)) return response;
 
-        if (undo) rollbackSteps.push(undo);
+        if (undo && !finished) rollbackSteps.push(undo);
         return response;
     }
 
@@ -593,7 +651,10 @@ export function createObsConfigurationTransaction(sendRequest, {
         if (finished) return [];
         finished = true;
         const failures = [];
-        const steps = rollbackSteps.reverse();
+        // A request still waiting for its answer is the newest step, so it is
+        // undone first.
+        const steps = [...rollbackSteps, ...unanswered].reverse();
+        unanswered.clear();
         let lastVideoRestoreAt = null;
         for (let index = 0; index < steps.length; index += 1) {
             const step = steps[index];
@@ -673,14 +734,22 @@ export function createObsConfigurationTransaction(sendRequest, {
  *   OBS has, or null when that is not known.
  * @param {object} [opts.transactionOptions] - timing seams for tests, passed to
  *   createObsConfigurationTransaction().
+ * @param {object} [opts.connectionOptions] - timeouts and socket class for tests,
+ *   passed to withObsConnection().
  */
-export async function configureObsStream({ whipUrl, bearerToken, password = '', autoStart = false, videoSettings = null, encoderSettings = null, writeEncoderSettings = null, listEncoders = null, transactionOptions = undefined }) {
-    return withObsConnection(password, async (rawSendRequest, done) => {
+export async function configureObsStream({ whipUrl, bearerToken, password = '', autoStart = false, videoSettings = null, encoderSettings = null, writeEncoderSettings = null, listEncoders = null, transactionOptions = undefined, connectionOptions = undefined }) {
+    return withObsConnection(password, async (rawSendRequest, done, { signal, onDeadline }) => {
         const transaction = createObsConfigurationTransaction(rawSendRequest, transactionOptions);
         const requestedAv1 = String(encoderSettings?.videoCodec || encoderSettings?.encoder || '').toLowerCase() === 'av1';
         const sendRequest = transaction.request;
+        // Housekeeping requests are not journaled, so a rollback cannot undo
+        // them. Once the deadline has passed they stop, so that they do not
+        // run on while the rollback has the connection.
+        const housekeepingRequest = (requestType, requestData) => (signal.aborted
+            ? Promise.reject(signal.reason)
+            : rawSendRequest(requestType, requestData));
         let finishing = false;
-        const finish = async (result) => {
+        const finish = async (result, { timedOut = false } = {}) => {
             if (finishing) return;
             finishing = true;
             if (result.success) {
@@ -692,15 +761,20 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
                         ...result,
                         message: `${result.message} Rollback incomplete: ${rollbackFailures.join('; ')}`,
                     };
-                } else if (requestedAv1) {
+                } else if (timedOut || requestedAv1) {
                     result = {
                         ...result,
-                        message: `${result.message} OBS settings were restored. Disable AV1 mode and retry to use H.264.`,
+                        message: `${result.message} OBS settings were restored.${requestedAv1 ? ' Disable AV1 mode and retry to use H.264.' : ''}`,
                     };
                 }
             }
             done(result);
         };
+        // The deadline goes through finish like any other failure, so the
+        // rollback runs over the open connection before it closes. A rollback
+        // or failure already under way keeps going (finish ignores the call);
+        // the connection's hard cap bounds it.
+        onDeadline((timeoutResult) => finish(timeoutResult, { timedOut: true }));
 
         try {
         const applied = [];
@@ -742,7 +816,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
         if (!stopResult.wasLive) {
             // Uses the raw channel: this start/stop is housekeeping, not a step
             // a failed setup should roll back.
-            if (await releaseStaleEncoder(rawSendRequest)) {
+            if (await releaseStaleEncoder(housekeepingRequest)) {
                 applied.push('encoder reset');
             } else {
                 warnings.push('OBS could not run the short test stream that clears the encoder settings of an earlier stream; if the picture or the delay is wrong, restart OBS');
@@ -984,7 +1058,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
                 message: error instanceof Error ? error.message : String(error),
             });
         }
-    });
+    }, connectionOptions);
 }
 
 /**
