@@ -600,3 +600,112 @@ test('unexpected unhandled rejection logs its shutdown reason and exits for supe
     assert.match(output, /shutdownReason=unhandled-rejection/);
     assert.match(output, /external supervisor must restart Nextra/);
 });
+
+// Requests a path from the spawned server over HTTP or HTTPS (self-signed
+// certificate accepted) and returns the status, headers and body.
+function requestFromServer(baseUrl, requestPath, method = 'GET') {
+    const transport = baseUrl.startsWith('https:') ? require('node:https') : require('node:http');
+    return new Promise((resolve, reject) => {
+        const request = transport.request(`${baseUrl}${requestPath}`, { method, rejectUnauthorized: false }, (response) => {
+            const chunks = [];
+            response.on('data', (chunk) => chunks.push(chunk));
+            response.on('end', () => resolve({
+                status: response.statusCode,
+                headers: response.headers,
+                body: Buffer.concat(chunks).toString('utf8'),
+            }));
+        });
+        request.setTimeout(5_000, () => request.destroy(new Error(`${method} ${requestPath} timed out`)));
+        request.once('error', reject);
+        request.end();
+    });
+}
+
+async function readCspFromServer({ localHttps, allowInsecureLanRelay }) {
+    const port = await reserveTcpPort();
+    let rtcPort = await reserveTcpPort();
+    while (rtcPort === port) rtcPort = await reserveTcpPort();
+    const baseUrl = `${localHttps ? 'https' : 'http'}://127.0.0.1:${port}`;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-csp-'));
+    await fs.writeFile(path.join(tempDir, 'index.html'), '<!doctype html><div id="root"></div>');
+    let output = '';
+    const child = spawn(process.execPath, ['server.js'], {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+            ...createServerTestEnv({ port, rtcPort, distDir: tempDir }),
+            LOCAL_HTTPS: String(localHttps),
+            ALLOW_INSECURE_TRUSTED_LAN_RELAY: String(allowInsecureLanRelay),
+            // A generated certificate must never land in the shared certs folder.
+            HTTPS_CERT_DIR: path.join(tempDir, 'certs'),
+        },
+    });
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+
+    try {
+        const deadline = Date.now() + 30_000;
+        let ready = false;
+        while (!ready && Date.now() < deadline) {
+            if (child.exitCode !== null) {
+                throw new Error(`server exited before readiness (code ${child.exitCode})\n${output}`);
+            }
+            try {
+                ready = (await requestFromServer(baseUrl, '/readyz')).status === 200;
+            } catch {
+                // The listener does not exist yet while mediasoup initializes.
+            }
+            if (!ready) await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        assert.ok(ready, `server did not become ready\n${output}`);
+        const response = await requestFromServer(baseUrl, '/healthz');
+        assert.equal(response.status, 200);
+        return {
+            csp: String(response.headers['content-security-policy'] || ''),
+            hsts: response.headers['strict-transport-security'],
+        };
+    } finally {
+        try {
+            if (child.exitCode === null) await requestFromServer(baseUrl, '/api/test/shutdown', 'POST');
+            if (child.exitCode === null) await waitForExit(child, 7_000);
+        } catch {
+            child.kill();
+        }
+        if (child.exitCode === null) child.kill();
+        await fs.rm(tempDir, { recursive: true, force: true });
+    }
+}
+
+function cspDirectives(csp) {
+    return csp.split(';').map((directive) => directive.trim()).filter(Boolean);
+}
+
+test('CSP asks browsers to upgrade requests to HTTPS only when the listener serves HTTPS and plaintext LAN relay is off', { concurrency: false, timeout: 120_000 }, async () => {
+    const modes = [
+        { localHttps: false, allowInsecureLanRelay: false, upgrades: false },
+        { localHttps: true, allowInsecureLanRelay: false, upgrades: true },
+        { localHttps: true, allowInsecureLanRelay: true, upgrades: false },
+        { localHttps: false, allowInsecureLanRelay: true, upgrades: false },
+    ];
+    const others = [];
+    for (const mode of modes) {
+        const label = `LOCAL_HTTPS=${mode.localHttps} ALLOW_INSECURE_TRUSTED_LAN_RELAY=${mode.allowInsecureLanRelay}`;
+        const { csp, hsts } = await readCspFromServer(mode);
+        const directives = cspDirectives(csp);
+        assert.equal(
+            directives.includes('upgrade-insecure-requests'),
+            mode.upgrades,
+            `${label}: upgrade-insecure-requests expected ${mode.upgrades ? 'present' : 'absent'} in: ${csp}`,
+        );
+        assert.equal(Boolean(hsts), mode.localHttps, `${label}: HSTS follows the serving scheme`);
+        const scriptSrc = directives.find((directive) => directive.startsWith('script-src ')) || '';
+        assert.match(scriptSrc, /^script-src 'self' 'nonce-[A-Za-z0-9+/=]+'$/, `${label}: script nonce stays`);
+        others.push(directives
+            .filter((directive) => directive !== 'upgrade-insecure-requests')
+            .map((directive) => directive.replace(/'nonce-[A-Za-z0-9+/=]+'/, "'nonce-X'")));
+    }
+    for (const other of others.slice(1)) {
+        assert.deepEqual(other, others[0], 'every CSP directive except the upgrade directive is the same in each mode');
+    }
+});
