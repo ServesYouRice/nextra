@@ -1,7 +1,11 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseViewerOffer, parseViewerDtls, createViewerAnswer, buildViewerRtpCapabilities } = require('../lib/whep');
+const {
+    parseViewerOffer, parseViewerDtls, createViewerAnswer, buildViewerRtpCapabilities,
+    parseH264ProfileLevelId, isSameH264Profile, isH264Compatible,
+} = require('../lib/whep');
+const config = require('../config');
 
 // --- Sample SDP offer (recvonly, video + audio) ---
 const SAMPLE_OFFER = [
@@ -1032,6 +1036,342 @@ describe('WHEP header extension and RTCP feedback negotiation', () => {
             assert.ok(sections[0].includes('a=rtpmap:102 H264/90000'));
             assert.match(sections[1][0], /^m=audio 9 UDP\/TLS\/RTP\/SAVPF 111$/);
             assert.ok(sections[1].includes('a=rtpmap:111 opus/48000/2'));
+        });
+    });
+});
+
+// ====================================================================
+// H.264 profile-level-id matching (answer matcher and capability filter)
+// ====================================================================
+describe('WHEP H.264 profile-level-id matching', () => {
+    const OFFER_HEAD = [
+        'v=0',
+        'o=- 123456 2 IN IP4 127.0.0.1',
+        's=-',
+        't=0 0',
+        'a=group:BUNDLE 0',
+        'a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99',
+        'a=setup:actpass',
+        'a=ice-ufrag:testufrag',
+        'a=ice-pwd:testpwd1234567890123456',
+    ];
+
+    // A video-only recvonly offer. entries: [{ pt, params }] where params is the fmtp key/value
+    // object of that H.264 payload type (an empty object writes no fmtp line).
+    function h264Offer(entries, extraCodecLines = [], extraPayloadTypes = []) {
+        const lines = [...OFFER_HEAD];
+        lines.push(`m=video 9 UDP/TLS/RTP/SAVPF ${[...entries.map((e) => e.pt), ...extraPayloadTypes].join(' ')}`);
+        lines.push('c=IN IP4 0.0.0.0', 'a=mid:0', 'a=recvonly', 'a=rtcp-mux');
+        for (const { pt, params } of entries) {
+            lines.push(`a=rtpmap:${pt} H264/90000`);
+            const pairs = Object.entries(params).map(([k, v]) => `${k}=${v}`);
+            if (pairs.length > 0) lines.push(`a=fmtp:${pt} ${pairs.join(';')}`);
+        }
+        lines.push(...extraCodecLines, '');
+        return lines.join('\r\n');
+    }
+
+    // Parameters with a key only when its value is given ("absent" is a missing key).
+    function fmtp(profileLevelId, packetizationMode, levelAsymmetryAllowed) {
+        const params = {};
+        if (profileLevelId !== undefined) params['profile-level-id'] = profileLevelId;
+        if (packetizationMode !== undefined) params['packetization-mode'] = packetizationMode;
+        if (levelAsymmetryAllowed !== undefined) params['level-asymmetry-allowed'] = levelAsymmetryAllowed;
+        return params;
+    }
+
+    function h264RouterCodec(parameters, preferredPayloadType = 102) {
+        return {
+            kind: 'video',
+            mimeType: 'video/H264',
+            preferredPayloadType,
+            clockRate: 90000,
+            parameters,
+            rtcpFeedback: [],
+        };
+    }
+
+    const routerCapabilitiesOf = (...codecs) => ({ codecs, headerExtensions: [] });
+
+    function consumerOf(codecParameters) {
+        return {
+            kind: 'video',
+            rtpParameters: {
+                codecs: [{
+                    payloadType: 102,
+                    mimeType: 'video/H264',
+                    clockRate: 90000,
+                    parameters: codecParameters,
+                    rtcpFeedback: [],
+                }],
+                headerExtensions: [],
+                encodings: [{ ssrc: 1111 }],
+            },
+        };
+    }
+
+    // Each row: the viewer's offered profile-level-id and the router's, and whether they match.
+    // packetization-mode is 1 on both sides unless a row gives offerPm / routerPm (null = absent).
+    // sameProfile is the profile comparison alone; it equals match unless the row differs in mode only.
+    const PROFILE_ROWS = [
+        { name: 'absent vs 42e01f', offer: undefined, router: '42e01f', match: true },
+        { name: 'empty vs 42e01f', offer: '', router: '42e01f', match: true },
+        { name: 'absent vs 42001f (Baseline)', offer: undefined, router: '42001f', match: false },
+        { name: 'absent vs 640032 (High)', offer: undefined, router: '640032', match: false },
+        { name: '42e01f vs 42001f (Constrained Baseline vs Baseline)', offer: '42e01f', router: '42001f', match: false },
+        { name: '42E01F vs 42e01f (case)', offer: '42E01F', router: '42e01f', match: true },
+        { name: '42e01f vs 42e034 (level ignored)', offer: '42e01f', router: '42e034', match: true },
+        { name: '4d801f vs 42e01f (Constrained Baseline by 4d)', offer: '4d801f', router: '42e01f', match: true },
+        { name: '640c1f vs 64001f (Constrained High vs High)', offer: '640c1f', router: '64001f', match: false },
+        { name: '640032 vs 64001f (High, level ignored)', offer: '640032', router: '64001f', match: true },
+        {
+            name: '42e01f packetization-mode=1 vs 42e01f packetization-mode absent',
+            offer: '42e01f', router: '42e01f', offerPm: '1', routerPm: null, match: false, sameProfile: true,
+        },
+        { name: 'zzzzzz vs 42e01f (unparseable)', offer: 'zzzzzz', router: '42e01f', match: false },
+        { name: '4d001f vs 4d0032 (Main, level ignored)', offer: '4d001f', router: '4d0032', match: true },
+        { name: '42001f vs 42001f (Baseline)', offer: '42001f', router: '42001f', match: true },
+        { name: '42e0ff vs 42e01f (level mediasoup does not know)', offer: '42e0ff', router: '42e01f', match: false },
+        { name: '42e01f0 vs 42e01f (seven digits)', offer: '42e01f0', router: '42e01f', match: false },
+    ];
+
+    function rowParams(row) {
+        const offerPm = row.offerPm === undefined ? '1' : row.offerPm;
+        const routerPm = row.routerPm === undefined ? 1 : row.routerPm;
+        return {
+            offer: fmtp(row.offer, offerPm === null ? undefined : offerPm),
+            router: fmtp(row.router, routerPm === null ? undefined : routerPm, 1),
+        };
+    }
+
+    describe('parseH264ProfileLevelId', () => {
+        it('reads the profile from profile_idc and the profile-iop bits and defaults to 42e01f', () => {
+            const cases = [
+                [undefined, 'ConstrainedBaseline'],
+                ['', 'ConstrainedBaseline'],
+                ['42e01f', 'ConstrainedBaseline'],
+                ['42401f', 'ConstrainedBaseline'],
+                ['4d801f', 'ConstrainedBaseline'],
+                ['58c01f', 'ConstrainedBaseline'],
+                ['42001f', 'Baseline'],
+                ['42801f', 'Baseline'],
+                ['58801f', 'Baseline'],
+                ['4d001f', 'Main'],
+                ['4d401f', 'Main'],
+                ['64001f', 'High'],
+                ['640c1f', 'ConstrainedHigh'],
+            ];
+            for (const [value, profile] of cases) {
+                const parsed = parseH264ProfileLevelId(value);
+                assert.ok(parsed, `${JSON.stringify(value)} should parse`);
+                assert.equal(parsed.profile, profile, `${JSON.stringify(value)} is ${profile}`);
+            }
+        });
+
+        it('treats an absent or empty value as 42e01f (Constrained Baseline), not 42001f', () => {
+            assert.deepEqual(parseH264ProfileLevelId(undefined), parseH264ProfileLevelId('42e01f'));
+            assert.deepEqual(parseH264ProfileLevelId(''), parseH264ProfileLevelId('42e01f'));
+            assert.notDeepEqual(parseH264ProfileLevelId(undefined), parseH264ProfileLevelId('42001f'));
+        });
+
+        it('returns null for anything that is not six hex digits of a known profile', () => {
+            // null is not "absent" either: only undefined and the empty string take the default.
+            for (const value of ['zzzzzz', '42e01', '42e01f0', '640c', '000000', '4e001f', '64001d', '64011f', 'f4001f', 12345, null]) {
+                assert.equal(parseH264ProfileLevelId(value), null, `${JSON.stringify(value)} should not parse`);
+            }
+        });
+
+        it('keeps the level apart from the profile', () => {
+            assert.equal(parseH264ProfileLevelId('42e01f').profile, parseH264ProfileLevelId('42e034').profile);
+            assert.notEqual(parseH264ProfileLevelId('42e01f').level, parseH264ProfileLevelId('42e034').level);
+        });
+    });
+
+    describe('table of offer vs router profile-level-id', () => {
+        for (const row of PROFILE_ROWS) {
+            const { offer, router } = rowParams(row);
+            const sameProfile = row.sameProfile === undefined ? row.match : row.sameProfile;
+
+            it(`helper: ${row.name} => ${row.match ? 'match' : 'no match'}`, () => {
+                assert.equal(isSameH264Profile(offer, router), sameProfile, 'isSameH264Profile');
+                assert.equal(isH264Compatible(offer, router), row.match, 'isH264Compatible');
+                assert.equal(isH264Compatible(router, offer), row.match, 'the comparison is symmetric');
+            });
+
+            it(`answer matcher: ${row.name} => ${row.match ? 'match' : 'no match'}`, () => {
+                // The consumer sends payload type 102; the offer carries H.264 as 96.
+                const parsed = parseViewerOffer(h264Offer([{ pt: 96, params: offer }]));
+                const answer = createViewerAnswer(parsed, [consumerOf(router)], mockTransportParams);
+                if (row.match) {
+                    assert.ok(answer.includes('a=rtpmap:96 H264/90000'), 'answered with the offer payload type');
+                    assert.ok(!answer.includes('a=rtpmap:102 '), 'no consumer payload type');
+                } else {
+                    assert.ok(!answer.includes('a=rtpmap:96 '), 'no offer codec matched, so the offer payload type is unused');
+                    assert.ok(answer.includes('a=rtpmap:102 H264/90000'), 'falls back to the consumer payload type');
+                }
+            });
+
+            it(`capability filter: ${row.name} => ${row.match ? 'match' : 'no match'}`, () => {
+                const parsed = parseViewerOffer(h264Offer([{ pt: 96, params: offer }]));
+                const { codecs } = buildViewerRtpCapabilities(parsed, routerCapabilitiesOf(h264RouterCodec(router)));
+                assert.equal(codecs.length, row.match ? 1 : 0);
+                if (row.match) {
+                    const offeredProfile = offer['profile-level-id'] ? offer['profile-level-id'].toLowerCase() : '42e01f';
+                    assert.equal(codecs[0].parameters['profile-level-id'], offeredProfile, 'the viewer profile-level-id');
+                    assert.equal(codecs[0].parameters['packetization-mode'], Number(offer['packetization-mode'] ?? 0));
+                }
+            });
+        }
+    });
+
+    describe('buildViewerRtpCapabilities H.264 entries', () => {
+        it('carries the viewer fmtp, not the router parameters, and leaves the router untouched', () => {
+            // Router: High at level 5.0 with level asymmetry. Viewer: High at 3.1 without it.
+            const router = routerCapabilitiesOf(h264RouterCodec(fmtp('640032', 1, 1)));
+            const before = structuredClone(router);
+            const parsed = parseViewerOffer(h264Offer([{ pt: 96, params: fmtp('64001F', '1') }]));
+            const { codecs } = buildViewerRtpCapabilities(parsed, router);
+            assert.equal(codecs.length, 1);
+            assert.deepEqual(codecs[0].parameters, { 'profile-level-id': '64001f', 'packetization-mode': 1 });
+            assert.equal(codecs[0].preferredPayloadType, 102);
+            assert.equal(codecs[0].mimeType, 'video/H264');
+            assert.equal(codecs[0].clockRate, 90000);
+            assert.equal(codecs[0].kind, 'video');
+            assert.deepEqual(router, before);
+        });
+
+        it('keeps the viewer level-asymmetry-allowed and writes packetization-mode as a number', () => {
+            // mediasoup compares packetization-mode with !== against the producer's numeric value.
+            const router = routerCapabilitiesOf(h264RouterCodec(fmtp('42e01f', 1, 1)));
+            const parsed = parseViewerOffer(h264Offer([{ pt: 96, params: fmtp('42e01f', '1', '1') }]));
+            const { codecs } = buildViewerRtpCapabilities(parsed, router);
+            assert.deepEqual(codecs[0].parameters, {
+                'profile-level-id': '42e01f', 'packetization-mode': 1, 'level-asymmetry-allowed': 1,
+            });
+        });
+
+        it('writes 42e01f and packetization-mode 0 for a viewer entry that lists no fmtp at all', () => {
+            const router = routerCapabilitiesOf(h264RouterCodec({}));
+            const parsed = parseViewerOffer(h264Offer([{ pt: 96, params: {} }]));
+            const { codecs } = buildViewerRtpCapabilities(parsed, router);
+            assert.equal(codecs.length, 1);
+            assert.deepEqual(codecs[0].parameters, { 'profile-level-id': '42e01f', 'packetization-mode': 0 });
+        });
+
+        it('emits one entry per distinct viewer parameter set and none for duplicates', () => {
+            // Constrained Baseline twice over (42e01f, 4d801f), a repeat of 42e01f under another payload
+            // type, and a packetization-mode 0 entry that cannot match the router's mode 1.
+            const router = routerCapabilitiesOf(h264RouterCodec(fmtp('42e01f', 1, 1)));
+            const parsed = parseViewerOffer(h264Offer([
+                { pt: 96, params: fmtp('42e01f', '1') },
+                { pt: 97, params: fmtp('42e01f', '0') },
+                { pt: 98, params: fmtp('4d801f', '1') },
+                { pt: 99, params: fmtp('42E01F', '1') },
+            ]));
+            const { codecs } = buildViewerRtpCapabilities(parsed, router);
+            assert.deepEqual(
+                codecs.map((c) => c.parameters),
+                [
+                    { 'profile-level-id': '42e01f', 'packetization-mode': 1 },
+                    { 'profile-level-id': '4d801f', 'packetization-mode': 1 },
+                ]
+            );
+            assert.equal(new Set(codecs.map((c) => c.parameters)).size, 2, 'separate parameter objects');
+        });
+
+        it('limits each entry rtcpFeedback to the feedback offered for its own payload types, wildcard included', () => {
+            const router = routerCapabilitiesOf({
+                ...h264RouterCodec(fmtp('42e01f', 1, 1)),
+                rtcpFeedback: [
+                    { type: 'nack', parameter: '' },
+                    { type: 'nack', parameter: 'pli' },
+                    { type: 'transport-cc', parameter: '' },
+                ],
+            });
+            const offer = h264Offer(
+                [
+                    { pt: 96, params: fmtp('42e01f', '1') },
+                    { pt: 98, params: fmtp('4d801f', '1') },
+                ],
+                ['a=rtcp-fb:96 nack', 'a=rtcp-fb:98 nack pli', 'a=rtcp-fb:* transport-cc']
+            );
+            const { codecs } = buildViewerRtpCapabilities(parseViewerOffer(offer), router);
+            const feedbackOf = (c) => c.rtcpFeedback.map((fb) => (fb.parameter ? `${fb.type} ${fb.parameter}` : fb.type));
+            assert.deepEqual(codecs.map((c) => c.parameters['profile-level-id']), ['42e01f', '4d801f']);
+            assert.deepEqual(feedbackOf(codecs[0]), ['nack', 'transport-cc']);
+            assert.deepEqual(feedbackOf(codecs[1]), ['nack pli', 'transport-cc']);
+        });
+
+        it('does not change non-H.264 matching', () => {
+            const router = routerCapabilitiesOf(
+                { kind: 'video', mimeType: 'video/VP8', preferredPayloadType: 101, clockRate: 90000, parameters: {}, rtcpFeedback: [] },
+                h264RouterCodec(fmtp('640032', 1, 1)),
+            );
+            const parsed = parseViewerOffer(h264Offer(
+                [{ pt: 96, params: fmtp('42e01f', '1') }],
+                ['a=rtpmap:100 VP8/90000'],
+                [100]
+            ));
+            const { codecs } = buildViewerRtpCapabilities(parsed, router);
+            assert.deepEqual(codecs.map((c) => c.mimeType), ['video/VP8'], 'VP8 still matches by name and clock rate; High has no viewer entry');
+            assert.deepEqual(codecs[0].parameters, {});
+        });
+    });
+
+    describe('against the router profiles in config.MEDIA_CODECS', () => {
+        // The router as mediasoup reports it: the configured codecs with payload types.
+        const configured = config.MEDIA_CODECS.filter((codec) => /h264/i.test(codec.mimeType));
+        const router = routerCapabilitiesOf(...configured.map((codec, i) => ({
+            ...codec,
+            preferredPayloadType: 102 + i,
+            parameters: { ...codec.parameters },
+            rtcpFeedback: [],
+        })));
+
+        function profilesFor(entries) {
+            const parsed = parseViewerOffer(h264Offer(entries.map(([plid, pm], i) => ({
+                pt: 96 + i,
+                params: fmtp(plid, pm),
+            }))));
+            return buildViewerRtpCapabilities(parsed, router).codecs.map((c) => c.parameters['profile-level-id']);
+        }
+
+        it('configures 42e01f, 4d0032 and 640032 in packetization-mode 1', () => {
+            assert.deepEqual(configured.map((c) => c.parameters['profile-level-id']), ['42e01f', '4d0032', '640032']);
+            assert.ok(configured.every((c) => c.parameters['packetization-mode'] === 1));
+        });
+
+        it('matches a Chrome offer (42e01f, 42001f, 640c1f, 64001f, 4d001f)', () => {
+            assert.deepEqual(
+                profilesFor([
+                    ['42e01f', '1'], ['42e01f', '0'], ['42001f', '1'], ['42001f', '0'],
+                    ['640c1f', '1'], ['640c1f', '0'], ['64001f', '1'], ['4d001f', '1'],
+                ]),
+                ['42e01f', '4d001f', '64001f']
+            );
+        });
+
+        it('matches an older Chrome offer (42e01f, 42001f, 640c1f, 64001f)', () => {
+            assert.deepEqual(
+                profilesFor([['42e01f', '1'], ['42e01f', '0'], ['42001f', '1'], ['640c1f', '1'], ['64001f', '1']]),
+                ['42e01f', '64001f']
+            );
+        });
+
+        it('matches a Firefox offer (42e01f, 42801f)', () => {
+            assert.deepEqual(profilesFor([['42e01f', '1'], ['42e01f', '0'], ['42801f', '1'], ['42801f', '0']]), ['42e01f']);
+        });
+
+        it('matches a Safari offer (42e01f, 640c1f)', () => {
+            assert.deepEqual(profilesFor([['42e01f', '1'], ['640c1f', '1']]), ['42e01f']);
+        });
+
+        it('matches only the 42e01f router codec for an offer that omits profile-level-id', () => {
+            assert.deepEqual(profilesFor([[undefined, '1']]), ['42e01f']);
+        });
+
+        it('matches nothing for an offer whose only entries are Baseline or Constrained High', () => {
+            assert.deepEqual(profilesFor([['42001f', '1'], ['640c1f', '1']]), []);
         });
     });
 });
