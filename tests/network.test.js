@@ -161,6 +161,32 @@ test('VAL-145: a loopback peer without forwarding headers, or without forwarded-
     assert.equal(getTrustedForwardedClientIp({ 'cf-connecting-ip': '127.0.0.1' }, '203.0.113.10', true), '');
 });
 
+// C-bfcdc67f6dce / VAL-142: a peer that is not loopback is no proxy of ours. Whatever chain it sends, loopback or
+// trusted-LAN entries in it (on either end) name nobody, and the caller keeps the peer's own address.
+test('VAL-142: a multi-hop X-Forwarded-For chain from a peer that is not loopback is ignored', () => {
+    const chains = [
+        '127.0.0.1, 203.0.113.40',
+        '203.0.113.40, 127.0.0.1',
+        '192.168.50.25, 203.0.113.61',
+        '203.0.113.61, 192.168.50.25',
+        '127.0.0.1, 192.168.50.25, ::1',
+    ];
+    for (const peer of ['203.0.113.10', '192.168.50.30', '10.0.0.1', '::ffff:203.0.113.10']) {
+        for (const chain of chains) {
+            for (const options of [undefined, { trustedHopCount: 2 }]) {
+                assert.equal(getTrustedForwardedClientIp({ 'x-forwarded-for': chain }, peer, true, options), '', `${peer} sent ${chain}`);
+            }
+        }
+    }
+    // The same chains from a loopback peer are read from the right, so the left-hand entries cannot grant privilege.
+    assert.equal(getTrustedForwardedClientIp({ 'x-forwarded-for': '127.0.0.1, 203.0.113.40' }, LOOPBACK_PEER, true), '203.0.113.40');
+    assert.equal(getTrustedForwardedClientIp({ 'x-forwarded-for': '192.168.50.25, 203.0.113.61' }, LOOPBACK_PEER, true), '203.0.113.61');
+    assert.equal(
+        classifyClient({ ip: getTrustedForwardedClientIp({ 'x-forwarded-for': '192.168.50.25, 203.0.113.61' }, LOOPBACK_PEER, true), trustedLanCidrs: '192.168.50.0/24' }).kind,
+        'remote',
+    );
+});
+
 test('hasForwardingEvidence and parseForwardedLast read the headers a proxy leaves behind', () => {
     assert.equal(parseForwardedLast('198.51.100.10, 10.0.0.1'), '10.0.0.1');
     assert.equal(parseForwardedLast(' 10.0.0.1 ,, '), '10.0.0.1');
