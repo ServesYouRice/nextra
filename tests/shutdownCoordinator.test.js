@@ -43,6 +43,8 @@ function createHarness(options = {}) {
         flushMs: 150,
         gracefulForceExitMs: 5000,
         fatalForceExitMs: 4000,
+        restartForceExitMs: 3000,
+        restartCloseWaitMs: 2000,
     });
 
     return {
@@ -264,6 +266,263 @@ test('later requests while a stop is in progress do not exit twice or start anot
     await g.coordinator.requestGraceful('SIGTERM');
     assert.equal(g.events.filter((event) => event === 'timer:5000').length, 1);
     assert.equal(g.events.filter((event) => event === 'closeServer').length, 1);
+});
+
+// A replacement launcher that records what the coordinator asks of it, in the
+// harness's event order.
+function createFakeLauncher(events) {
+    const launcher = {
+        launches: [],
+        forwarded: [],
+        stopped: 0,
+        launch(handlers) {
+            events.push('launch');
+            launcher.launches.push(handlers);
+            return {
+                forwardSignal: (signal) => { launcher.forwarded.push(signal); },
+                stop: () => { launcher.stopped += 1; },
+            };
+        },
+    };
+    return launcher;
+}
+
+// Lets the awaits in the coordinator run without firing any timer.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+// Runs a restart up to the point where it waits for the listener to close.
+async function startRestart(h, launcher, options = {}) {
+    const done = h.coordinator.requestRestart('media-worker-died', {
+        launchReplacement: launcher.launch,
+        ...options,
+    });
+    if (h.timers.some((timer) => timer.ms === 150)) {
+        h.fireTimer(150);
+        await settle();
+    }
+    return done;
+}
+
+test('a restart tells rooms, cleans up and closes the listener before it starts the replacement', async () => {
+    const h = createHarness();
+    const launcher = createFakeLauncher(h.events);
+    const done = h.coordinator.requestRestart('media-worker-died', { launchReplacement: launcher.launch });
+
+    assert.equal(h.coordinator.getPhase(), 'restart');
+    assert.equal(h.coordinator.isShuttingDown(), true);
+    assert.deepEqual(h.events, ['timer:3000', 'start', 'notify:restart', 'timer:150']);
+
+    h.fireTimer(150);
+    await settle();
+    assert.deepEqual(h.events, ['timer:3000', 'start', 'notify:restart', 'timer:150', 'cleanup', 'timer:2000', 'closeServer']);
+    assert.equal(launcher.launches.length, 0, 'the port is released before the replacement can bind');
+
+    h.closeServerCallback()();
+    await done;
+    assert.equal(h.events.at(-1), 'launch');
+    assert.equal(launcher.launches.length, 1);
+    assert.deepEqual(h.exits, [], 'this process waits for the replacement');
+});
+
+test('a restart tells rooms through the notice the caller supplies', async () => {
+    const h = createHarness();
+    const launcher = createFakeLauncher(h.events);
+    const done = startRestart(h, launcher, { notifyRooms: () => { h.events.push('custom-notice'); return false; } });
+    await settle();
+    h.closeServerCallback()();
+    await done;
+
+    assert.equal(h.events.includes('notify:restart'), false);
+    assert.equal(h.events.indexOf('custom-notice') < h.events.indexOf('cleanup'), true);
+    assert.equal(h.events.includes('timer:150'), false, 'nothing was sent, so there is no flush to wait for');
+    assert.equal(launcher.launches.length, 1);
+});
+
+test('a restart does not wait longer than the close wait for a listener that will not close', async () => {
+    const h = createHarness({ notifyRoomsEnded: () => false });
+    const launcher = createFakeLauncher(h.events);
+    const done = startRestart(h, launcher);
+    await settle();
+    assert.equal(launcher.launches.length, 0);
+
+    h.fireTimer(2000);
+    await done;
+    assert.equal(launcher.launches.length, 1);
+
+    // The listener closing later changes nothing.
+    h.closeServerCallback()();
+    assert.equal(launcher.launches.length, 1);
+    assert.deepEqual(h.exits, []);
+});
+
+test('the process exits with the exit code of the replacement', async () => {
+    for (const code of [0, 7]) {
+        const h = createHarness({ notifyRoomsEnded: () => false });
+        const launcher = createFakeLauncher(h.events);
+        const done = startRestart(h, launcher);
+        await settle();
+        h.closeServerCallback()();
+        await done;
+
+        launcher.launches[0].onExit(code);
+        launcher.launches[0].onExit(code);
+        assert.deepEqual(h.exits, [code]);
+    }
+});
+
+test('a replacement that cannot be started ends the process with 1', async () => {
+    const h = createHarness({ notifyRoomsEnded: () => false });
+    const launcher = createFakeLauncher(h.events);
+    const done = startRestart(h, launcher);
+    await settle();
+    h.closeServerCallback()();
+    await done;
+
+    launcher.launches[0].onFailed(new Error('spawn failed'));
+    assert.deepEqual(h.exits, [1]);
+});
+
+test('a stop signal while the replacement runs is passed on to it and does not end this process', async () => {
+    const h = createHarness({ notifyRoomsEnded: () => false });
+    const launcher = createFakeLauncher(h.events);
+    const done = startRestart(h, launcher);
+    await settle();
+    h.closeServerCallback()();
+    await done;
+
+    await h.coordinator.requestGraceful('SIGTERM');
+    await h.coordinator.requestGraceful('SIGINT');
+
+    assert.deepEqual(launcher.forwarded, ['SIGTERM', 'SIGINT']);
+    assert.equal(h.coordinator.getPhase(), 'restart');
+    assert.deepEqual(h.exits, []);
+    assert.equal(h.events.includes('timer:5000'), false, 'no graceful shutdown of its own starts');
+
+    // The replacement ends after the stop; this process follows with its code.
+    launcher.launches[0].onExit(0);
+    assert.deepEqual(h.exits, [0]);
+});
+
+test('a stop signal before the replacement starts means no replacement is started', async () => {
+    const h = createHarness();
+    const launcher = createFakeLauncher(h.events);
+    const done = h.coordinator.requestRestart('media-worker-died', { launchReplacement: launcher.launch });
+
+    await h.coordinator.requestGraceful('SIGINT');
+    assert.deepEqual(h.exits, []);
+
+    h.fireTimer(150);
+    await settle();
+    h.closeServerCallback()();
+    await done;
+
+    assert.equal(launcher.launches.length, 0);
+    assert.deepEqual(h.exits, [0]);
+    assert.ok(h.logged.some((entry) => entry[0] === 'log' && /SIGINT received during the restart/.test(entry[1])));
+});
+
+test('the restart force-exit timer ends the process with 1 if the replacement was never started', () => {
+    const h = createHarness();
+    const launcher = createFakeLauncher(h.events);
+    h.coordinator.requestRestart('media-worker-died', { launchReplacement: launcher.launch });
+    assert.equal(h.events[0], 'timer:3000');
+
+    h.fireTimer(3000);
+    assert.deepEqual(h.exits, [1]);
+});
+
+test('the restart force-exit timer does nothing once the replacement runs', async () => {
+    const h = createHarness({ notifyRoomsEnded: () => false });
+    const launcher = createFakeLauncher(h.events);
+    const done = startRestart(h, launcher);
+    await settle();
+    h.closeServerCallback()();
+    await done;
+
+    h.fireTimer(3000);
+    assert.deepEqual(h.exits, []);
+});
+
+test('a fatal error while a restart flushes rooms exits 1 and starts no replacement', async () => {
+    const h = createHarness();
+    const launcher = createFakeLauncher(h.events);
+    const restart = h.coordinator.requestRestart('media-worker-died', { launchReplacement: launcher.launch });
+
+    await h.coordinator.requestFatal('uncaught-exception');
+    assert.deepEqual(h.exits, [1]);
+    assert.equal(h.events.includes('notify:fatal'), false, 'rooms were told already');
+
+    h.fireTimer(150);
+    await restart;
+    assert.equal(launcher.launches.length, 0);
+    assert.deepEqual(h.exits, [1]);
+});
+
+test('a fatal error while the replacement runs stops it and exits 1', async () => {
+    const h = createHarness({ notifyRoomsEnded: () => false });
+    const launcher = createFakeLauncher(h.events);
+    const done = startRestart(h, launcher);
+    await settle();
+    h.closeServerCallback()();
+    await done;
+
+    await h.coordinator.requestFatal('uncaught-exception');
+    assert.equal(launcher.stopped, 1, 'no unattended second instance is left behind');
+    assert.deepEqual(h.exits, [1]);
+
+    // The replacement ending because it was stopped does not exit a second time.
+    launcher.launches[0].onExit(0);
+    assert.deepEqual(h.exits, [1]);
+});
+
+test('a restart whose cleanup or listener close throws is handled as a fatal error and exits 1', async () => {
+    const cleanupFails = createHarness({
+        notifyRoomsEnded: () => false,
+        cleanup: () => { throw new Error('cleanup failed'); },
+    });
+    const launcherA = createFakeLauncher(cleanupFails.events);
+    await cleanupFails.coordinator.requestRestart('media-worker-died', { launchReplacement: launcherA.launch });
+    assert.deepEqual(cleanupFails.exits, [1]);
+    assert.equal(launcherA.launches.length, 0);
+    assert.ok(cleanupFails.logged.some((entry) => entry[0] === 'error' && /Restart after media-worker-died failed/.test(entry[1])));
+
+    const closeFails = createHarness({
+        notifyRoomsEnded: () => false,
+        closeServer: () => { throw new Error('close failed'); },
+    });
+    const launcherB = createFakeLauncher(closeFails.events);
+    await closeFails.coordinator.requestRestart('media-worker-died', { launchReplacement: launcherB.launch });
+    assert.deepEqual(closeFails.exits, [1]);
+    assert.equal(launcherB.launches.length, 0);
+});
+
+test('a restart needs a launcher and does nothing while another stop is in progress', async () => {
+    const h = createHarness({ notifyRoomsEnded: () => false });
+    await assert.rejects(h.coordinator.requestRestart('media-worker-died'), /launchReplacement/);
+    assert.equal(h.coordinator.getPhase(), 'running');
+
+    const launcher = createFakeLauncher(h.events);
+    await h.coordinator.requestFatal('uncaught-exception');
+    await h.coordinator.requestRestart('media-worker-died', { launchReplacement: launcher.launch });
+    assert.equal(launcher.launches.length, 0);
+    assert.deepEqual(h.exits, [1]);
+
+    const g = createHarness({ notifyRoomsEnded: () => false });
+    const graceLauncher = createFakeLauncher(g.events);
+    await g.coordinator.requestGraceful('SIGTERM');
+    await g.coordinator.requestRestart('media-worker-died', { launchReplacement: graceLauncher.launch });
+    assert.equal(graceLauncher.launches.length, 0);
+    assert.equal(g.coordinator.getPhase(), 'graceful');
+});
+
+test('a fatal error tells rooms through the notice the caller supplies', async () => {
+    const h = createHarness();
+    const done = h.coordinator.requestFatal('media-worker-died', { notifyRooms: () => { h.events.push('custom-notice'); return true; } });
+    h.fireTimer(150);
+    await done;
+
+    assert.equal(h.events.includes('notify:fatal'), false);
+    assert.deepEqual(h.events, ['timer:4000', 'start', 'custom-notice', 'timer:150', 'cleanup', 'exit:1']);
 });
 
 test('a coordinator needs its side effects', () => {

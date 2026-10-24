@@ -17,6 +17,15 @@ import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosti
 import { setNavigationGuard } from './lib/navigationGuard.mjs';
 import { RELOAD_PRESERVE, createStartAttempt, startOperationGuardFor } from './lib/startOperationGuard.mjs';
 import {
+    START_PHASES,
+    createCancellableWait,
+    isIngestModeMismatch,
+    reclaimWithRetry,
+    recoveredRoomIngestMode,
+    shouldStopObsAfterFailedReclaim,
+    shouldTeardownAfterStartFailure,
+} from './lib/hostRecovery.mjs';
+import {
     RELAY_BITRATE_STEP_UP_AFTER_MS,
     RELAY_MP4_MIME_TYPE,
     lowerRelayBitrate,
@@ -409,6 +418,15 @@ function clearHostRecoverySession() {
     try { window.sessionStorage.removeItem(HOST_RECOVERY_SESSION_STORAGE_KEY); } catch { }
 }
 
+// Clears the record only while it still names the room it was loaded for: a room
+// the host has started since may have written its own over it.
+function forgetHostRecoverySession(stored) {
+    const current = loadHostRecoverySession();
+    if (current?.code === stored.code && current?.hostToken === stored.hostToken) {
+        clearHostRecoverySession();
+    }
+}
+
 export default function HostView() {
     const socket = useContext(SocketContext);
     const [storedByokTurnSession] = useState(() => loadStoredByokTurnSession());
@@ -545,6 +563,7 @@ export default function HostView() {
     const effectiveTurnAvailability = obsAv1Mode ? roomHasTurnServer : hasTurnServer;
     const shouldPrewarmRelay = ingestMode !== 'obs' && hasRemoteShareLink && !effectiveTurnAvailability;
     const byokTurnSessionHint = 'Keeps TURN credentials in session storage so they survive reloads and are cleared when the tab or window closes.';
+    const resumeModeLockHint = 'Locked while the recovered room waits for Resume Sharing: it keeps the ingest mode it was created with.';
     const buildWhipBroadcastUrl = useCallback((code) => (
         `http://${formatHostForUrl(whipHttpHost)}:${whipHttpPort}/whip/broadcast/${code}`
     ), [whipHttpHost, whipHttpPort]);
@@ -612,9 +631,11 @@ export default function HostView() {
     // a room that is gone. Unload handlers cannot await, so this stays
     // synchronous: the open control channel writes the stop frame immediately,
     // and only the fallback (no channel — e.g. after a reload-recovery reclaim)
-    // pays for a fresh connect.
-    const stopObsIngest = useCallback(() => {
-        if (ingestModeRef.current !== 'obs') return;
+    // pays for a fresh connect. A page that was reloaded starts in 'browser' until
+    // a reclaim succeeds, so a teardown after a failed reclaim names the stored
+    // room's mode instead.
+    const stopObsIngest = useCallback((ingestModeOverride) => {
+        if ((ingestModeOverride ?? ingestModeRef.current) !== 'obs') return;
         const channel = obsControlChannelRef.current;
         obsControlChannelRef.current = null;
         if (channel) {
@@ -899,6 +920,9 @@ export default function HostView() {
         hostTokenRef.current = null;
         roomCodeRef.current = null;
         resumeRoomRef.current = null;
+        // With no reclaimed room left, nothing waits for Resume Sharing and the
+        // ingest-mode lock that guards it is released.
+        setResumePending(false);
         clearHostRecoverySession();
         setViewerCount(0);
         setWhepViewerCount(0);
@@ -939,12 +963,12 @@ export default function HostView() {
         releaseHostSession();
     }, [releaseHostSession]);
 
-    const terminateHostSession = useCallback((reason) => {
+    const terminateHostSession = useCallback((reason, { ingestMode: storedIngestMode } = {}) => {
         startGuardRef.current.invalidate('terminate');
         // Covers a graceful server shutdown: the room-ended broadcast is the
         // only warning OBS will ever get, since WHIP has no server-initiated
         // stop and OBS keeps pushing RTP at a closed transport otherwise.
-        stopObsIngest();
+        stopObsIngest(storedIngestMode);
         cleanup();
         setResumePending(false);
         setTerminalRoomEnded(true);
@@ -1059,55 +1083,92 @@ export default function HostView() {
         return () => socket.off('connect', onReconnect);
     }, [socket, isSharing, roomCode, terminateHostSession]);
 
+    // After a reload, reclaim the room kept in sessionStorage. A transient
+    // failure (a timeout, a connection that dropped, a socket that is not up
+    // yet) is retried inside the recovery window with the stored record intact;
+    // only a terminal rejection or the end of the window ends the session.
     useEffect(() => {
         const stored = loadHostRecoverySession();
         if (!stored) return undefined;
         let cancelled = false;
+        const retryWait = createCancellableWait();
+        const startGuard = startGuardRef.current;
 
-        const reclaimStoredRoom = async () => {
-            try {
-                const response = await socketRequest(socket, 'reclaim-host', {
-                    ...stored,
-                    reloadRecovery: true,
-                });
-                if (cancelled) return;
-                if (response.reloadRecoveryEnabled !== true) {
-                    clearHostRecoverySession();
-                    return;
-                }
-                setRoomCode(stored.code);
-                roomCodeRef.current = stored.code;
-                setHostToken(stored.hostToken);
-                hostTokenRef.current = stored.hostToken;
-                setReloadRecoveryEnabled(true);
-                reloadRecoveryEnabledRef.current = true;
-                setIngestMode(response.ingestMode === 'obs' ? 'obs' : 'browser');
-                setObsVideoCodec(response.obsVideoCodec || null);
-                setRoomHasTurnServer(!!response.hasRoomTurnServer);
-                // Room-state responses also carry a stable `code` describing the
-                // transition (for example `host-reconnected`). Preserve the room
-                // identity from the authenticated recovery session explicitly.
-                resumeRoomRef.current = {
-                    ...response,
-                    code: stored.code,
-                    hostToken: stored.hostToken,
-                };
-                if (response.ingestMode === 'obs') {
-                    setIsSharing(true);
-                    setStatus('streaming');
-                    setResumePending(false);
-                } else {
-                    setResumePending(true);
-                    setStatus('idle');
-                }
-            } catch (err) {
-                if (cancelled) return;
-                terminateHostSession(err.reason || err.message || 'The previous room ended. Create a new room to continue.');
+        const adoptReclaimedRoom = (response) => {
+            if (response.reloadRecoveryEnabled !== true) {
+                clearHostRecoverySession();
+                return;
+            }
+            setRoomCode(stored.code);
+            roomCodeRef.current = stored.code;
+            setHostToken(stored.hostToken);
+            hostTokenRef.current = stored.hostToken;
+            setReloadRecoveryEnabled(true);
+            reloadRecoveryEnabledRef.current = true;
+            setIngestMode(recoveredRoomIngestMode(response));
+            setObsVideoCodec(response.obsVideoCodec || null);
+            setRoomHasTurnServer(!!response.hasRoomTurnServer);
+            // Room-state responses also carry a stable `code` describing the
+            // transition (for example `host-reconnected`). Preserve the room
+            // identity from the authenticated recovery session explicitly.
+            resumeRoomRef.current = {
+                ...response,
+                code: stored.code,
+                hostToken: stored.hostToken,
+            };
+            if (response.ingestMode === 'obs') {
+                setIsSharing(true);
+                setStatus('streaming');
+                setResumePending(false);
+            } else {
+                setResumePending(true);
+                setStatus('idle');
             }
         };
 
+        const reclaimStoredRoom = async () => {
+            const outcome = await reclaimWithRetry({
+                request: (attempt) => socketRequest(socket, 'reclaim-host', {
+                    ...stored,
+                    reloadRecovery: true,
+                }, attempt),
+                isCancelled: () => cancelled,
+                // A room the host started on this page since the reload owns the
+                // session; the old room is no longer worth retrying for.
+                shouldGiveUp: () => startGuard.activeOperation !== null,
+                wait: retryWait.wait,
+                onRetry: (attempts, err) => {
+                    console.warn(`[Nextra] Reclaiming the previous room failed (attempt ${attempts}), trying again:`, err?.message);
+                },
+            });
+            if (outcome.status === 'cancelled') return;
+            if (outcome.status === 'reclaimed') {
+                adoptReclaimedRoom(outcome.response);
+                return;
+            }
+            // The host has started a room of their own: the old room's failure must
+            // neither tear that one down nor stop an OBS output it may be using.
+            if (outcome.status === 'gave-up' || startGuard.activeOperation !== null) {
+                forgetHostRecoverySession(stored);
+                return;
+            }
+            const err = outcome.error;
+            const reason = outcome.terminal
+                ? (err?.reason || err?.message || 'The previous room ended. Create a new room to continue.')
+                : 'Could not reconnect to the previous room in time. Create a new room to continue.';
+            if (!outcome.terminal) {
+                console.warn(`[Nextra] Gave up reclaiming the previous room after ${outcome.attempts} attempts:`, err?.message);
+            }
+            terminateHostSession(reason, {
+                ingestMode: shouldStopObsAfterFailedReclaim(stored) ? 'obs' : undefined,
+            });
+        };
+
         reclaimStoredRoom();
-        return () => { cancelled = true; };
+        return () => {
+            cancelled = true;
+            retryWait.cancel();
+        };
     }, [socket, terminateHostSession]);
 
     useEffect(() => {
@@ -1301,6 +1362,20 @@ export default function HostView() {
     ]);
 
     const handleStartSharing = useCallback(async () => {
+        // A reclaimed room keeps the ingest mode it was created with, and
+        // resuming it sends no create-room, so the server would never hear of
+        // another mode. The settings lock the mode while the room waits; should
+        // the two still differ, refuse without touching the room and put the
+        // setting back to the room's mode.
+        const waitingRoom = resumeRoomRef.current;
+        if (isIngestModeMismatch({ recoveredRoom: waitingRoom, ingestMode })) {
+            const roomMode = recoveredRoomIngestMode(waitingRoom);
+            setIngestMode(roomMode);
+            if (roomMode !== 'obs') setShowByokTurnModal(false);
+            setError(`This recovered room streams from ${roomMode === 'obs' ? 'OBS' : 'browser capture'} and keeps that mode, so the setting was switched back. Press Resume Sharing to continue.`);
+            return;
+        }
+
         // This start is an operation that a teardown (stop, terminate, unmount,
         // pagehide, cleanup) or a newer start can overtake at any await below.
         // After each one it checks it is still current; a stale one releases
@@ -1319,8 +1394,21 @@ export default function HostView() {
         setPreflightWarnings([]);
         setTerminalRoomEnded(false);
         setStatus('connecting');
-        const resumedRoom = resumeRoomRef.current;
+        const resumedRoom = waitingRoom;
         let stream = null;
+        // The step a failure happens in decides whether it ends the room.
+        let phase = START_PHASES.PREFLIGHT;
+        // Gives back the capture this start acquired and nothing else: the
+        // room, its token and the stored recovery record stay as they are.
+        const releaseCaptureOnly = () => {
+            for (const capture of new Set([stream, streamRef.current])) {
+                capture?.getTracks().forEach((track) => {
+                    try { track.stop(); } catch { }
+                });
+            }
+            if (videoRef.current) videoRef.current.srcObject = null;
+            streamRef.current = null;
+        };
 
         try {
             let roomTurnConfig = null;
@@ -1364,6 +1452,7 @@ export default function HostView() {
             }
 
             if (ingestMode !== 'obs') {
+                phase = START_PHASES.CAPTURE;
                 // `systemAudio: 'include'` is a Chromium-only getDisplayMedia
                 // option with no feature-detection API, so this probe brands the
                 // capture option only. It never gates whether hosting is allowed.
@@ -1408,6 +1497,9 @@ export default function HostView() {
                 });
             }
 
+            // From here on the start takes the room over (a reclaimed one
+            // included), and a failure ends it.
+            phase = START_PHASES.ROOM;
             // Room requests go out in start order: this one waits until an
             // earlier start's request has settled and any host-stopped it owed
             // is on the socket, so that host-stopped cannot end this room.
@@ -1444,6 +1536,7 @@ export default function HostView() {
             resumeRoomRef.current = null;
             setResumePending(false);
 
+            phase = START_PHASES.MEDIA;
             if (ingestMode !== 'obs') {
                 const { rtpCapabilities } = await socketRequest(socket, 'get-rtp-capabilities');
                 if (attempt.abandonIfStale()) return;
@@ -1526,6 +1619,7 @@ export default function HostView() {
             setIsSharing(true);
             setStatus('streaming');
 
+            phase = START_PHASES.OBS;
             // Auto-configure OBS via WebSocket when in OBS mode
             if (ingestMode === 'obs' && code && hostToken) {
                 const whipUrl = buildWhipBroadcastUrl(code);
@@ -1563,7 +1657,25 @@ export default function HostView() {
             // its transport): release its own resources and report nothing.
             if (attempt.abandonIfStale()) return;
             console.error('Start sharing failed:', err);
-            if (err?.name === 'NotAllowedError') {
+            const cancelled = err?.name === 'NotAllowedError';
+            if (!shouldTeardownAfterStartFailure({ resumed: resumedRoom != null, phase })) {
+                // A preflight blocker or a cancelled or failed picker on Resume
+                // Sharing: the reclaimed room viewers wait in is not in use yet.
+                // Give back the capture only, end this start, and leave the
+                // room, its token, the stored record and Resume Sharing as they
+                // were for another try.
+                releaseCaptureOnly();
+                guard.invalidate('start-failed');
+                setStatus('idle');
+                if (cancelled) {
+                    setError('Screen sharing was cancelled. Press Resume Sharing to try again.');
+                } else {
+                    const reason = String(err?.message || 'unknown error');
+                    setError(`Failed to start sharing: ${reason}${/[.!?]$/.test(reason) ? '' : '.'} Press Resume Sharing to try again.`);
+                }
+                return;
+            }
+            if (cancelled) {
                 setError('Screen sharing was cancelled.');
             } else {
                 setError(`Failed to start sharing: ${err.message}`);
@@ -1806,6 +1918,9 @@ export default function HostView() {
     }, []);
 
     const handleIngestModeChange = useCallback((mode) => {
+        // A reclaimed room waiting for Resume Sharing keeps the mode it was
+        // created with (the toggle is disabled then; this covers any other way in).
+        if (isIngestModeMismatch({ recoveredRoom: resumeRoomRef.current, ingestMode: mode })) return;
         setIngestMode(mode);
         if (mode !== 'obs') {
             setShowByokTurnModal(false);
@@ -2038,6 +2153,7 @@ export default function HostView() {
                                         type="checkbox"
                                         id="obsMode"
                                         checked={ingestMode === 'obs'}
+                                        disabled={resumePending}
                                         onChange={(e) => handleIngestModeChange(e.target.checked ? 'obs' : 'browser')}
                                     />
                                     <label htmlFor="obsMode">
@@ -2045,6 +2161,9 @@ export default function HostView() {
                                         <span className="setting-hint">
                                             Stream via OBS instead of browser screen capture
                                         </span>
+                                        {resumePending && (
+                                            <span className="setting-hint">{resumeModeLockHint}</span>
+                                        )}
                                     </label>
                                 </div>
                             </div>
@@ -2075,12 +2194,15 @@ export default function HostView() {
                                             type="checkbox"
                                             id="obsTryAv1"
                                             checked={obsTryAv1}
-                                            disabled={(publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported}
+                                            disabled={resumePending || ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported)}
                                             onChange={(e) => handleObsTryAv1Change(e.target.checked)}
                                         />
                                         <label htmlFor="obsTryAv1">
                                             Use BYOK TURN (AV1)
                                             <span className="setting-hint">Open TURN setup in a modal and switch OBS rooms to AV1 WebRTC-only mode</span>
+                                            {resumePending && (
+                                                <span className="setting-hint">{resumeModeLockHint}</span>
+                                            )}
                                             {(publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported && (
                                                 <span className="setting-hint">
                                                     Disabled for public sharing: configure a reachable public media address first.

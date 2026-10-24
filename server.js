@@ -35,7 +35,7 @@ const {
     emitHostMetrics,
 } = require('./lib/socket');
 const { createRelayCapacityProbe } = require('./lib/relayCapacityProbe');
-const { listObsVideoEncoders, writeStreamEncoderSettings } = require('./lib/obsProfile');
+const { listObsVideoEncoders, restoreStreamEncoderSettings, writeStreamEncoderSettings } = require('./lib/obsProfile');
 const { startRoomCleanup, stopRoomCleanup, getAllRoomStats } = require('./lib/rooms');
 const { getOrCreateCert } = require('./lib/https');
 const { startCloudflareTunnel } = require('./lib/tunnel');
@@ -63,7 +63,7 @@ const {
 } = require('./lib/listenerHost');
 const { resolveExecutablePath } = require('./lib/executable');
 const { renderOpenMetrics } = require('./lib/openMetrics');
-const { decideWorkerDeathAction } = require('./lib/workerRecovery');
+const { decideWorkerDeathAction, launchReplacementProcess } = require('./lib/workerRecovery');
 const { createShutdownCoordinator } = require('./lib/shutdownCoordinator');
 const { ROOM_STATE_CODES, createRoomState } = require('./lib/roomState');
 const { ExpiringTracker } = require('./lib/expiringTracker');
@@ -274,6 +274,13 @@ function getKnownPublicShareOrigins() {
     ].filter((origin) => origin && isPublicOrigin(origin));
 }
 
+// The URL of the cloudflared tunnel Nextra launched (quick or named), while it runs: the one relay whose
+// CF-Connecting-IP is Cloudflare's record of the viewer. A SHARE_BASE_URL on its own may front any proxy.
+function getManagedTunnelOrigin() {
+    const { status, baseUrl } = getPublicTunnelState();
+    return status === 'active' && baseUrl && isPublicOrigin(baseUrl) ? baseUrl : '';
+}
+
 // Who a request or socket comes from; see lib/requestIdentity.js. The tunnel and any same-host proxy relay from
 // loopback, so a relayed request is classified as a known proxy, never as the local operator.
 const {
@@ -286,6 +293,8 @@ const {
     getKnownPublicShareOrigins,
     getTrustForwardedHeaders: () => config.TRUST_X_FORWARDED_HEADERS,
     getTrustProxy: () => config.TRUST_PROXY,
+    getManagedTunnelOrigin,
+    getTrustCloudflareClientIp: () => config.TRUST_CLOUDFLARE_CONNECTING_IP,
 });
 
 function getRequestClientIp(req) {
@@ -1357,6 +1366,9 @@ async function startWhipHttpServer(whipRouter) {
     if (config.TRUST_X_FORWARDED_HEADERS) {
         console.log('Forwarded header trust: enabled for loopback proxy peers only.');
     }
+    if (config.TRUST_CLOUDFLARE_CONNECTING_IP) {
+        console.log('CF-Connecting-IP trust: enabled for loopback proxy peers; use it only behind cloudflared.');
+    }
     if (config.WHIP_ALLOW_INSECURE_REMOTE
         && config.WHIP_BIND_HOST.toLowerCase() !== 'localhost'
         && !isLoopbackIp(config.WHIP_BIND_HOST)) {
@@ -1434,13 +1446,18 @@ async function startWhipHttpServer(whipRouter) {
     }
 
     // If the mediasoup worker subprocess dies, the media engine and every
-    // in-memory room are gone. Tell connected clients that their room ended,
-    // then replace the process so new rooms can be created.
+    // in-memory room are gone. Tell connected clients that their room ended, then
+    // recover one way or the other, never both:
+    // - EXTERNAL_SUPERVISOR set: exit 1 and let the supervisor restart Nextra;
+    // - otherwise: start a replacement as a visible child (output inherited), wait
+    //   for it, and exit with its exit code (see lib/workerRecovery.js).
+    // A crash during startup exits 1 without a restart, so it cannot loop.
     setWorkerDeathHandler(() => {
         const recoveryAction = decideWorkerDeathAction({
             isShuttingDown: shutdownCoordinator.isShuttingDown(),
             uptimeSeconds: process.uptime(),
             minimumUptimeSeconds: config.WORKER_RECOVERY_MIN_UPTIME_SECONDS,
+            supervised: config.EXTERNAL_SUPERVISOR,
         });
         if (recoveryAction === 'ignore') return;
 
@@ -1451,56 +1468,29 @@ async function startWhipHttpServer(whipRouter) {
             return;
         }
 
-        console.error('[recovery] Media engine (mediasoup worker) crashed. Ending active rooms and restarting Nextra automatically.');
-
-        if (ioServer) {
+        // The coordinator waits for the notice to flush before it tears anything down.
+        const notifyRoomsMediaWorkerFatal = () => {
+            if (!ioServer) return false;
             ioServer.emit('room-ended', createRoomState(
                 ROOM_STATE_CODES.MEDIA_WORKER_FATAL,
                 'The media engine restarted. This room ended; create or join a new room.'
             ));
+            return true;
+        };
+        const onRecoveryError = (err) => handleUnexpectedProcessError('worker-recovery-failed', err);
+
+        if (recoveryAction === 'exit-for-supervisor') {
+            console.error('[recovery] Media engine (mediasoup worker) crashed. Ending active rooms and exiting with code 1 for the external supervisor to restart Nextra.');
+            shutdownCoordinator.requestFatal('media-worker-died', { notifyRooms: notifyRoomsMediaWorkerFatal })
+                .catch(onRecoveryError);
+            return;
         }
 
-        let finished = false;
-        const finish = () => {
-            if (finished) return;
-            finished = true;
-            try {
-                const { spawn } = require('child_process');
-                const replacement = spawn(process.execPath, [
-                    ...process.execArgv,
-                    ...process.argv.slice(1),
-                ], {
-                    detached: true,
-                    stdio: 'ignore',
-                    cwd: process.cwd(),
-                    env: process.env,
-                    windowsHide: true,
-                });
-                replacement.once('spawn', () => {
-                    replacement.unref();
-                    process.exit(0);
-                });
-                replacement.once('error', (err) => {
-                    console.error('[recovery] Failed to relaunch automatically:', err.message);
-                    process.exit(1);
-                });
-            } catch (err) {
-                console.error('[recovery] Failed to relaunch automatically:', err.message);
-                process.exit(1);
-            }
-        };
-
-        // Give Socket.IO one event-loop turn to flush the terminal state before
-        // releasing listeners and allowing the replacement process to bind.
-        setTimeout(() => {
-            cleanupGlobalResources();
-            try {
-                appServer.close(() => finish());
-                setTimeout(finish, 2000).unref();
-            } catch {
-                finish();
-            }
-        }, 150).unref();
+        console.error('[recovery] Media engine (mediasoup worker) crashed. Ending active rooms and restarting Nextra automatically.');
+        shutdownCoordinator.requestRestart('media-worker-died', {
+            notifyRooms: notifyRoomsMediaWorkerFatal,
+            launchReplacement: launchReplacementProcess,
+        }).catch(onRecoveryError);
     });
 
     // Mount WHIP routes on the main app and a separate HTTP server.
@@ -1610,6 +1600,13 @@ async function startWhipHttpServer(whipRouter) {
             if (getSocketClientClassification(socket).kind !== 'loopback') return { ok: false, reason: 'not-local' };
             const result = writeStreamEncoderSettings(payload);
             if (result.ok) console.log(`[OBS] Wrote stream encoder settings to ${result.path}`);
+            return result;
+        },
+        // Putting the file back is as local as writing it.
+        restoreObsEncoderSettings: (socket, payload) => {
+            if (getSocketClientClassification(socket).kind !== 'loopback') return { ok: false, reason: 'not-local' };
+            const result = restoreStreamEncoderSettings(payload);
+            if (result.ok) console.log(`[OBS] Put stream encoder settings back at ${result.path}`);
             return result;
         },
         listObsEncoders: (socket) => (getSocketClientClassification(socket).kind === 'loopback' ? listObsVideoEncoders() : null),

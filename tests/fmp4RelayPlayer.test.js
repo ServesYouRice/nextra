@@ -810,3 +810,660 @@ test('VAL-093: stop() during reset recovery clears the retry and timeout timers'
     assert.deepEqual(silent.errors, []);
     assert.equal(silent.player.getState().state, 'stopped');
 });
+
+// Makes every later append to this SourceBuffer throw, as MSE does once the
+// video element has an error or the SourceBuffer has left its MediaSource.
+function breakAppends(sourceBuffer) {
+    const broken = { calls: 0 };
+    sourceBuffer.appendBuffer = () => {
+        broken.calls += 1;
+        throw new DOMException('The SourceBuffer cannot take more data', 'InvalidStateError');
+    };
+    return broken;
+}
+
+function captureConsole(t) {
+    const errorLog = t.mock.method(console, 'error', () => {});
+    t.mock.method(console, 'warn', () => {});
+    t.mock.method(console, 'log', () => {});
+    return { errorCount: () => errorLog.mock.callCount() };
+}
+
+function sendFragment(socket, generation, sequence) {
+    socket.serverEmit('media-chunk', { generation, sequence, chunk: Uint8Array.of(sequence % 255) });
+}
+
+// Answers the latest get-media-init with generation `generation` and opens the
+// MediaSource it builds, which takes the init segment.
+async function answerRecovery(socket, generation) {
+    const mediaSources = FakeMediaSource.instances.length;
+    socket.pending('get-media-init').at(-1).ack(initAnswer(generation));
+    assert.equal(FakeMediaSource.instances.length, mediaSources + 1, 'the answer builds a new MediaSource');
+    const rebuilt = FakeMediaSource.instances.at(-1);
+    rebuilt.open();
+    await flushTasks();
+    return { mediaSource: rebuilt, sourceBuffer: rebuilt.sourceBuffers[0] };
+}
+
+test('VAL-094: a failed append is not reported again for every fragment, and the broken SourceBuffer gets nothing more', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const logs = captureConsole(t);
+    const { player, socket, mediaSource, sourceBuffer, errors } = await startHeldPlaying(t);
+
+    const broken = breakAppends(sourceBuffer);
+    for (let sequence = 2; sequence <= 12; sequence += 1) sendFragment(socket, 1, sequence);
+    await flushTasks();
+
+    assert.deepEqual(errors, [], 'one failure, which the player recovers from, is not an error per fragment');
+    assert.equal(logs.errorCount(), 0);
+    assert.equal(broken.calls, 1, 'nothing more is appended to the SourceBuffer that failed');
+    assert.equal(socket.pending('get-media-init').length, 2, 'the player asks once for a fresh init segment');
+    assert.deepEqual(mediaSource.removedSourceBuffers, [sourceBuffer], 'the broken SourceBuffer is let go');
+    assert.equal(player.getState().state, 'buffering');
+    assert.equal(player.getState().queueLength, 0);
+});
+
+test('VAL-094: recovery takes a fresh init segment of the same generation and appends to the new SourceBuffer', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const { player, socket, mediaSource, sourceBuffer, states, errors } = await startHeldPlaying(t);
+
+    const broken = breakAppends(sourceBuffer);
+    sendFragment(socket, 1, 2);
+    await flushTasks();
+    assert.equal(socket.pending('get-media-init').length, 2, 'the failure asks for a fresh init segment');
+
+    // The relay is still on generation 1: its init must not be taken for a duplicate.
+    const rebuilt = await answerRecovery(socket, 1);
+    assert.equal(FakeMediaSource.instances.length, 2, 'the same generation is accepted after the reset');
+    assert.equal(player.getState().generation, 1);
+
+    // The new src detaches the old MediaSource, which closes: the player's own doing.
+    mediaSource.readyState = 'closed';
+    mediaSource.dispatch('sourceclose');
+    assert.equal(socket.pending('get-media-init').length, 2, 'the old MediaSource closing is no new failure');
+
+    socket.serverEmit('media-chunk', { generation: 1, sequence: 3, keyframeStart: true, chunk: Uint8Array.of(6, 7) });
+    await flushTasks();
+    assert.deepEqual(rebuilt.sourceBuffer.appended.map((bytes) => [...bytes]), [[1, 2], [6, 7]]);
+    assert.equal(broken.calls, 1);
+    assert.deepEqual(errors, []);
+    assert.equal(states.at(-1), 'playing');
+
+    // Recovered: nothing is left to time out.
+    t.mock.timers.tick(120_000);
+    assert.equal(socket.pending('get-media-init').length, 2);
+    assert.equal(socket.pending('fallback-consume-start').length, 0);
+    assert.deepEqual(errors, []);
+});
+
+test('VAL-094: failures beyond the recovery budget end in exactly one error', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const logs = captureConsole(t);
+    const context = await startHeldPlaying(t);
+    const { player, socket, video, states, errors } = context;
+
+    // Every rebuilt SourceBuffer takes its init segment and then fails on the
+    // first fragment: three recoveries, then the fourth failure is final.
+    let { sourceBuffer } = context;
+    let sequence = 1;
+    const brokenBuffers = [];
+    for (let failure = 1; failure <= 4; failure += 1) {
+        brokenBuffers.push(breakAppends(sourceBuffer));
+        sequence += 1;
+        sendFragment(socket, 1, sequence);
+        await flushTasks();
+        if (failure === 4) break;
+        assert.deepEqual(errors, [], `failure ${failure} is recovered, not reported`);
+        assert.equal(player.getState().state, 'buffering');
+        ({ sourceBuffer } = await answerRecovery(socket, 1));
+        assert.equal(sourceBuffer.appended.length, 1, 'the rebuilt SourceBuffer took its init segment');
+    }
+
+    assert.deepEqual(errors, ['SourceBuffer append failed']);
+    assert.equal(logs.errorCount(), 1);
+    assert.deepEqual(states.filter((state) => state === 'error'), ['error']);
+    assert.equal(player.getState().state, 'error');
+    assert.equal(socket.pending('get-media-init').length, 4, 'the first request and three recoveries');
+
+    // After the error: no recovery, no append, no second report.
+    const last = FakeMediaSource.instances.at(-1);
+    sendFragment(socket, 1, sequence + 1);
+    last.readyState = 'closed';
+    last.dispatch('sourceclose');
+    video.dispatch('error');
+    await flushTasks();
+    t.mock.timers.tick(120_000);
+    assert.equal(socket.pending('get-media-init').length, 4);
+    assert.equal(socket.pending('fallback-consume-start').length, 0);
+    assert.deepEqual(errors, ['SourceBuffer append failed']);
+    assert.equal(logs.errorCount(), 1);
+    assert.deepEqual(brokenBuffers.map((broken) => broken.calls), [1, 1, 1, 1]);
+});
+
+test('VAL-094: media appended after a recovery ends the failure episode and renews the budget', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const context = await startHeldPlaying(t);
+    const { player, socket, errors } = context;
+
+    // Four failures, each followed by a recovery in which media went in again:
+    // four separate episodes, none of which used up the budget.
+    let { sourceBuffer } = context;
+    let sequence = 1;
+    for (let failure = 1; failure <= 4; failure += 1) {
+        breakAppends(sourceBuffer);
+        sequence += 1;
+        sendFragment(socket, 1, sequence);
+        await flushTasks();
+        ({ sourceBuffer } = await answerRecovery(socket, 1));
+        sequence += 1;
+        sendFragment(socket, 1, sequence);
+        await flushTasks();
+        assert.equal(sourceBuffer.appended.length, 2, `media went in after recovery ${failure}`);
+    }
+    assert.deepEqual(errors, []);
+    assert.notEqual(player.getState().state, 'error');
+});
+
+test('VAL-094: a MediaSource that closes under the player is recovered, and a closed one the player let go of is not', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const { player, socket, mediaSource, errors } = await startHeldPlaying(t);
+    assert.equal(mediaSource.listenerCount('sourceclose'), 1, 'the player listens for its MediaSource closing');
+
+    // The browser detaches the MediaSource from the video element.
+    mediaSource.readyState = 'closed';
+    mediaSource.dispatch('sourceclose');
+    assert.equal(socket.pending('get-media-init').length, 2, 'the close asks for a fresh init segment');
+    assert.equal(player.getState().state, 'buffering');
+    assert.equal(player.getState().generation, -1);
+    assert.equal(mediaSource.listenerCount('sourceclose'), 0, 'the old MediaSource is let go');
+
+    // The relay pushes generation 1 again: a new MediaSource is built for it.
+    socket.serverEmit('media-init', { generation: 1, mimeType: MIME, initSegment: Uint8Array.of(1, 2) });
+    assert.equal(FakeMediaSource.instances.length, 2);
+    const rebuilt = FakeMediaSource.instances[1];
+    rebuilt.open();
+    await flushTasks();
+    sendFragment(socket, 1, 2);
+    await flushTasks();
+    assert.equal(rebuilt.sourceBuffers[0].appended.length, 2);
+
+    // The close the player itself causes when it stops is no failure.
+    player.stop();
+    assert.equal(rebuilt.listenerCount('sourceclose'), 0, 'stop() removes the sourceclose listener');
+    rebuilt.readyState = 'closed';
+    rebuilt.dispatch('sourceclose');
+    assert.equal(socket.pending('get-media-init').length, 2);
+    assert.equal(player.getState().state, 'stopped');
+    assert.deepEqual(errors, []);
+});
+
+test('VAL-094: a video element error is recovered the same way, and stop() removes its listener', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const { player, socket, video, sourceBuffer, errors } = await startHeldPlaying(t);
+    assert.equal(video.listenerCount('error'), 1, 'the player listens for the video element failing');
+
+    // A decoder failure: the element reports an error, and the next append would throw.
+    const broken = breakAppends(sourceBuffer);
+    video.dispatch('error');
+    sendFragment(socket, 1, 2);
+    await flushTasks();
+    assert.equal(socket.pending('get-media-init').length, 2, 'the error asks for a fresh init segment');
+    assert.equal(broken.calls, 0, 'nothing is appended to the failed SourceBuffer');
+    assert.equal(player.getState().state, 'buffering');
+    assert.equal(video.listenerCount('error'), 0, 'the listener goes with the MediaSource it was for');
+
+    const rebuilt = await answerRecovery(socket, 1);
+    assert.equal(video.listenerCount('error'), 1);
+    sendFragment(socket, 1, 3);
+    await flushTasks();
+    assert.equal(rebuilt.sourceBuffer.appended.length, 2);
+
+    player.stop();
+    assert.equal(video.listenerCount('error'), 0, 'stop() removes the video error listener');
+    video.dispatch('error');
+    assert.equal(socket.pending('get-media-init').length, 2);
+    assert.equal(player.getState().state, 'stopped');
+    assert.deepEqual(errors, []);
+});
+
+test('VAL-094: a full SourceBuffer (QuotaExceededError) is still trimmed and retried, not treated as a failure', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const { player, socket, video, sourceBuffer, errors } = await startHeldPlaying(t);
+    video.currentTime = 10;
+    sourceBuffer.buffered = timeRanges([[0, 10.5]]);
+
+    const append = sourceBuffer.appendBuffer.bind(sourceBuffer);
+    let quotaErrors = 1;
+    sourceBuffer.appendBuffer = (value) => {
+        if (quotaErrors > 0) {
+            quotaErrors -= 1;
+            throw new DOMException('The SourceBuffer is full', 'QuotaExceededError');
+        }
+        append(value);
+    };
+    sendFragment(socket, 1, 2);
+    await flushTasks();
+    assert.deepEqual(sourceBuffer.removed, [{ start: 0, end: 4 }], 'the back buffer is trimmed');
+    assert.equal(player.getState().queueLength, 1, 'the fragment waits for the retry');
+
+    t.mock.timers.tick(100);
+    await flushTasks();
+    assert.deepEqual([...sourceBuffer.appended.at(-1)], [2]);
+    assert.equal(socket.pending('get-media-init').length, 1, 'no recovery');
+    assert.deepEqual(errors, []);
+    assert.notEqual(player.getState().state, 'error');
+});
+
+// A viewer's pause (VAL-095). The player never calls pause() itself, so a
+// 'pause' event is always the viewer's (or the browser's on their behalf), while
+// a play() that autoplay policy refused, or a stall, leaves the element paused
+// without one.
+
+// Counts the player's own play() calls on the fake element.
+function countPlays(video) {
+    const calls = { count: 0 };
+    const play = video.play.bind(video);
+    video.play = () => {
+        calls.count += 1;
+        return play();
+    };
+    return calls;
+}
+
+// What the browser does when the viewer pauses or resumes: the element changes
+// state first, then the event fires.
+function viewerPauses(video) {
+    video.paused = true;
+    video.dispatch('pause');
+}
+
+function viewerPlays(video) {
+    video.paused = false;
+    video.dispatch('play');
+}
+
+test('VAL-095: live sync leaves a viewer\'s pause alone, however long it lasts', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { video } = await startPlaying(t);
+    assert.equal(video.paused, false, 'the player started playback');
+    const plays = countPlays(video);
+
+    viewerPauses(video);
+    // 0.5 s is buffered ahead of the playhead, which is more than the least needed to play.
+    t.mock.timers.tick(20 * 250);
+    await flushTasks();
+    assert.equal(plays.count, 0, 'live sync did not call play()');
+    assert.equal(video.paused, true);
+});
+
+test('VAL-095: a paused picture stays where the viewer stopped it, and play jumps to live', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { video, sourceBuffer } = await startPlaying(t);
+    assert.equal(video.currentTime, 1.5);
+    const plays = countPlays(video);
+
+    viewerPauses(video);
+    // The stream goes on while the viewer is paused: seconds of media pile up ahead.
+    sourceBuffer.buffered = timeRanges([[0, 8]]);
+    t.mock.timers.tick(8 * 250);
+    assert.equal(video.currentTime, 1.5, 'the paused picture does not move');
+    assert.equal(video.playbackRate, 1);
+
+    // Resuming: the next live-sync tick goes to the live edge, a cushion behind it.
+    viewerPlays(video);
+    assert.equal(video.currentTime, 1.5);
+    t.mock.timers.tick(250);
+    assert.equal(video.currentTime, 7.5);
+    assert.equal(plays.count, 0, 'the viewer resumed it, the player did not');
+});
+
+test('VAL-095: a paused element without a pause event is a stall or a refused start, and is resumed', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { video } = await startPlaying(t);
+    const plays = countPlays(video);
+
+    // Autoplay policy refused a play(): the element is paused and nothing fired.
+    video.paused = true;
+    t.mock.timers.tick(250);
+    await flushTasks();
+    assert.equal(plays.count, 1, 'live sync starts it again');
+    assert.equal(video.paused, false);
+});
+
+test('VAL-095: playing again clears the pause, so a later stall is resumed as before', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { video } = await startPlaying(t);
+    const plays = countPlays(video);
+
+    viewerPauses(video);
+    t.mock.timers.tick(4 * 250);
+    assert.equal(plays.count, 0);
+
+    viewerPlays(video);
+    t.mock.timers.tick(250);
+    assert.equal(plays.count, 0, 'nothing to resume while it plays');
+
+    // The browser stalls playback without a pause event.
+    video.paused = true;
+    t.mock.timers.tick(250);
+    await flushTasks();
+    assert.equal(plays.count, 1);
+    assert.equal(video.paused, false);
+
+    // And a second pause is honoured again.
+    viewerPauses(video);
+    t.mock.timers.tick(4 * 250);
+    assert.equal(plays.count, 1);
+});
+
+test('VAL-095: the pause event that playback reaching its end raises is not a viewer\'s pause', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { video } = await startPlaying(t);
+    const plays = countPlays(video);
+
+    video.ended = true;
+    video.paused = true;
+    video.dispatch('pause');
+    video.ended = false;
+    t.mock.timers.tick(250);
+    await flushTasks();
+    assert.equal(plays.count, 1, 'live sync still resumes it');
+});
+
+test('VAL-095: a viewer\'s pause survives a rebuild: the rebuilt player does not start playing by itself', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    captureConsole(t);
+    const { player, socket, video, sourceBuffer } = await startHeldPlaying(t);
+    const plays = countPlays(video);
+    viewerPauses(video);
+
+    // The SourceBuffer fails; the player rebuilds from a fresh init segment.
+    sourceBuffer.dispatch('error');
+    const rebuilt = await answerRecovery(socket, 1);
+    sendFragment(socket, 1, 2);
+    await flushTasks();
+    assert.equal(rebuilt.sourceBuffer.appended.length, 2, 'the rebuilt SourceBuffer got media');
+    t.mock.timers.tick(4 * 250);
+    assert.equal(plays.count, 0, 'the rebuilt player waits for the viewer');
+    assert.equal(video.paused, true);
+
+    viewerPlays(video);
+    t.mock.timers.tick(250);
+    assert.equal(player.getState().state, 'playing');
+});
+
+test('VAL-095: the player listens for the viewer\'s pause and play until stop()', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { player, video } = await startPlaying(t);
+    assert.equal(video.listenerCount('pause'), 1);
+    assert.equal(video.listenerCount('play'), 1);
+
+    player.stop();
+    assert.equal(video.listenerCount('pause'), 0, 'stop() removes the pause listener');
+    assert.equal(video.listenerCount('play'), 0, 'stop() removes the play listener');
+});
+
+test('VAL-095: a pause before stop() does not carry into the same player started again', { concurrency: false }, async (t) => {
+    installMediaSource(t);
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+    const { player, socket, video } = await startPlaying(t);
+    viewerPauses(video);
+    player.stop();
+
+    player.start();
+    const plays = countPlays(video);
+    socket.serverEmit('media-init', { generation: 2, mimeType: MIME, initSegment: Uint8Array.of(1, 2) });
+    const mediaSource = FakeMediaSource.instances.at(-1);
+    mediaSource.open();
+    await flushTasks();
+    socket.serverEmit('media-chunk', { generation: 2, sequence: 1, keyframeStart: true, chunk: Uint8Array.of(3, 4) });
+    await flushTasks();
+    assert.equal(plays.count, 1, 'the new run starts playing');
+});
+
+// Overflow drops and acknowledgements (VAL-107, VAL-108). A SourceBuffer that
+// holds its updates keeps the append queue filling, and finishAppend frees one
+// slot at a time.
+async function startFillablePlayer(t, options) {
+    installMediaSource(t);
+    FakeSourceBuffer.holdUpdates = true;
+    const context = await startPlayer(t, options);
+    const acks = [];
+    context.socket.on('relay-ack', (ack) => acks.push(ack));
+    context.socket.serverEmit('media-init', { generation: 1, mimeType: MIME, initSegment: Uint8Array.of(1) });
+    const mediaSource = FakeMediaSource.instances[0];
+    mediaSource.open();
+    await flushTasks();
+    return { ...context, acks, mediaSource, sourceBuffer: mediaSource.sourceBuffers[0] };
+}
+
+function sendChunk(socket, sequence, keyframeStart, generation = 1) {
+    socket.serverEmit('media-chunk', { generation, sequence, keyframeStart, chunk: Uint8Array.of(sequence % 255) });
+}
+
+// Sends sequences 1..600 (a keyframe fragment first): the append queue is full.
+function fillQueue(socket) {
+    for (let sequence = 1; sequence <= 600; sequence += 1) sendChunk(socket, sequence, sequence === 1);
+}
+
+// The SourceBuffer finishes the append it holds and takes the next one off the queue.
+function finishAppend(sourceBuffer) {
+    sourceBuffer.updating = false;
+    sourceBuffer.dispatch('updateend');
+}
+
+function initRequests(socket) {
+    return socket.requests.filter(({ event }) => event === 'get-media-init').length;
+}
+
+test('VAL-107: after an overflow drop, fragments are discarded until one starts on a keyframe', { concurrency: false }, async (t) => {
+    const { player, socket, sourceBuffer } = await startFillablePlayer(t);
+    fillQueue(socket);
+    assert.equal(player.getState().queueLength, 600);
+
+    // The queue is full: this one is dropped.
+    sendChunk(socket, 601, false);
+    assert.equal(player.getState().queueLength, 600);
+
+    // A slot frees up. The fragments that follow continue a GOP whose start was
+    // thrown away: none of them may be appended.
+    finishAppend(sourceBuffer);
+    assert.equal(player.getState().queueLength, 599);
+    sendChunk(socket, 602, false);
+    sendChunk(socket, 603, false);
+    assert.equal(player.getState().queueLength, 599, 'a mid-GOP fragment is not queued');
+
+    // The next keyframe fragment is.
+    sendChunk(socket, 604, true);
+    assert.equal(player.getState().queueLength, 600);
+
+    // Whatever follows the keyframe continues from it and is queued.
+    finishAppend(sourceBuffer);
+    sendChunk(socket, 605, false);
+    assert.equal(player.getState().queueLength, 600);
+});
+
+test('VAL-107: interleaved drops never let a mid-GOP fragment in', { concurrency: false }, async (t) => {
+    const { player, socket, sourceBuffer } = await startFillablePlayer(t);
+    fillQueue(socket);
+
+    // One drop, a free slot, a fragment that must wait for a keyframe; again and
+    // again. The accepted keyframe in between is what ends each wait.
+    let sequence = 601;
+    for (let round = 0; round < 3; round += 1) {
+        sendChunk(socket, sequence++, false); // full: dropped
+        finishAppend(sourceBuffer);
+        const room = player.getState().queueLength;
+        sendChunk(socket, sequence++, false); // room, but no keyframe yet
+        assert.equal(player.getState().queueLength, room, `round ${round}: the mid-GOP fragment is discarded`);
+        sendChunk(socket, sequence++, true);
+        assert.equal(player.getState().queueLength, room + 1, `round ${round}: the keyframe is accepted`);
+    }
+});
+
+test('VAL-107: a keyframe fragment that is itself dropped does not end the wait', { concurrency: false }, async (t) => {
+    const { player, socket, sourceBuffer } = await startFillablePlayer(t);
+    fillQueue(socket);
+
+    sendChunk(socket, 601, true); // a keyframe, but the queue is full: dropped, and its GOP is lost
+    finishAppend(sourceBuffer);
+    sendChunk(socket, 602, false);
+    assert.equal(player.getState().queueLength, 599, 'the rest of a GOP whose keyframe was dropped is not queued');
+    sendChunk(socket, 603, true);
+    assert.equal(player.getState().queueLength, 600);
+});
+
+test('VAL-107: a stall that keeps discarding fragments still ends in a fresh init request', { concurrency: false }, async (t) => {
+    const states = [];
+    const { player, socket, sourceBuffer } = await startFillablePlayer(t, { onStateChange: (state) => states.push(state) });
+    fillQueue(socket);
+    const before = initRequests(socket);
+
+    sendChunk(socket, 601, false); // drop 1
+    finishAppend(sourceBuffer);
+    // Fragments discarded while waiting for a keyframe count as drops too: 13
+    // more make 14, one short of the limit of 15.
+    for (let sequence = 602; sequence <= 614; sequence += 1) sendChunk(socket, sequence, false);
+    assert.equal(initRequests(socket), before, 'one short of the limit: no request yet');
+    assert.equal(player.getState().queueLength, 599, 'nothing was queued while waiting');
+
+    sendChunk(socket, 615, false);
+    assert.equal(initRequests(socket), before + 1, 'the 15th consecutive drop asks for a fresh init segment');
+    assert.equal(player.getState().queueLength, 0);
+    assert.equal(states.at(-1), 'buffering');
+});
+
+test('VAL-107: a keyframe ends the wait and the count of consecutive drops starts over', { concurrency: false }, async (t) => {
+    const { socket, sourceBuffer } = await startFillablePlayer(t);
+    fillQueue(socket);
+    const before = initRequests(socket);
+
+    // Ten fragments dropped or discarded, then a keyframe: below the limit of 15.
+    sendChunk(socket, 601, false);
+    finishAppend(sourceBuffer);
+    for (let sequence = 602; sequence <= 610; sequence += 1) sendChunk(socket, sequence, false);
+    sendChunk(socket, 611, true);
+    // A second episode of the same size must not add up to the first.
+    sendChunk(socket, 612, false); // the queue is full again
+    finishAppend(sourceBuffer);
+    for (let sequence = 613; sequence <= 621; sequence += 1) sendChunk(socket, sequence, false);
+    sendChunk(socket, 622, true);
+    assert.equal(initRequests(socket), before, 'two episodes of 10 drops are not 20 in a row');
+});
+
+test('VAL-107: the wait for a keyframe holds for the SourceBuffer built after the reset', { concurrency: false }, async (t) => {
+    const { socket, sourceBuffer } = await startFillablePlayer(t);
+    fillQueue(socket);
+    sendChunk(socket, 601, false);
+    finishAppend(sourceBuffer);
+    for (let sequence = 602; sequence <= 615; sequence += 1) sendChunk(socket, sequence, false);
+    // The 15th drop reset the player; the server answers with a fresh init.
+    const mediaSources = FakeMediaSource.instances.length;
+    socket.serverEmit('media-init', { generation: 2, mimeType: MIME, initSegment: Uint8Array.of(9) });
+    assert.equal(FakeMediaSource.instances.length, mediaSources + 1);
+    FakeMediaSource.instances.at(-1).open();
+    await flushTasks();
+    const rebuilt = FakeMediaSource.instances.at(-1).sourceBuffers[0];
+    FakeSourceBuffer.holdUpdates = false;
+    finishAppend(rebuilt);
+    await flushTasks();
+    const appendedBefore = rebuilt.appended.length;
+
+    sendChunk(socket, 1, false, 2);
+    await flushTasks();
+    assert.equal(rebuilt.appended.length, appendedBefore, 'a mid-GOP fragment is not appended to the new SourceBuffer');
+    sendChunk(socket, 2, true, 2);
+    await flushTasks();
+    assert.deepEqual([...rebuilt.appended.at(-1)], [2]);
+});
+
+test('VAL-107: with no drop, fragments that do not start on a keyframe are queued as before', { concurrency: false }, async (t) => {
+    const { player, socket } = await startFillablePlayer(t);
+    sendChunk(socket, 1, true);
+    sendChunk(socket, 2, false);
+    sendChunk(socket, 3, undefined);
+    assert.equal(player.getState().queueLength, 3);
+});
+
+test('VAL-107: stop() ends the wait for a keyframe: the same player started again takes any fragment', { concurrency: false }, async (t) => {
+    const { player, socket } = await startFillablePlayer(t);
+    fillQueue(socket);
+    sendChunk(socket, 601, false); // dropped: waiting for a keyframe
+    player.stop();
+
+    player.start();
+    socket.serverEmit('media-init', { generation: 2, mimeType: MIME, initSegment: Uint8Array.of(1, 2) });
+    FakeMediaSource.instances.at(-1).open();
+    await flushTasks();
+    sendChunk(socket, 1, false, 2);
+    assert.equal(player.getState().queueLength, 1);
+});
+
+test('VAL-108: relay-ack is sent for the fragments that were queued, not for dropped ones', { concurrency: false }, async (t) => {
+    const { player, socket, sourceBuffer, acks } = await startFillablePlayer(t);
+    fillQueue(socket);
+    assert.equal(acks.length, 600);
+    assert.deepEqual(acks[0], { generation: 1, sequence: 1 });
+    assert.deepEqual(acks.at(-1), { generation: 1, sequence: 600 });
+
+    // Dropped for a full queue.
+    sendChunk(socket, 601, true);
+    assert.equal(acks.length, 600, 'a fragment dropped for a full queue is not acknowledged');
+
+    // Discarded while waiting for a keyframe.
+    finishAppend(sourceBuffer);
+    sendChunk(socket, 602, false);
+    assert.equal(acks.length, 600, 'a fragment discarded while waiting for a keyframe is not acknowledged');
+
+    // Queued.
+    sendChunk(socket, 603, true);
+    assert.equal(player.getState().queueLength, 600);
+    assert.equal(acks.length, 601);
+    assert.deepEqual(acks.at(-1), { generation: 1, sequence: 603 });
+});
+
+test('VAL-108: relay-ack count equals the number of fragments queued through an overflow and a reset', { concurrency: false }, async (t) => {
+    const { player, socket, acks } = await startFillablePlayer(t);
+    for (let sequence = 1; sequence <= 700; sequence += 1) sendChunk(socket, sequence, sequence === 1);
+    // 600 were queued; 601..615 were dropped and the 15th reset the player; the
+    // rest belong to a generation the player has let go of.
+    assert.equal(player.getState().queueLength, 0, 'the reset emptied the queue');
+    assert.equal(acks.length, 600);
+    assert.deepEqual(acks.map(({ sequence }) => sequence), Array.from({ length: 600 }, (_, i) => i + 1));
+});
+
+test('VAL-108: a fragment seen twice is queued and acknowledged once', { concurrency: false }, async (t) => {
+    const { player, socket, acks } = await startFillablePlayer(t);
+    sendChunk(socket, 1, true);
+    sendChunk(socket, 2, false);
+    sendChunk(socket, 2, false);
+    sendChunk(socket, 1, true);
+    assert.equal(player.getState().queueLength, 2);
+    assert.deepEqual(acks.map(({ sequence }) => sequence), [1, 2]);
+});
+
+test('VAL-108: an empty fragment is not queued and not acknowledged', { concurrency: false }, async (t) => {
+    const { player, socket, acks } = await startFillablePlayer(t);
+    socket.serverEmit('media-chunk', { generation: 1, sequence: 1, keyframeStart: true, chunk: new Uint8Array(0) });
+    assert.equal(player.getState().queueLength, 0);
+    assert.deepEqual(acks, []);
+});

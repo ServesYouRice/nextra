@@ -202,6 +202,9 @@ const config = {
     AUTO_DETECT_PUBLIC_IP: parseBoolEnv(process.env.AUTO_DETECT_PUBLIC_IP, false),
     TRUST_PROXY: parseTrustProxy(process.env.TRUST_PROXY),
     TRUST_X_FORWARDED_HEADERS: parseBoolEnv(process.env.TRUST_X_FORWARDED_HEADERS, false),
+    // CF-Connecting-IP from a loopback peer is Cloudflare's record of the viewer only behind cloudflared; any other
+    // proxy passes on the client's own copy. Nextra's own tunnel needs no flag; one you run yourself does.
+    TRUST_CLOUDFLARE_CONNECTING_IP: parseBoolEnv(process.env.TRUST_CLOUDFLARE_CONNECTING_IP, false),
     ALLOW_TRYCLOUDFLARE_ORIGINS: parseBoolEnv(process.env.ALLOW_TRYCLOUDFLARE_ORIGINS, false),
     ALLOW_SOCKET_NO_ORIGIN: parseBoolEnv(process.env.ALLOW_SOCKET_NO_ORIGIN, false),
     EXPOSE_LAN_URL: parseBoolEnv(process.env.EXPOSE_LAN_URL, false),
@@ -351,6 +354,11 @@ const config = {
     // Avoid restarting during an immediate startup crash loop. Tests can set 0
     // when they intentionally kill a fully initialized worker.
     WORKER_RECOVERY_MIN_UPTIME_SECONDS: parseIntEnv(process.env.WORKER_RECOVERY_MIN_UPTIME_SECONDS, 30),
+    // Set when a service manager, systemd or a container restart policy restarts
+    // Nextra after it exits. A mediasoup worker death after the minimum uptime then
+    // ends the process with exit code 1 and starts no replacement of its own; without
+    // it, Nextra starts a visible replacement process itself.
+    EXTERNAL_SUPERVISOR: parseBoolEnv(process.env.EXTERNAL_SUPERVISOR, false),
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),
     OPERATOR_TOKEN: (process.env.OPERATOR_TOKEN || '').trim(),

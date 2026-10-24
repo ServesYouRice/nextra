@@ -318,7 +318,7 @@ test('a viewer joining while the leave-host dialog is open keeps focus on the bu
     await expect(leave).toBeFocused();
 
     const viewerContext = await browser.newContext({
-        baseURL: 'https://127.0.0.1:3210',
+        baseURL: testInfo.project.use.baseURL,
         ignoreHTTPSErrors: true,
         viewport: { width: 1280, height: 800 },
     });
