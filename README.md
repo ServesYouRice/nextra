@@ -402,7 +402,7 @@ See `.env.example` for the full list.
 
 ## Security and Privacy
 
-- Public HTTPS tunnel links and WebRTC DTLS media encryption in transit
+- WebRTC viewing, OBS WHIP ingest and WHEP playback are encrypted in transit with DTLS-SRTP. Relay media travels over the page connection and is encrypted only as far as that connection is: public links use HTTPS that ends at the tunnel provider, so relay media is not end-to-end encrypted to the host, and a local link is plain HTTP unless `LOCAL_HTTPS=true`
 - Room-code based access with no user accounts; hosts may opt into an additional room passphrase
 - Rate limiting and connection limits on signaling
 - OBS WebSocket communication is localhost-only
@@ -478,7 +478,7 @@ npm run benchmark:runtime -- --scenario=relay --label=1080p60-h264-relay-5-viewe
 
 Run each profile on the deployment hardware, keep the complete JSON output with the profile name, and increase the conservative limits only when signalling, event-loop, CPU, memory, and relay-byte checks all retain acceptable headroom. A run with sockets but no flowing media fails topology validation rather than becoming a capacity claim.
 
-For a loopback-only test server using Nextra's self-signed local HTTPS certificate, `--allow-insecure-tls` disables Socket.IO certificate verification for that benchmark run; Node's HTTPS fetches also require `NODE_TLS_REJECT_UNAUTHORIZED=0`. Never use either setting against a remote or untrusted host. The JSON result records when Socket.IO TLS verification was disabled.
+For a loopback-only test server using Nextra's self-signed local HTTPS certificate, `--allow-insecure-tls` disables certificate verification for that benchmark run, for both its Socket.IO connections and its `/api/metrics` requests; `NODE_TLS_REJECT_UNAUTHORIZED=0` is not needed. `npm run churn:runtime` has no such option and always verifies the certificate, so point it at a plain `http://` URL or a certificate the machine trusts. Never use `--allow-insecure-tls` against a remote or untrusted host. The JSON result records when TLS verification was disabled.
 
 Production supervision means exactly one replica; a restart ends all in-memory rooms. Keep the verified `caxa` packaging path for Windows x64 and macOS arm64 until either fails its gate or a supported platform change requires a replacement.
 
