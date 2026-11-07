@@ -36,7 +36,9 @@ cloudflared
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
-.claude
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 .idea
 .DS_Store
 *.suo
@@ -51,6 +53,7 @@ cloudflared
 !README.md
 !SOURCE.md
 !THIRD_PARTY_NOTICES.md
+!CLAUDE.md
 
 # arbitra's saved plans list open defects, so they stay on this machine.
 .arbitra/
