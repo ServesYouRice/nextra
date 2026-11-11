@@ -1,0 +1,7 @@
+[setup] at run start C:/Users/V/AppData/Local/Temp/claude/c--Users-V-arbitra/53025464-426b-4472-9c62-52c45e3849f5/scratchpad/scripts-check12-out/.media-flow-lock: "(no folder)"
+[setup] at run start C:/Users/V/nextra-lanes/scripts/test-results/.media-flow-lock: ["0000000000001-9998-00000001-0001.ticket"]
+[+   0.1s] run begins: 1 tests; C:/Users/V/AppData/Local/Temp/claude/c--Users-V-arbitra/53025464-426b-4472-9c62-52c45e3849f5/scratchpad/scripts-check12-out/.media-flow-lock = "(no folder)" ; C:/Users/V/nextra-lanes/scripts/test-results/.media-flow-lock = ["0000000000001-9998-00000001-0001.ticket"]
+[+   1.3s] begin  "Host preflight blocks an unavailable Browser capture path before room allocation"
+[+   2.5s] end # 1 passed after 906 ms "Host preflight blocks an unavailable Browser capture path before room allocation"
+[+   2.5s]        lock folder now: C:/Users/V/AppData/Local/Temp/claude/c--Users-V-arbitra/53025464-426b-4472-9c62-52c45e3849f5/scratchpad/scripts-check12-out/.media-flow-lock = [] ; C:/Users/V/nextra-lanes/scripts/test-results/.media-flow-lock = ["0000000000001-9998-00000001-0001.ticket"]
+[+   2.7s] run ends: passed; C:/Users/V/AppData/Local/Temp/claude/c--Users-V-arbitra/53025464-426b-4472-9c62-52c45e3849f5/scratchpad/scripts-check12-out/.media-flow-lock = [] ; C:/Users/V/nextra-lanes/scripts/test-results/.media-flow-lock = ["0000000000001-9998-00000001-0001.ticket"]

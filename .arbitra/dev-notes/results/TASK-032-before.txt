@@ -1,0 +1,193 @@
+TAP version 13
+# Subtest: an uncaught exception that an uncaughtException listener handles logs a line but shows no dialog
+not ok 1 - an uncaught exception that an uncaughtException listener handles logs a line but shows no dialog
+  ---
+  duration_ms: 178.0352
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupFailureReporter.test.js:62:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    a handled exception must not block the main thread with a dialog
+    + actual - expected
+    
+    + [
+    +   {
+    +     args: [
+    +       '-NoProfile',
+    +       '-NonInteractive',
+    +       '-ExecutionPolicy',
+    +       'Bypass',
+    +       '-Command',
+    +       "$wshell = New-Object -ComObject Wscript.Shell; $wshell.Popup($env:NEXTRA_ERROR_TEXT, 15, 'Nextra startup failed', 16) | Out-Null"
+    +     ],
+    +     file: 'powershell.exe',
+    +     text: 'Nextra could not start correctly.\n' +
+    +       '\n' +
+    +       'Error: handled boom\n' +
+    +       '    at Timeout._onTimeout (C:\\Users\\V\\AppData\\Local\\Temp\\nextra-startup-failure-bWDwEx\\scenario.js:2:26)\n' +
+    +       '    at listOnTimeout (node:internal/timers:594:17)\n' +
+    +       '    at process.processTimers (node:internal/timers:529:7)\n' +
+    +       '\n' +
+    +       'Startup log: C:\\Users\\V\\AppData\\Local\\Temp\\nextra-startup-failure-bWDwEx\\logs\\startup-latest.log'
+    +   }
+    + ]
+    - []
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+    0:
+      file: 'powershell.exe'
+      args:
+        0: '-NoProfile'
+        1: '-NonInteractive'
+        2: '-ExecutionPolicy'
+        3: 'Bypass'
+        4: '-Command'
+        5: "$wshell = New-Object -ComObject Wscript.Shell; $wshell.Popup($env:NEXTRA_ERROR_TEXT, 15, 'Nextra startup failed', 16) | Out-Null"
+      text: |-
+        Nextra could not start correctly.
+        
+        Error: handled boom
+            at Timeout._onTimeout (C:\Users\V\AppData\Local\Temp\nextra-startup-failure-bWDwEx\scenario.js:2:26)
+            at listOnTimeout (node:internal/timers:594:17)
+            at process.processTimers (node:internal/timers:529:7)
+        
+        Startup log: C:\Users\V\AppData\Local\Temp\nextra-startup-failure-bWDwEx\logs\startup-latest.log
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupFailureReporter.test.js:73:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.start (node:internal/test_runner/test:877:17)
+    startSubtestAfterBootstrap (node:internal/test_runner/harness:296:17)
+  ...
+# Subtest: a fatal uncaught exception still exits non-zero and shows one dialog that does not claim a startup failure
+not ok 2 - a fatal uncaught exception still exits non-zero and shows one dialog that does not claim a startup failure
+  ---
+  duration_ms: 77.4876
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupFailureReporter.test.js:76:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The input did not match the regular expression /Nextra stopped unexpectedly/. Input:
+    
+    'Nextra could not start correctly.\n' +
+      '\n' +
+      'Error: fatal boom\n' +
+      '    at Timeout._onTimeout (C:\\Users\\V\\AppData\\Local\\Temp\\nextra-startup-failure-CbSx8e\\scenario.js:1:26)\n' +
+      '    at listOnTimeout (node:internal/timers:594:17)\n' +
+      '    at process.processTimers (node:internal/timers:529:7)\n' +
+      '\n' +
+      'Startup log: C:\\Users\\V\\AppData\\Local\\Temp\\nextra-startup-failure-CbSx8e\\logs\\startup-latest.log'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual: |-
+    Nextra could not start correctly.
+    
+    Error: fatal boom
+        at Timeout._onTimeout (C:\Users\V\AppData\Local\Temp\nextra-startup-failure-CbSx8e\scenario.js:1:26)
+        at listOnTimeout (node:internal/timers:594:17)
+        at process.processTimers (node:internal/timers:529:7)
+    
+    Startup log: C:\Users\V\AppData\Local\Temp\nextra-startup-failure-CbSx8e\logs\startup-latest.log
+  operator: 'match'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupFailureReporter.test.js:90:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: a recovering listener that exits 1 after logging, as server.js does, shows exactly one dialog
+ok 3 - a recovering listener that exits 1 after logging, as server.js does, shows exactly one dialog
+  ---
+  duration_ms: 78.526
+  ...
+# Subtest: a non-zero exit without any exception shows one dialog with the exit code
+ok 4 - a non-zero exit without any exception shows one dialog with the exit code
+  ---
+  duration_ms: 72.8362
+  ...
+# Subtest: exit code 0 shows no dialog, also after a handled exception
+not ok 5 - exit code 0 shows no dialog, also after a handled exception
+  ---
+  duration_ms: 160.2836
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupFailureReporter.test.js:120:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+    + [
+    +   {
+    +     args: [
+    +       '-NoProfile',
+    +       '-NonInteractive',
+    +       '-ExecutionPolicy',
+    +       'Bypass',
+    +       '-Command',
+    +       "$wshell = New-Object -ComObject Wscript.Shell; $wshell.Popup($env:NEXTRA_ERROR_TEXT, 15, 'Nextra startup failed', 16) | Out-Null"
+    +     ],
+    +     file: 'powershell.exe',
+    +     text: 'Nextra could not start correctly.\n' +
+    +       '\n' +
+    +       'Error: handled before a clean exit\n' +
+    +       '    at Timeout._onTimeout (C:\\Users\\V\\AppData\\Local\\Temp\\nextra-startup-failure-B2B36j\\scenario.js:2:26)\n' +
+    +       '    at listOnTimeout (node:internal/timers:594:17)\n' +
+    +       '    at process.processTimers (node:internal/timers:529:7)\n' +
+    +       '\n' +
+    +       'Startup log: C:\\Users\\V\\AppData\\Local\\Temp\\nextra-startup-failure-B2B36j\\logs\\startup-latest.log'
+    +   }
+    + ]
+    - []
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual:
+    0:
+      file: 'powershell.exe'
+      args:
+        0: '-NoProfile'
+        1: '-NonInteractive'
+        2: '-ExecutionPolicy'
+        3: 'Bypass'
+        4: '-Command'
+        5: "$wshell = New-Object -ComObject Wscript.Shell; $wshell.Popup($env:NEXTRA_ERROR_TEXT, 15, 'Nextra startup failed', 16) | Out-Null"
+      text: |-
+        Nextra could not start correctly.
+        
+        Error: handled before a clean exit
+            at Timeout._onTimeout (C:\Users\V\AppData\Local\Temp\nextra-startup-failure-B2B36j\scenario.js:2:26)
+            at listOnTimeout (node:internal/timers:594:17)
+            at process.processTimers (node:internal/timers:529:7)
+        
+        Startup log: C:\Users\V\AppData\Local\Temp\nextra-startup-failure-B2B36j\logs\startup-latest.log
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupFailureReporter.test.js:129:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: off Windows nothing is shown, but the exception is still logged and the exit code is unchanged
+ok 6 - off Windows nothing is shown, but the exception is still logged and the exit code is unchanged
+  ---
+  duration_ms: 345.3401
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 3
+# fail 3
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 979.3844

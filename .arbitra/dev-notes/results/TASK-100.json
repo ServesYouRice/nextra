@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-5886d250ed5f",
+    "title": "WHEP answer SDP is barely checked, and the partial audio failure test never checks the failed audio m-section",
+    "severity": "medium",
+    "task": "TASK-100",
+    "result": "fixed",
+    "failedBefore": false,
+    "test": "tests/whepRoutesSession.test.js: 'WHEP POST success with video and audio asserts contract, registration, and clean lifecycle' (VAL-138) and 'partial failure: audio consume() rejection continues as 201 video-only and resumes video' (VAL-139), both extended; new local helpers splitSdp, parseMline, attributeValues, directionLines and effectiveSetup",
+    "proof": "The gap was missing assertions, not a production defect: lib/whep.js already answers a failed or ineligible audio section in place (port 0, a=mid kept, a=inactive, out of BUNDLE; TASK-023, and the version before it did the same for a failed consume), so the strengthened tests pass on the current code (node --test tests/whepRoutesSession.test.js: 9 of 9) and no todo case was needed. To show they now catch what the issue lists, the unchanged-code tests were run against seven temporary mutants of lib/whep.js (each reverted with git checkout; lib/whep.js is unchanged). The old test file (the version at HEAD, copied to a scratch file) passed 9 of 9 on every mutant; the new file fails on every one: the rejected audio m-section dropped (partial test: '1 !== 2' sections); the rejected audio section answered a=sendonly instead of a=inactive; the rejected audio section answered with port 9; a=setup:active instead of passive (success and partial tests); BUNDLE listing mid 1 although audio was rejected (success and partial); the audio mid answered as 7 instead of 1 (success); the a=ssrc line dropped (success and partial). The success test asserts exactly two sections in offer order (video, audio) with non-zero ports, mids 0 and 1, one a=sendonly each, a=ssrc:11111111 and a=ssrc:22222222, one 'a=group:BUNDLE 0 1', and a=setup:passive for every section (the remote DTLS role handed to mediasoup is 'client'). The partial-failure test reads the body and asserts two sections, video sendonly with mid 0 and SSRC 11111111, audio with port 0, mid 1, a=inactive, no a=ssrc and no a=sendonly, and 'a=group:BUNDLE 0'. Both also assert CRLF line endings. npm run lint and typecheck pass; npm test passes 994 of 994. Assertions: VAL-138, VAL-139."
+  }
+]

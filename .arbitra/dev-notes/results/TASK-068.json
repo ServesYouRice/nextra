@@ -1,0 +1,12 @@
+[
+ {
+  "issue": "C-a539b28daadf",
+  "title": "Module-level window.localStorage access is not guarded and can make the HostView module fail to load",
+  "severity": "medium",
+  "task": "TASK-068",
+  "result": "fixed",
+  "failedBefore": true,
+  "test": "tests/mediaDebug.test.js: 'module-scope storage read is guarded when window.localStorage throws SecurityError'",
+  "proof": "On the unchanged code the new test failed with 'getLocalStorageSafely is not a function' (TypeError at mediaDebug.test.js:15): there was no guarded accessor to call. HostView cannot be imported under node:test, so the module-evaluation throw itself was not run directly; the test pins the accessor the fix adds. After the fix getLocalStorageSafely(windowLike) returns windowLike.localStorage, or null when the getter throws or the value is missing; HostView line 69 passes getLocalStorageSafely(window) to isMediaDebugEnabled instead of reading window.localStorage at module scope. isMediaDebugEnabled already tolerated null storage and wrapped getItem in try/catch, so it was not changed. The test passes after the fix, together with the existing 'shared media-debug parsing' test."
+ }
+]

@@ -1,0 +1,161 @@
+Running 3 tests using 1 worker
+  x  1 tests\browser\host-reload-recovery.spec.mjs:316:1 › cancelling the capture picker on Resume Sharing keeps the reclaimed room, and the next Resume Sharing streams in it (17.7s)
+  ok 2 tests\browser\host-reload-recovery.spec.mjs:349:1 › a resumed room whose media setup fails after the capture is still torn down (1.1s)
+  x  3 tests\browser\host-reload-recovery.spec.mjs:365:1 › while a reclaimed browser room waits for Resume Sharing, its ingest mode cannot be switched to OBS (1.3m)
+  1) tests\browser\host-reload-recovery.spec.mjs:316:1 › cancelling the capture picker on Resume Sharing keeps the reclaimed room, and the next Resume Sharing streams in it 
+    Error: events the page sent after the cancelled picker
+    expect(received).not.toContain(expected) // indexOf
+    Expected value: not "host-stopped"
+    Received array:     ["host-stopped"]
+      328 |     await page.waitForTimeout(1_000);
+      329 |
+    > 330 |     expect.soft(socketWatch.events, 'events the page sent after the cancelled picker').not.toContain('host-stopped');
+          |                                                                                            ^
+      331 |     expect.soft(await activeRooms(), 'rooms the server still holds').toBe(1);
+      332 |     expect.soft(JSON.parse(await readRecoveryRecord(page) || 'null'), 'the stored recovery record')
+      333 |         .toMatchObject({ code, ingestMode: 'browser' });
+    Error: rooms the server still holds
+    expect(received).toBe(expected) // Object.is equality
+    Expected: 1
+    Received: 0
+      329 |
+      330 |     expect.soft(socketWatch.events, 'events the page sent after the cancelled picker').not.toContain('host-stopped');
+    > 331 |     expect.soft(await activeRooms(), 'rooms the server still holds').toBe(1);
+          |                                                                      ^
+      332 |     expect.soft(JSON.parse(await readRecoveryRecord(page) || 'null'), 'the stored recovery record')
+      333 |         .toMatchObject({ code, ingestMode: 'browser' });
+      334 |     await expect.soft(page.getByRole('alert')).toContainText('Press Resume Sharing to try again.');
+    Error: expect(received).toMatchObject(expected)
+    Matcher error: received value must be a non-null object
+    Received has value: null
+      331 |     expect.soft(await activeRooms(), 'rooms the server still holds').toBe(1);
+      332 |     expect.soft(JSON.parse(await readRecoveryRecord(page) || 'null'), 'the stored recovery record')
+    > 333 |         .toMatchObject({ code, ingestMode: 'browser' });
+          |          ^
+      334 |     await expect.soft(page.getByRole('alert')).toContainText('Press Resume Sharing to try again.');
+      335 |     await expect.soft(resume).toBeEnabled();
+      336 |     expect.soft(await page.locator('video').evaluate((video) => video.srcObject), 'the preview after the cancel').toBeNull();
+    Error: expect(locator).toContainText(expected) failed
+    Locator: getByRole('alert')
+    Expected substring: "Press Resume Sharing to try again."
+    Received string:    "Choose a screen or window, allow sharing, and try again.Technical detailsScreen sharing was cancelled."
+    Timeout: 15000ms
+    Call log:
+      - Expect "soft toContainText" getByRole('alert') with timeout 15000ms
+      - waiting for getByRole('alert')
+        33 × locator resolved to <div role="alert" class="alert alert-error">…</div>
+           - unexpected value "Choose a screen or window, allow sharing, and try again.Technical detailsScreen sharing was cancelled."
+      332 |     expect.soft(JSON.parse(await readRecoveryRecord(page) || 'null'), 'the stored recovery record')
+      333 |         .toMatchObject({ code, ingestMode: 'browser' });
+    > 334 |     await expect.soft(page.getByRole('alert')).toContainText('Press Resume Sharing to try again.');
+          |                                                ^
+      335 |     await expect.soft(resume).toBeEnabled();
+      336 |     expect.soft(await page.locator('video').evaluate((video) => video.srcObject), 'the preview after the cancel').toBeNull();
+      337 |
+    Error: the room the second Resume Sharing streams in
+    expect(received).toBe(expected) // Object.is equality
+    Expected: "57PMCD"
+    Received: "ZJ2J94"
+      339 |     await resume.click();
+      340 |     await expect(page.getByText(/Streaming \(/)).toBeVisible();
+    > 341 |     expect(await readRoomCode(page), 'the room the second Resume Sharing streams in').toBe(code);
+          |                                                                                       ^
+      342 |     expect(socketWatch.events, 'a resumed room is not created again').not.toContain('create-room');
+      343 |     expect(await activeRooms()).toBe(1);
+      344 |
+  2) tests\browser\host-reload-recovery.spec.mjs:365:1 › while a reclaimed browser room waits for Resume Sharing, its ingest mode cannot be switched to OBS 
+    Error: the OBS toggle while the room waits
+    expect(locator).toBeDisabled() failed
+    Locator:  getByLabel('Use OBS (WHIP ingest)')
+    Expected: disabled
+    Received: enabled
+    Timeout:  15000ms
+    Call log:
+      - the OBS toggle while the room waits getByLabel('Use OBS (WHIP ingest)') with timeout 15000ms
+      - waiting for getByLabel('Use OBS (WHIP ingest)')
+        33 × locator resolved to <input id="obsMode" type="checkbox"/>
+           - unexpected value "enabled"
+      370 |
+      371 |     const obsToggle = page.getByLabel('Use OBS (WHIP ingest)');
+    > 372 |     await expect.soft(obsToggle, 'the OBS toggle while the room waits').toBeDisabled();
+          |                                                                         ^
+      373 |     await expect.soft(page.getByText('keeps the ingest mode it was created with').first()).toBeVisible();
+      374 |     await expect.soft(page.locator('#obsTryAv1'), 'the AV1 toggle while the room waits').toBeDisabled();
+      375 |
+    Error: expect(locator).toBeVisible() failed
+    Locator: getByText('keeps the ingest mode it was created with').first()
+    Expected: visible
+    Timeout: 15000ms
+    Error: element(s) not found
+    Call log:
+      - Expect "soft toBeVisible" getByText('keeps the ingest mode it was created with').first() with timeout 15000ms
+      - waiting for getByText('keeps the ingest mode it was created with').first()
+      371 |     const obsToggle = page.getByLabel('Use OBS (WHIP ingest)');
+      372 |     await expect.soft(obsToggle, 'the OBS toggle while the room waits').toBeDisabled();
+    > 373 |     await expect.soft(page.getByText('keeps the ingest mode it was created with').first()).toBeVisible();
+          |                                                                                            ^
+      374 |     await expect.soft(page.locator('#obsTryAv1'), 'the AV1 toggle while the room waits').toBeDisabled();
+      375 |
+      376 |     // Whatever reaches the handler (here a click on the toggle with its
+    Error: the AV1 toggle while the room waits
+    expect(locator).toBeDisabled() failed
+    Locator:  locator('#obsTryAv1')
+    Expected: disabled
+    Received: enabled
+    Timeout:  15000ms
+    Call log:
+      - the AV1 toggle while the room waits locator('#obsTryAv1') with timeout 15000ms
+      - waiting for locator('#obsTryAv1')
+        33 × locator resolved to <input id="obsTryAv1" type="checkbox"/>
+           - unexpected value "enabled"
+      372 |     await expect.soft(obsToggle, 'the OBS toggle while the room waits').toBeDisabled();
+      373 |     await expect.soft(page.getByText('keeps the ingest mode it was created with').first()).toBeVisible();
+    > 374 |     await expect.soft(page.locator('#obsTryAv1'), 'the AV1 toggle while the room waits').toBeDisabled();
+          |                                                                                          ^
+      375 |
+      376 |     // Whatever reaches the handler (here a click on the toggle with its
+      377 |     // disabled attribute taken away) must not change the mode either.
+    Error: the OBS toggle after a click
+    expect(locator).not.toBeChecked() failed
+    Locator:  getByLabel('Use OBS (WHIP ingest)')
+    Expected: not checked
+    Received: checked
+    Timeout:  15000ms
+    Call log:
+      - the OBS toggle after a click getByLabel('Use OBS (WHIP ingest)') with timeout 15000ms
+      - waiting for getByLabel('Use OBS (WHIP ingest)')
+        33 × locator resolved to <input id="obsMode" type="checkbox"/>
+           - unexpected value "checked"
+      378 |     await obsToggle.evaluate((input) => { input.disabled = false; });
+      379 |     await obsToggle.click();
+    > 380 |     await expect.soft(obsToggle, 'the OBS toggle after a click').not.toBeChecked();
+          |                                                                      ^
+      381 |
+      382 |     await page.getByRole('button', { name: 'Resume Sharing' }).click();
+      383 |     await expect(page.getByText(/Streaming \(/)).toBeVisible();
+    Error: expect(locator).toBeVisible() failed
+    Locator: getByText(/Streaming \(/)
+    Expected: visible
+    Timeout: 15000ms
+    Error: element(s) not found
+    Call log:
+      - Expect "toBeVisible" getByText(/Streaming \(/) with timeout 15000ms
+      - waiting for getByText(/Streaming \(/)
+      381 |
+      382 |     await page.getByRole('button', { name: 'Resume Sharing' }).click();
+    > 383 |     await expect(page.getByText(/Streaming \(/)).toBeVisible();
+          |                                                  ^
+      384 |     // The recovered room is a browser-capture room: it streams the capture
+      385 |     // instead of following the OBS path in a room the server knows as browser.
+      386 |     await expect(page.getByText('Streaming via OBS')).toHaveCount(0);
+  2 failed
+    tests\browser\host-reload-recovery.spec.mjs:316:1 › cancelling the capture picker on Resume Sharing keeps the reclaimed room, and the next Resume Sharing streams in it 
+    tests\browser\host-reload-recovery.spec.mjs:365:1 › while a reclaimed browser room waits for Resume Sharing, its ingest mode cannot be switched to OBS 
+  1 passed (1.6m)
+
+--- unit tests on the unchanged src/lib/hostRecovery.mjs ---
+not ok 19 - recoveredRoomIngestMode reads the mode a reclaimed room was created with
+  error: 'recoveredRoomIngestMode is not a function'
+not ok 20 - isIngestModeMismatch: only a mode other than the waiting room's own is a mismatch
+  error: 'isIngestModeMismatch is not a function'
+(tests 17-20 failed: 'START_PHASES/shouldTeardownAfterStartFailure', 'recoveredRoomIngestMode', 'isIngestModeMismatch' are not exported; # tests 20, pass 16, fail 4)

@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-b8130d793188",
+    "title": "Opus sprop-stereo is always dropped (underscore vs hyphen key mismatch)",
+    "severity": "medium",
+    "task": "TASK-022",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/whip.test.js: 'WHIP producer copies Opus sprop-stereo=1 from the offer into the codec parameters' (failed before the fix); 'WHIP producer omits Opus sprop-stereo when the offer does not carry it' (passed before and after)",
+    "proof": "Before the fix, node --test --test-name-pattern=sprop-stereo tests/whip.test.js failed the present-case test: 'undefined !== 1' at the assertion parameters['sprop-stereo'] === 1 (the offer had a=fmtp:111 minptime=10;useinbandfec=1;sprop-stereo=1). The parser stores fmtp keys lowercased with the hyphen, and toMediasoupRtpParameters read fmtp.sprop_stereo, which can never exist. After the fix it reads fmtp['sprop-stereo'] and sets parameters['sprop-stereo'] = 1; minptime and useinbandfec are unchanged. Full npm test 730 of 730 (728 before, plus the two new tests); lint and typecheck pass."
+  }
+]

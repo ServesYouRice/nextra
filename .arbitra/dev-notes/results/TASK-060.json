@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-1d64ecacf775",
+    "title": "Modal focus effect re-runs whenever onClose changes identity, stealing focus on parent re-renders",
+    "severity": "medium",
+    "task": "TASK-060",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/browser/ui-semantics.spec.mjs: 'a viewer joining while the leave-host dialog is open keeps focus on the button in use' (chromium project)",
+    "proof": "Before the fix (build of the unchanged src/components/Modal.jsx) the test failed at the focus assertion after the viewer joined: document.activeElement was the 'Stay Here' button where 'Leave and Stop' was expected. The viewer join re-renders HostView, which passes a fresh inline onClose to the open Modal. After the fix the test passes, and the full ui-semantics.spec.mjs passes 41 and skips 7 (mobile-only skips) on chromium and mobile-chrome. Escape still closes the dialog and focus returns to the Watch nav link."
+  }
+]

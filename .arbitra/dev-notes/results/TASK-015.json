@@ -1,0 +1,12 @@
+[
+ {
+  "issue": "C-b3a36c82620e",
+  "title": "A superseded startFallbackRelay can stop the newer, healthy relay from its catch block",
+  "severity": "medium",
+  "task": "TASK-015",
+  "result": "fixed",
+  "failedBefore": true,
+  "test": "tests/fallbackRelayStaleStart.test.js: 'a start superseded while awaiting video-transport | video-consumer | audio-transport | audio-consumer | relay-start leaves the newer relay alone and closes its own resources' (5 tests), 'a start superseded while sampling the frame rate stops sampling at once and leaves the newer relay alone', 'events from the relay of a stopped start do not reach the room once a newer start runs', 'a start that the pipeline refuses gives its capacity slot back'; keep-true: 'a start without a configured frame rate still measures it from the source and starts'",
+  "proof": "On the unchanged lib/socket.js 8 of the 9 new tests failed. Each supersede case (start A held at one await point, stopFallbackRelay, start B runs on the same pipeline, A resumes) failed with '<point>: room.fallbackWorker changed' (null instead of B's relay, B's relay stopCalls 1): A's catch called stopFallbackRelay(room) and tore B down. The frame-rate case also took 3012 ms, because A kept polling for the full 3 s after the cancel. An ad-hoc trace of the video-transport case gave the close order [B-video-transport, A-video-transport, B-relay-stop, B-video-consumer]: A's pipeline.own('videoDirect', ...) released B's transport of the same name before the generation check ran, then the catch closed the rest. 'events from the relay of a stopped start' failed with 'room.fallbackInitSegment changed' (A's stopped relay's init replaced B's, because the handlers checked only pipeline identity). The capacity test failed with '1 !== 0' (a throwing beginStart leaked the slot). The keep-true sampling test passed before and after. After the fix all 9 pass: startFallbackRelay checks its generation after every await (including the frame-rate sample, now owned by the pipeline so a teardown ends it at once) before it owns anything or writes a room field, closes locally whatever arrives after a cancel, and its catch, finally, relay event handlers and restart-failure handlers act only while its generation is current. The trace then shows only [A-video-transport] closed. The existing fallbackRelaySwitch, fallbackRelayAdaptation and roomMediaPipeline tests pass unchanged (42 tests across the four files)."
+ }
+]

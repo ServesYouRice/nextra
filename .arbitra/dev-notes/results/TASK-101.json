@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-7f17ab5999fc",
+    "title": "createViewerAnswer test requires the SDP answer to advertise a header extension the viewer never offered",
+    "severity": "medium",
+    "task": "TASK-101",
+    "result": "fixed",
+    "failedBefore": false,
+    "test": "tests/whep.test.js, describe 'createViewerAnswer': 'answers only extmaps that its offer section lists, with the offered id', 'answers the offered extension in its own section when the consumer carries the offered id'",
+    "proof": "The assertion the issue names was already gone before this item: TASK-024 (10f759e) changed 'createViewerAnswer includes extmap from consumer headerExtensions' so it no longer expects 'a=extmap:4 ...transport-wide-cc-extensions-01' and asserts the answer does not advertise it, and made lib/whep.js answer only (uri, id) pairs the offer lists. So no test could fail on the unchanged code for the reason the issue gives, and the two tests added here pass on it (123 of 123 in tests/whep.test.js). What was still missing, and what this item adds, is the guard the issue says no test had, on the issue's own fixtures: SAMPLE_OFFER with mockVideoConsumer (transport-wide-cc under unoffered id 4) and mockAudioConsumer (ssrc-audio-level under id 5 where the offer lists id 4). The first test splits the answer into m-sections and asserts every a=extmap (id, uri) pair is one the matching parsed._mediaSections[i].extmap lists, and that the offered sdes:mid stays in the video section; for the mismatched audio fixture it asserts only that subset property, not omission and not renumbering. The second uses consumers whose headerExtensions carry the offered ids (video 1 sdes:mid, audio 4 ssrc-audio-level) and asserts each line is emitted in its own section and nothing else. To show the subset test bites, it was run against lib/whep.js from 10f759e^ (before TASK-024): it fails with \"video section answers extmap 4 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01, offered: 1 urn:ietf:params:rtp-hdrext:sdes:mid\" (the positive-fixture test passes there too, as a guard). lib/whep.js was restored afterwards (git checkout), no production code changed. No todo mark was needed: current production complies. npm run lint and typecheck pass; npm test passes 1287 of 1287."
+  }
+]

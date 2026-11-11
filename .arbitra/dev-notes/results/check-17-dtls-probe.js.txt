@@ -1,0 +1,157 @@
+// netcheck lane, check 17: what DTLS role does mediasoup take for a WHEP viewer offer,
+// does it send a DTLS ClientHello once ICE is up, and what a=setup does the answer say?
+// Usage: node netcheck-check-17-dtls-probe.js <path to whep.js to test>
+'use strict';
+const path = require('path');
+const dgram = require('dgram');
+const crypto = require('crypto');
+const zlib = require('zlib');
+
+const LANE = 'C:/Users/V/nextra-lanes/netcheck';
+const whepPath = path.resolve(process.argv[2] || path.join(LANE, 'lib/whep.js'));
+const whep = require(whepPath);
+const mediasoup = require(path.join(LANE, 'node_modules/mediasoup'));
+const config = require(path.join(LANE, 'config'));
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function offerWith(setup) {
+    return [
+        'v=0',
+        'o=- 123456 2 IN IP4 127.0.0.1',
+        's=-',
+        't=0 0',
+        'a=group:BUNDLE 0',
+        'a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99',
+        ...(setup ? [`a=setup:${setup}`] : []),
+        'a=ice-ufrag:viewerufrag',
+        'a=ice-pwd:viewerpwd1234567890123456',
+        'm=video 9 UDP/TLS/RTP/SAVPF 96',
+        'c=IN IP4 0.0.0.0',
+        'a=mid:0',
+        'a=recvonly',
+        'a=rtcp-mux',
+        'a=rtpmap:96 H264/90000',
+        'a=fmtp:96 profile-level-id=42e01f;packetization-mode=1',
+        '',
+    ].join('\r\n');
+}
+
+// Consumer shaped like the WHEP tests' mock; only the answer's a=setup line matters here.
+const videoConsumer = {
+    kind: 'video',
+    rtpParameters: {
+        codecs: [{
+            payloadType: 96, mimeType: 'video/H264', clockRate: 90000,
+            parameters: { 'profile-level-id': '42e01f', 'packetization-mode': 1 }, rtcpFeedback: [],
+        }],
+        headerExtensions: [],
+        encodings: [{ ssrc: 12345678 }],
+    },
+};
+
+function stunAttr(type, value) {
+    const pad = (4 - (value.length % 4)) % 4;
+    const buf = Buffer.alloc(4 + value.length + pad);
+    buf.writeUInt16BE(type, 0);
+    buf.writeUInt16BE(value.length, 2);
+    value.copy(buf, 4);
+    return buf;
+}
+
+// ICE Binding request from a controlling viewer, with USE-CANDIDATE (mediasoup is ICE-lite).
+function bindingRequest(username, password) {
+    const header = Buffer.alloc(20);
+    header.writeUInt16BE(0x0001, 0);
+    header.writeUInt32BE(0x2112A442, 4);
+    crypto.randomBytes(12).copy(header, 8);
+    const priority = Buffer.alloc(4);
+    priority.writeUInt32BE(0x6e7f1eff);
+    let attrs = Buffer.concat([
+        stunAttr(0x0006, Buffer.from(username)), // USERNAME
+        stunAttr(0x0024, priority),               // PRIORITY
+        stunAttr(0x802A, crypto.randomBytes(8)),  // ICE-CONTROLLING
+        stunAttr(0x0025, Buffer.alloc(0)),        // USE-CANDIDATE
+    ]);
+    header.writeUInt16BE(attrs.length + 24, 2);
+    const mi = crypto.createHmac('sha1', password).update(Buffer.concat([header, attrs])).digest();
+    attrs = Buffer.concat([attrs, stunAttr(0x0008, mi)]); // MESSAGE-INTEGRITY
+    header.writeUInt16BE(attrs.length + 8, 2);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE((zlib.crc32(Buffer.concat([header, attrs])) ^ 0x5354554e) >>> 0);
+    attrs = Buffer.concat([attrs, stunAttr(0x8028, crc)]); // FINGERPRINT
+    header.writeUInt16BE(attrs.length, 2);
+    return Buffer.concat([header, attrs]);
+}
+
+async function probe(router, setup) {
+    const parsed = whep.parseViewerOffer(offerWith(setup));
+    const remoteDtls = whep.parseViewerDtls(parsed);
+    const transport = await router.createWebRtcTransport({
+        listenInfos: [{ protocol: 'udp', ip: '127.0.0.1', portRange: { min: 46000, max: 46999 } }],
+    });
+    let iceState = transport.iceState;
+    let dtlsState = transport.dtlsState;
+    transport.on('icestatechange', (s) => { iceState = s; });
+    transport.on('dtlsstatechange', (s) => { dtlsState = s; });
+
+    // Same order as lib/whepRoutes.js: connect with the parsed role, then build the answer.
+    await transport.connect({ dtlsParameters: remoteDtls });
+    const mediasoupLocalRole = transport.dtlsParameters.role;
+    const answer = whep.createViewerAnswer(parsed, [videoConsumer], {
+        iceParameters: transport.iceParameters,
+        iceCandidates: transport.iceCandidates,
+        dtlsParameters: transport.dtlsParameters,
+    });
+    const answerSetup = answer.split('\r\n').filter((l) => l.startsWith('a=setup:')).map((l) => l.slice(8));
+
+    const sock = dgram.createSocket('udp4');
+    await new Promise((r) => sock.bind(0, '127.0.0.1', r));
+    let stunSuccess = 0;
+    const dtlsFromMediasoup = [];
+    sock.on('message', (msg) => {
+        if (msg.length >= 20 && msg.readUInt32BE(4) === 0x2112A442) {
+            if (msg.readUInt16BE(0) === 0x0101) stunSuccess += 1;
+            return;
+        }
+        if (msg[0] >= 20 && msg[0] <= 63) {
+            const handshakeType = msg[0] === 22 && msg.length > 13 ? msg[13] : null;
+            dtlsFromMediasoup.push(handshakeType === 1 ? 'ClientHello' : `record type ${msg[0]}/hs ${handshakeType}`);
+        }
+    });
+    const cand = transport.iceCandidates.find((c) => c.protocol === 'udp');
+    const req = () => bindingRequest(`${transport.iceParameters.usernameFragment}:viewerufrag`, transport.iceParameters.password);
+    for (let i = 0; i < 3; i++) {
+        sock.send(req(), cand.port, cand.address || cand.ip);
+        await sleep(500);
+    }
+    await sleep(1000);
+    sock.close();
+    transport.close();
+    return {
+        offerSetup: setup || '(none)',
+        roleGivenToConnect: remoteDtls.role,
+        mediasoupLocalRole,
+        iceState,
+        dtlsState,
+        stunSuccessResponses: stunSuccess,
+        mediasoupSentClientHello: dtlsFromMediasoup.includes('ClientHello'),
+        dtlsPacketsFromMediasoup: dtlsFromMediasoup.length,
+        answerSetup,
+        answerMatchesMediasoup: answerSetup.length > 0 && answerSetup.every((s) => s === (mediasoupLocalRole === 'client' ? 'active' : 'passive')),
+    };
+}
+
+(async () => {
+    const worker = await mediasoup.createWorker({ logLevel: 'warn' });
+    try {
+        const router = await worker.createRouter({ mediaCodecs: config.MEDIA_CODECS });
+        console.log(`whep module: ${whepPath}`);
+        console.log(`mediasoup ${mediasoup.version}`);
+        for (const setup of ['actpass', 'active', 'passive', null]) {
+            console.log(JSON.stringify(await probe(router, setup)));
+        }
+    } finally {
+        worker.close();
+    }
+})().catch((err) => { console.error(err); process.exitCode = 1; });

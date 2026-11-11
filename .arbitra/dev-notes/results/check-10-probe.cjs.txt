@@ -1,0 +1,266 @@
+'use strict';
+
+// Check 10 probe: does the host's video RTCRtpSender ever have a single encoding,
+// and which bitrate does applyProducerBitrateProfile give each encoding?
+// Only transceivers that carry a track count: mediasoup-client's handlers open
+// throwaway transceivers to probe capabilities when the Device loads.
+// Runs the real app (vite build in the scratchpad), the real server.js and the real
+// mediasoup-client in Chromium and Firefox. Usage:
+//   node socket-check-10-probe.cjs <distDir> <outJson>
+
+const path = require('node:path');
+const fs = require('node:fs');
+const { spawn } = require('node:child_process');
+
+const LANE = 'C:/Users/V/nextra-lanes/socket';
+const { chromium, firefox } = require(path.join(LANE, 'node_modules', '@playwright', 'test'));
+const { claimServerPorts } = require(path.join(LANE, 'tests', 'serverPorts.js'));
+
+const distDir = path.resolve(process.argv[2]);
+const outJson = path.resolve(process.argv[3]);
+
+// Copied from src/HostView.jsx (QUALITY_PROFILES.relayBitsPerSecond and getSimulcastEncodings).
+const RELAY_BPS = { '4k': { 30: 26_000_000, 60: 36_000_000 }, '1440p': { 30: 14_000_000, 60: 21_000_000 }, '1080p': { 30: 8_000_000, 60: 12_000_000 } };
+function expectedByRid(profile, fps) {
+    const top = RELAY_BPS[profile][fps >= 60 ? 60 : 30];
+    return {
+        r0: Math.max(900_000, Math.round(top * 0.12)),
+        r1: Math.max(3_000_000, Math.round(top * 0.4)),
+        r2: top,
+    };
+}
+
+function initScript() {
+    window.__check = { transceivers: [] };
+    const original = RTCPeerConnection.prototype.addTransceiver;
+    RTCPeerConnection.prototype.addTransceiver = function addTransceiver(trackOrKind, init) {
+        const transceiver = original.call(this, trackOrKind, init);
+        window.__check.transceivers.push({
+            transceiver,
+            kind: typeof trackOrKind === 'string' ? trackOrKind : trackOrKind.kind,
+            requested: init && init.sendEncodings ? JSON.parse(JSON.stringify(init.sendEncodings)) : null,
+        });
+        return transceiver;
+    };
+    try {
+        window.localStorage.setItem('nextra.capturePrefs.v1', JSON.stringify({ qualityProfile: '1440p', frameRate: 60 }));
+    } catch {
+        // ignore
+    }
+    const createCapture = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1280;
+        canvas.height = 720;
+        const context = canvas.getContext('2d');
+        let frame = 0;
+        const draw = () => {
+            frame += 1;
+            context.fillStyle = `hsl(${frame % 360} 80% 45%)`;
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            context.fillStyle = 'white';
+            context.font = '64px sans-serif';
+            for (let i = 0; i < 8; i += 1) context.fillText(`Nextra ${frame} ${i}`, 40 + (frame * 7 + i * 90) % 600, 80 + i * 80);
+            window.setTimeout(draw, 33);
+        };
+        draw();
+        return canvas.captureStream(30);
+    };
+    Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: { getDisplayMedia: async () => createCapture() },
+    });
+}
+
+async function readSender(page) {
+    return page.evaluate(() => window.__check.transceivers
+        .filter((entry) => entry.kind === 'video' && entry.transceiver.sender.track && entry.transceiver.sender.track.readyState === 'live')
+        .map((entry) => ({
+            requestedSendEncodings: entry.requested && entry.requested.map((e) => ({
+                rid: e.rid, maxBitrate: e.maxBitrate, scaleResolutionDownBy: e.scaleResolutionDownBy,
+            })),
+            senderEncodings: entry.transceiver.sender.getParameters().encodings.map((e) => ({
+                rid: e.rid, maxBitrate: e.maxBitrate, scaleResolutionDownBy: e.scaleResolutionDownBy, active: e.active,
+            })),
+        })));
+}
+
+async function readOutboundStats(page) {
+    return page.evaluate(async () => {
+        const entry = window.__check.transceivers.find((e) => e.kind === 'video' && e.transceiver.sender.track && e.transceiver.sender.track.readyState === 'live');
+        if (!entry) return [];
+        const report = await entry.transceiver.sender.getStats();
+        const rows = [];
+        report.forEach((s) => {
+            if (s.type === 'outbound-rtp') {
+                rows.push({
+                    rid: s.rid, frameWidth: s.frameWidth, frameHeight: s.frameHeight, bytesSent: s.bytesSent,
+                    framesEncoded: s.framesEncoded, targetBitrate: s.targetBitrate,
+                    qualityLimitationReason: s.qualityLimitationReason, active: s.active,
+                });
+            }
+        });
+        return rows;
+    });
+}
+
+function compare(state, profile, fps) {
+    const expected = expectedByRid(profile, fps);
+    const video = state[0];
+    if (!video) return { ok: false, why: 'no video transceiver' };
+    const rows = video.senderEncodings.map((e, index) => ({
+        index, rid: e.rid, maxBitrate: e.maxBitrate, expectedForRid: expected[e.rid], match: expected[e.rid] === e.maxBitrate,
+    }));
+    return {
+        ok: video.senderEncodings.length === 3 && rows.every((r) => r.match),
+        encodingCount: video.senderEncodings.length,
+        rows,
+    };
+}
+
+async function waitFor(fn, timeoutMs, label) {
+    const deadline = Date.now() + timeoutMs;
+    let last;
+    while (Date.now() < deadline) {
+        last = await fn();
+        if (last) return last;
+        await new Promise((r) => setTimeout(r, 250));
+    }
+    throw new Error(`timed out waiting for ${label}`);
+}
+
+async function probeBrowser(name, browserType, launchOptions, baseUrl) {
+    const result = { browser: name, console: [] };
+    const browser = await browserType.launch(launchOptions);
+    try {
+        result.version = browser.version();
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        page.on('console', (msg) => {
+            const text = msg.text();
+            if (/Nextra-Host|bitrate|encod/i.test(text)) result.console.push(`${msg.type()}: ${text}`);
+        });
+        page.on('pageerror', (err) => result.console.push(`pageerror: ${err.message}`));
+        await page.addInitScript(initScript);
+        await page.goto(`${baseUrl}/#host`);
+        await page.getByRole('button', { name: 'Start Sharing' }).click();
+        await page.getByText(/Streaming \(/).waitFor({ timeout: 30_000 });
+        result.userAgent = await page.evaluate(() => navigator.userAgent);
+
+        // After start, the isSharing effect runs applyQualityProfileToLiveStream('1440p', 60).
+        await waitFor(async () => compare(await readSender(page), '1440p', 60).ok, 10_000, '1440p/60 bitrates').catch(() => null);
+        const afterStart = await readSender(page);
+        result.afterStart = { profile: '1440p', fps: 60, state: afterStart, check: compare(afterStart, '1440p', 60) };
+
+        // Change profile and frame rate live: applyProducerBitrateProfile runs again.
+        await page.getByRole('group', { name: 'Resolution' }).getByRole('button', { name: '1080p' }).click();
+        await page.getByRole('group', { name: 'Frame rate' }).getByRole('button', { name: '30 fps' }).click();
+        await waitFor(async () => compare(await readSender(page), '1080p', 30).ok, 10_000, '1080p/30 bitrates').catch(() => null);
+        const afterChange = await readSender(page);
+        result.afterChange = { profile: '1080p', fps: 30, state: afterChange, check: compare(afterChange, '1080p', 30) };
+
+        await page.getByRole('group', { name: 'Resolution' }).getByRole('button', { name: '4K' }).click();
+        await page.getByRole('group', { name: 'Frame rate' }).getByRole('button', { name: '60 fps' }).click();
+        await waitFor(async () => compare(await readSender(page), '4k', 60).ok, 10_000, '4k/60 bitrates').catch(() => null);
+        const after4k = await readSender(page);
+        result.after4k = { profile: '4k', fps: 60, state: after4k, check: compare(after4k, '4k', 60) };
+
+        await new Promise((r) => setTimeout(r, 5000));
+        result.outboundStats = await readOutboundStats(page);
+
+        await page.getByRole('button', { name: 'Stop Sharing' }).first().click();
+        const confirm = page.getByRole('dialog').getByRole('button', { name: 'Stop Sharing' });
+        if (await confirm.isVisible().catch(() => false)) await confirm.click();
+        await context.close();
+    } catch (err) {
+        result.error = String(err && err.stack || err);
+    } finally {
+        await browser.close();
+    }
+    return result;
+}
+
+async function main() {
+    const { port, rtcPort } = await claimServerPorts();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    let serverOutput = '';
+    const child = spawn(process.execPath, ['server.js'], {
+        cwd: LANE,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+            ...process.env,
+            NODE_ENV: 'test',
+            APP_ENV: 'test',
+            PORT: String(port),
+            BIND_HOST: '127.0.0.1',
+            LAN_IP: '127.0.0.1',
+            RTC_LISTEN_IP: '127.0.0.1',
+            RTC_MIN_PORT: String(rtcPort),
+            RTC_MAX_PORT: String(rtcPort),
+            LOCAL_HTTPS: 'false',
+            OPEN_BROWSER: 'false',
+            AUTO_DETECT_PUBLIC_IP: 'false',
+            AUTO_PUBLIC_TUNNEL: 'false',
+            CLOUDFLARED_TUNNEL_TOKEN: '',
+            SHARE_BASE_URL: '',
+            WHIP_ENABLED: 'false',
+            WHEP_ENABLED: 'false',
+            NEXTRA_SMOKE_TEST: '1',
+            NEXTRA_TEST_DIST_DIR: distDir,
+            LOG_LEVEL: 'warn',
+        },
+    });
+    child.stdout.on('data', (c) => { serverOutput += c; });
+    child.stderr.on('data', (c) => { serverOutput += c; });
+    const results = { port, rtcPort, distDir, browsers: [] };
+    try {
+        await waitFor(async () => {
+            try {
+                const res = await fetch(`${baseUrl}/readyz`);
+                return res.ok;
+            } catch {
+                return false;
+            }
+        }, 30_000, 'server readyz');
+
+        results.browsers.push(await probeBrowser('chromium', chromium, { headless: true, args: ['--autoplay-policy=no-user-gesture-required'] }, baseUrl));
+        results.browsers.push(await probeBrowser('firefox', firefox, {
+            headless: true,
+            firefoxUserPrefs: {
+                'media.peerconnection.ice.loopback': true,
+                'media.peerconnection.ice.obfuscate_host_addresses': false,
+            },
+        }, baseUrl));
+    } finally {
+        try {
+            await fetch(`${baseUrl}/api/test/shutdown`, { method: 'POST' });
+        } catch {
+            // fall through to kill
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+        if (child.exitCode === null) child.kill();
+        results.serverExitCode = child.exitCode;
+        results.serverOutputTail = serverOutput.slice(-3000);
+        fs.writeFileSync(outJson, JSON.stringify(results, null, 2));
+    }
+    for (const b of results.browsers) {
+        console.log(`${b.browser} ${b.version || ''}${b.error ? ` ERROR ${b.error.split('\n')[0]}` : ''}`);
+        for (const key of ['afterStart', 'afterChange', 'after4k']) {
+            const s = b[key];
+            if (!s) continue;
+            console.log(`  ${key} ${s.profile}/${s.fps}: encodings=${s.check.encodingCount} ok=${s.check.ok}`);
+            for (const row of s.check.rows || []) {
+                console.log(`    [${row.index}] rid=${row.rid} maxBitrate=${row.maxBitrate} expectedForRid=${row.expectedForRid} match=${row.match}`);
+            }
+        }
+        for (const row of b.outboundStats || []) {
+            console.log(`  outbound rid=${row.rid} ${row.frameWidth}x${row.frameHeight} framesEncoded=${row.framesEncoded} bytesSent=${row.bytesSent} targetBitrate=${row.targetBitrate} limit=${row.qualityLimitationReason}`);
+        }
+        for (const line of b.console) console.log(`  console ${line}`);
+    }
+}
+
+main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+});

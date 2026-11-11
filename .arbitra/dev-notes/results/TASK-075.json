@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-07a926089959",
+    "title": "Unbounded reload loop on persistent chunk loading failures",
+    "severity": "high",
+    "task": "TASK-075",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/chunkReloadGuard.test.js: successive failures within the window stop after maxReloads; a failure about 5 s after each mount, repeated 10 times, reloads exactly maxReloads times; mounting a fresh guard does not reset the persisted budget; a fresh budget is allowed once windowMs has passed since firstAt; malformed JSON / malformed shapes / backwards clock; storage null, getItem throwing, setItem throwing",
+    "proof": "Before the fix the new test file failed 12/12 with ERR_MODULE_NOT_FOUND for src/lib/chunkReloadGuard.mjs (the guard did not exist; main.jsx used only the in-memory reloadScheduled flag, which every reload resets). After the fix: 12/12 pass; npm test 740/740; lint and typecheck clean. The prompt cites VAL-145/146/147 for this item; those are network and WHEP checks. The chunk-reload checks are VAL-161, VAL-162 and VAL-163 (VAL-106 is superseded and was not implemented). The browser build was not run: the prompt asks for approval first and the lane must not write into dist."
+  }
+]

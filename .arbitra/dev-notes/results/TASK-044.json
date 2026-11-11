@@ -1,0 +1,22 @@
+[
+  {
+    "issue": "C-3f8281819bbd",
+    "title": "Open-source preflight only blocks root-level .env files; tracked .env files in subdirectories pass the gate",
+    "severity": "medium",
+    "task": "TASK-044",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/opensourcePreflight.test.js: 'the script fails on a tracked nested .env file and passes on a nested .env.example' (runs a copy of the script against a throwaway git repository); unit tests 'the env rule matches .env files at any depth and exempts .env.example by basename' and 'scanTrackedFiles reports nested .env files and skips only the .env.example templates'",
+    "proof": "Before the fix, the script run in a temp git repo that tracked poc-mediasoup/.env printed '[oss:check] OK. Tracked-file safeguards and reviewed production dependency licenses passed.' and exited 0 (the test failed with '0 !== 1'); the unit tests failed because the helpers did not exist. After the fix the env rule is /(?:^|\\/)\\.env(?:\\..+)?$/i with .env.example exempt by basename at any depth: poc-mediasoup/.env, server/.env.production and config/.env.local are each reported as 'Forbidden tracked path pattern', .env.example and poc-mediasoup/.env.example are not. Commit d53c17f on lane/lifecycle."
+  },
+  {
+    "issue": "C-310a41447c0f",
+    "title": "Git-quoted filenames bypass preflight content scanning",
+    "severity": "medium",
+    "task": "TASK-044",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/opensourcePreflight.test.js: 'the script scans a tracked file whose name Git would quote' (end to end), 'scanTrackedFiles scans a non-ASCII filename read back from a NUL-separated listing', 'the git ls-files -z parser splits on NUL, drops empty entries and keeps names exact', 'scanTrackedFiles fails closed on a tracked path it cannot read', 'classifyTrackedFile tells text, binary, directory and unreadable apart'",
+    "proof": "Before the fix, the script run in a temp git repo that tracked 'café/clé.txt' holding an AWS-key-shaped string printed '[oss:check] OK...' and exited 0, because plain 'git ls-files' returned the quoted form \"caf\\303\\251/cl\\303\\251.txt\", which does not exist on disk, and isTextFile returned false so the file was skipped (the test failed with '0 !== 1'). After the fix git ls-files -z is split on NUL without trimming, the file is scanned and reported as 'Hardcoded AWS key pattern found in tracked file: café/clé.txt', and a tracked path that is missing or unreadable is reported as 'Cannot read tracked file: <path> (<code>)'. Commit d53c17f on lane/lifecycle."
+  }
+]

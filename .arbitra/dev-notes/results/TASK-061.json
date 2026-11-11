@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-69692244ae92",
+    "title": "WebSocket-first transport list does not actually fall back to long-polling when WebSocket is blocked",
+    "severity": "medium",
+    "task": "TASK-061",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/socketOptions.test.js: 'client connects over long-polling when WebSocket upgrades are blocked' (and 'client socket options prefer WebSocket and enable the long-polling fallback')",
+    "proof": "Before the fix, with the options copied from src/context/SocketContext.jsx (transports ['websocket','polling'], no tryAllTransports), a socket.io server with all WebSocket upgrades dropped never connected: three 'websocket error' connect_error events, then 'never connected (connect_error x3)'. With the options module as shipped, the test passes; with tryAllTransports set to false the same test fails (both tests 'not ok')."
+  }
+]

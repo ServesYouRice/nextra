@@ -1,0 +1,46 @@
+// Private Playwright config for check 12 (lane `scripts`): runs the lane's own,
+// unmodified tests/browser/media-flow.spec.mjs with no web server, so a run
+// never builds into the shared dist. It mirrors playwright.config.mjs where the
+// lock is concerned: outputDir is the lane's test-results (the default there),
+// one worker, the file's tests in order. A global setup can plant a ticket that
+// sorts before every real one (a holder that has not released yet), and the
+// reporter removes it when the first test ends (the holder releases) and logs
+// the lock directory after every test.
+const lane = 'C:/Users/V/nextra-lanes/scripts';
+const here = 'C:/Users/V/AppData/Local/Temp/claude/c--Users-V-arbitra/53025464-426b-4472-9c62-52c45e3849f5/scratchpad';
+
+export default {
+    // CHECK12_TEST_DIR=<lane>/playwright-report/check12-orig runs the spec as it
+    // was at ac1c688 (the same bytes as dev 1be0088), kept in an ignored folder.
+    testDir: process.env.CHECK12_TEST_DIR || `${lane}/tests/browser`,
+    testMatch: /media-flow\.spec\.mjs$/,
+    timeout: Number(process.env.CHECK12_TIMEOUT_MS || 4000),
+    expect: { timeout: 15_000 },
+    fullyParallel: false,
+    workers: 1,
+    retries: 0,
+    outputDir: process.env.CHECK12_OUTPUT_DIR || `${lane}/test-results`,
+    globalSetup: `${here}/scripts-check12-setup.mjs`,
+    reporter: [['list'], [`${here}/scripts-check12-reporter.mjs`]],
+    use: {
+        baseURL: 'https://127.0.0.1:3210',
+        ignoreHTTPSErrors: true,
+        trace: 'off',
+        video: 'off',
+    },
+    projects: [
+        {
+            name: 'chromium',
+            use: {
+                browserName: 'chromium',
+                viewport: { width: 1280, height: 720 },
+                launchOptions: {
+                    args: [
+                        '--autoplay-policy=no-user-gesture-required',
+                        '--host-resolver-rules=MAP nextra.cloudflare.test 127.0.0.1',
+                    ],
+                },
+            },
+        },
+    ],
+};

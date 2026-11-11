@@ -1,0 +1,157 @@
+
+Running 5 tests using 1 worker
+
+  x  1 [chromium] › tests\browser\host-obs-control-channel.spec.mjs:170:1 › Retry Auto-Configure OBS opens a control channel that pagehide stops OBS through (19.3s)
+  x  2 [chromium] › tests\browser\host-obs-control-channel.spec.mjs:193:1 › a control channel that never opened does not stand in the way of the stopObsStream fallback (17.6s)
+  x  3 [chromium] › tests\browser\host-obs-control-channel.spec.mjs:205:1 › a Retry that ends after Stop Sharing opens no control channel (17.3s)
+  x  4 [chromium] › tests\browser\media-flow.spec.mjs:505:1 › a playing relay viewer follows the host recorder from MP4 to VP8 (19.3s)
+  x  5 [chromium] › tests\browser\media-flow.spec.mjs:540:1 › a relay viewer that is behind keeps playing across a VP8 recorder restart (20.1s)
+
+
+  1) [chromium] › tests\browser\host-obs-control-channel.spec.mjs:170:1 › Retry Auto-Configure OBS opens a control channel that pagehide stops OBS through 
+
+    Error: open OBS connections after the retry
+
+    open OBS connections after the retry
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 1
+    Received: 0
+
+    Call Log:
+    - Timeout 15000ms exceeded while waiting on the predicate
+
+      181 |     // The retry's configure connection has ended; one connection stays open, and
+      182 |     // that is what the unload handler can still write to.
+    > 183 |     await expect.poll(() => obs.live.length, { message: 'open OBS connections after the retry' }).toBe(1);
+          |                                                                                                   ^
+      184 |     const [channel] = obs.live;
+      185 |     const connectionsBefore = obs.connections.length;
+      186 |
+        at C:\Users\V\nextra-lanes\client\tests\browser\host-obs-control-channel.spec.mjs:183:99
+
+
+    Error Context: test-results\host-obs-control-channel-R-6820b--pagehide-stops-OBS-through-chromium\error-context.md
+
+    Error Context: test-results\host-obs-control-channel-R-6820b--pagehide-stops-OBS-through-chromium\error-context.md
+
+
+
+
+  2) [chromium] › tests\browser\host-obs-control-channel.spec.mjs:193:1 › a control channel that never opened does not stand in the way of the stopObsStream fallback 
+
+    Error: connections opened by Stop
+
+    connections opened by Stop
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 3
+    Received: 2
+
+    Call Log:
+    - Timeout 15000ms exceeded while waiting on the predicate
+
+      200 |     // With the dead channel still in the ref, Stop would hand the stop to it and
+      201 |     // open nothing; the fallback is a fresh connection to OBS.
+    > 202 |     await expect.poll(() => obs.connections.length, { message: 'connections opened by Stop' }).toBe(connectionsBefore + 1);
+          |                                                                                                ^
+      203 | });
+      204 |
+      205 | test('a Retry that ends after Stop Sharing opens no control channel', async ({ page }) => {
+        at C:\Users\V\nextra-lanes\client\tests\browser\host-obs-control-channel.spec.mjs:202:96
+
+
+    Error Context: test-results\host-obs-control-channel-a-73be4--the-stopObsStream-fallback-chromium\error-context.md
+
+    Error Context: test-results\host-obs-control-channel-a-73be4--the-stopObsStream-fallback-chromium\error-context.md
+
+
+
+
+  3) [chromium] › tests\browser\host-obs-control-channel.spec.mjs:205:1 › a Retry that ends after Stop Sharing opens no control channel 
+
+    Error: connections opened by Stop
+
+    connections opened by Stop
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 4
+    Received: 3
+
+    Call Log:
+    - Timeout 15000ms exceeded while waiting on the predicate
+
+      214 |     await page.getByRole('button', { name: 'Stop Sharing' }).click();
+      215 |     // Stop reaches OBS through a fresh connection: the retry has not given it a channel.
+    > 216 |     await expect.poll(() => obs.connections.length, { message: 'connections opened by Stop' }).toBe(connectionsBeforeStop + 1);
+          |                                                                                                ^
+      217 |     obs.mode = 'up';
+      218 |     const connectionsBeforeRelease = obs.connections.length;
+      219 |     const retryConnection = obs.connections.find((connection) => connection.mode === 'hold');
+        at C:\Users\V\nextra-lanes\client\tests\browser\host-obs-control-channel.spec.mjs:216:96
+
+
+    Error Context: test-results\host-obs-control-channel-a-37068-ng-opens-no-control-channel-chromium\error-context.md
+
+    Error Context: test-results\host-obs-control-channel-a-37068-ng-opens-no-control-channel-chromium\error-context.md
+
+
+
+
+  4) [chromium] › tests\browser\media-flow.spec.mjs:505:1 › a playing relay viewer follows the host recorder from MP4 to VP8 
+
+    Error: expect(received).toBeGreaterThan(expected)
+
+    Expected: > 4.528974
+    Received:   3.148159
+
+    Call Log:
+    - Timeout 15000ms exceeded while waiting on the predicate
+
+      524 |
+      525 |     const atSwitch = await videoTime(viewerPage);
+    > 526 |     await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atSwitch + 3);
+          |                                                          ^
+      527 |     expect(await viewerPage.locator('video').evaluate((video) => video.error?.code ?? null)).toBeNull();
+      528 |
+      529 |     await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+        at C:\Users\V\nextra-lanes\client\tests\browser\media-flow.spec.mjs:526:58
+
+    Error Context: test-results\media-flow-a-playing-relay-6a3c5-st-recorder-from-MP4-to-VP8-chromium\error-context.md
+
+
+
+
+  5) [chromium] › tests\browser\media-flow.spec.mjs:540:1 › a relay viewer that is behind keeps playing across a VP8 recorder restart 
+
+    Error: expect(received).toBeGreaterThan(expected)
+
+    Expected: > 4.4882919999999995
+    Received:   1.488292
+
+    Call Log:
+    - Timeout 15000ms exceeded while waiting on the predicate
+
+      562 |
+      563 |     const atRelease = await videoTime(viewerPage);
+    > 564 |     await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atRelease + 3);
+          |                                                          ^
+      565 |     expect(await viewerPage.locator('video').evaluate((video) => video.error?.code ?? null)).toBeNull();
+      566 |
+      567 |     await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+        at C:\Users\V\nextra-lanes\client\tests\browser\media-flow.spec.mjs:564:58
+
+    Error Context: test-results\media-flow-a-relay-viewer--89a7a-ross-a-VP8-recorder-restart-chromium\error-context.md
+
+
+
+
+  5 failed
+    [chromium] › tests\browser\host-obs-control-channel.spec.mjs:170:1 › Retry Auto-Configure OBS opens a control channel that pagehide stops OBS through 
+    [chromium] › tests\browser\host-obs-control-channel.spec.mjs:193:1 › a control channel that never opened does not stand in the way of the stopObsStream fallback 
+    [chromium] › tests\browser\host-obs-control-channel.spec.mjs:205:1 › a Retry that ends after Stop Sharing opens no control channel 
+    [chromium] › tests\browser\media-flow.spec.mjs:505:1 › a playing relay viewer follows the host recorder from MP4 to VP8 
+    [chromium] › tests\browser\media-flow.spec.mjs:540:1 › a relay viewer that is behind keeps playing across a VP8 recorder restart 
