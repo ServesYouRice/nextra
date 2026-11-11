@@ -19,7 +19,15 @@ function addAllowedHosts(target, rawValue) {
   }
 }
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ mode, command }) => {
+  // A production build is a production client whatever NODE_ENV the caller
+  // runs under. The browser tests start `npm run build` with NODE_ENV=test for
+  // the server's sake; left alone, Vite would then bundle React's development
+  // build, where StrictMode mounts every effect twice (the page opens its
+  // socket twice) and the tests would not see the client that ships.
+  if (command === 'build' && mode === 'production' && process.env.NODE_ENV !== 'production') {
+    process.env.NODE_ENV = 'production'
+  }
   const env = loadEnv(mode, process.cwd(), '')
   // Dev/preview only. The production server (server.js) does NOT use this list.
   // Never expose Vite dev/preview publicly: the proxy below reaches the backend

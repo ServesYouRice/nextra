@@ -1516,10 +1516,21 @@ async function claimFreeSmokePort() {
 function isAlive(pid) {
     try {
         process.kill(pid, 0);
-        return true;
     } catch (err) {
         return err.code === 'EPERM';
     }
+    // On Linux a killed process still answers signal 0 until its parent collects it. Where nothing collects
+    // orphans (a container without an init process), it stays listed as a zombie: it runs nothing and holds
+    // nothing, so it did not outlive the kill.
+    if (process.platform === 'linux') {
+        try {
+            const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+            return stat.slice(stat.lastIndexOf(')') + 2).charAt(0) !== 'Z';
+        } catch {
+            return false;
+        }
+    }
+    return true;
 }
 
 // The stand-in executable under <tmp>/.../caxa/applications/nextra-<id>/0, the environment
