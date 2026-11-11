@@ -22,6 +22,9 @@ const testFiles = [
 
 const result = spawnSync(process.execPath, [
     '--test',
+    // The parser below reads TAP coverage rows ("# file | ..."). Newer Node
+    // releases default to the spec reporter even on a pipe, so pin TAP.
+    '--test-reporter=tap',
     '--experimental-test-coverage',
     ...testFiles,
 ], {
