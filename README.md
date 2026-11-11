@@ -101,6 +101,23 @@ npm start
 
 Open `http://127.0.0.1:3000/#host` and choose either browser capture or OBS mode.
 
+### Host (Server)
+
+Nextra also runs on a Linux server as one container. The image is built from this repository and takes every setting from the environment at start:
+
+```bash
+docker build -t nextra .
+docker run -d --name nextra --restart unless-stopped --network host \
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+  --env-file nextra.env nextra
+```
+
+- **Host networking** lets viewers reach the media ports directly (`RTC_MIN_PORT` to `RTC_MAX_PORT`, UDP and TCP); open them in the firewall. Set `BIND_HOST`, `RTC_LISTEN_IP` and `PUBLIC_IP` for the server's address (see [Configuration](#configuration)).
+- Put a reverse proxy that ends TLS in front of port 3000 and keep that port closed to the internet. Set `SHARE_BASE_URL` to the public address, and name the proxy in `TRUSTED_PROXY_CIDRS` when it does not run on this machine's loopback.
+- The host signs in from another computer with the host password: see [Hosting from another computer](#hosting-from-another-computer).
+- The image sets `EXTERNAL_SUPERVISOR=true`, so a media-engine crash ends the container and the restart policy starts a new one. It runs as a non-root user on a read-only root, and `/healthz` and `/readyz` serve health checks.
+- `npm run release:image` is the local release. It runs every check, builds the image tagged with the commit, starts it locked down, and scans it; a fixable high or critical finding stops it. Add `-- --push` to publish the image and print its digest.
+
 ### Viewer
 
 1. Open the link the host shared, or navigate to `http://<host>:3000/#watch` for LAN viewing.
@@ -262,12 +279,30 @@ For source/dev:
 - Ensure the `cloudflared` binary is in the project root or on PATH. Download it from [Cloudflare](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
 - For a stable named tunnel, set both `CLOUDFLARED_TUNNEL_TOKEN` and `SHARE_BASE_URL`; configure the tunnel's public hostname to forward to Nextra. The token is passed to `cloudflared` through its environment, not its command line. Nextra reports the named tunnel as active only once `cloudflared` logs a registered tunnel connection; if that does not happen within `PUBLIC_TUNNEL_TIMEOUT_MS`, `cloudflared` is stopped, the tunnel shows an error and Nextra retries.
 - Or set `SHARE_BASE_URL` if you already have your own reverse proxy or public domain. Nextra then takes each viewer's address from the `X-Forwarded-For` entries your proxies append, counted from the right (see `TRUST_PROXY`). If that proxy is a `cloudflared` tunnel you run yourself, also set `TRUST_CLOUDFLARE_CONNECTING_IP=true`; Nextra's own tunnel needs no such setting. A reverse proxy on the same machine as Nextra must pass on the public `Host` header or append `X-Forwarded-For` (nginx: `proxy_set_header Host $host;` and `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). Nextra treats a request from this machine as yours only when it is addressed to an IP address, `localhost` or this machine's name and no proxy header names another client; a proxy that hides both looks exactly like your own browser and would hand its visitors operator rights.
+- If the reverse proxy runs on another address than this machine's loopback (a Traefik or nginx container or pod, another host), name it in `TRUSTED_PROXY_CIDRS`, for example `TRUSTED_PROXY_CIDRS=10.42.0.0/16` for a k3s pod network. Nextra then reads `X-Forwarded-For` (with the `TRUST_PROXY` hop count), `X-Forwarded-Proto` and `X-Forwarded-Host` from those peers, so each viewer keeps its own address for the rate limits and HTTPS is detected behind a proxy that ends TLS. Every request from such a peer counts as relayed: it never gets operator rights from its address, also when the proxy's address is inside `TRUSTED_LAN_CIDRS`. List only proxies you run; a client that can reach Nextra directly from a listed address can claim any viewer address for the rate limits.
 - Without either, the app stays local/LAN only.
 
 Tunnel notes:
 
 - Browser capture and OBS H.264 rooms can still serve public viewers without TURN because relay is available.
 - OBS AV1 rooms require a publicly reachable mediasoup media address; TURN credentials alone cannot expose a loopback-only media listener. The UI disables public AV1 when that topology is not configured.
+
+### Hosting from another computer
+
+A room can normally only be started on the machine that runs Nextra (or from `TRUSTED_LAN_CIDRS`). When Nextra runs on a server, the host is somewhere else and signs in on the Host page:
+
+1. Set `OPERATOR_TOKEN` to at least 32 random characters. This is the **host password**. Without it the Host page tells a remote visitor that hosting from another computer is switched off.
+2. Serve Nextra over HTTPS: `LOCAL_HTTPS=true`, a tunnel, or a reverse proxy that ends TLS (see `TRUSTED_PROXY_CIDRS` above). The sign-in is refused on plain HTTP, and the page does not send the password from an `http://` address.
+3. Open **Host** through the same public address viewers use (the tunnel URL or `SHARE_BASE_URL`) and enter the host password. The Host page then works as it does locally, with a **Sign out** button.
+
+How the sign-in works:
+
+- `POST /api/operator/session` takes the password once and answers with an `HttpOnly`, `SameSite=Strict` cookie (`Secure` over HTTPS). The page never stores the password, and page scripts cannot read the cookie.
+- A session lasts 12 hours, at most 32 are live at once, and all of them end when Nextra restarts (which ends every room too) or the host signs out.
+- Five wrong passwords from one client in ten minutes block that client until the oldest is ten minutes old. There is no limit across all clients: the password is at least 32 high-entropy characters, so it cannot be guessed, and a shared limit would let anyone lock the host out. A host on the Nextra machine itself needs no sign-in.
+- A session gives the same rights as the operator token: creating rooms, `/api/metrics` (and so the Status page) and Cloudflare TURN autofill. It is accepted only from Nextra's own pages: a request or socket that holds nothing but the cookie must come from the server's own origin or the public share origin.
+- Scripts and API clients keep using the `X-Nextra-Operator-Token` header.
+- The signed-in host's browser must reach Nextra over a WebSocket. A connection that falls back to long-polling still works for viewers, but it carries no `Origin` on its handshake and is not accepted as the host.
 
 ---
 
@@ -277,7 +312,7 @@ Open `http://127.0.0.1:3000/#status` on the host machine to see active rooms, We
 
 The JSON metrics and readiness responses also report `fallbackRelay.nvencProbe`. The probe is warmed in the background during startup; `probing` does not make the service unready because the relay can use libx264 when NVENC is unavailable. For capacity tests, record `/api/metrics` repeatedly and correlate room/viewer topology with `process.cpuUsageMicroseconds`, `process.eventLoopDelayMs`, `mediaWorker.resourceUsage`, memory, relay throughput, and signaling acknowledgement latency measured by the load client. CPU counters are cumulative, so calculate the change between samples over the sample interval.
 
-Sensitive JSON metrics at `/api/metrics` use the operator boundary: loopback and explicitly trusted LAN clients are allowed, while other clients must send `X-Nextra-Operator-Token`. The Prometheus/OpenMetrics endpoint at `/metrics` keeps its separate `METRICS_TOKEN` bearer capability.
+Sensitive JSON metrics at `/api/metrics` use the operator boundary: loopback and explicitly trusted LAN clients are allowed, while other clients must send `X-Nextra-Operator-Token` or be signed in with the host password (see [Hosting from another computer](#hosting-from-another-computer)). The Prometheus/OpenMetrics endpoint at `/metrics` keeps its separate `METRICS_TOKEN` bearer capability.
 
 ---
 
@@ -357,7 +392,7 @@ A WHEP player decodes only the payload type numbers of its own offer. When a pla
 Notes:
 
 - `TURN_URL` can contain multiple comma-separated `turn:` or `turns:` URLs.
-- Cloudflare TURN autofill uses the operator boundary; remote operators send `X-Nextra-Operator-Token`.
+- Cloudflare TURN autofill uses the operator boundary; remote operators sign in with the host password on the Host page, or send `X-Nextra-Operator-Token`.
 - The browser never receives the long-lived Cloudflare API token; it only gets short-lived TURN credentials.
 
 ### Public Sharing
@@ -369,6 +404,7 @@ Notes:
 | `SHARE_BASE_URL` | - | Public URL for a named tunnel or your own reverse proxy |
 | `PUBLIC_TUNNEL_PROVIDER` | `cloudflared` | Tunnel provider |
 | `TRUST_X_FORWARDED_HEADERS` | `false` | Take the client's address from `X-Forwarded-For` on requests that a proxy on this machine (a loopback peer) relays. Requests addressed to `SHARE_BASE_URL` or to Nextra's own tunnel are read this way without it |
+| `TRUSTED_PROXY_CIDRS` | - | Comma-separated IPv4/IPv6 addresses or CIDRs of reverse proxies you run on other addresses than loopback (for example `10.42.0.0/16`). `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` from those peers are read without `TRUST_X_FORWARDED_HEADERS`, and their requests are always treated as relayed, never as the local operator. Loopback addresses and `/0` are refused at startup |
 | `TRUST_PROXY` | `false` | How many proxies sit in front of Nextra: the client is that many entries from the right of `X-Forwarded-For` (`2` takes the entry before the last). `true`, `false`, an address or a subnet list count as one. Also sets Express's `trust proxy` |
 | `TRUST_CLOUDFLARE_CONNECTING_IP` | `false` | Take the client's address from `CF-Connecting-IP` on requests from a loopback peer. Set it only when every such request comes through a `cloudflared` tunnel you run yourself: nginx, Caddy and other proxies pass on a `CF-Connecting-IP` the client wrote. Nextra's own tunnel (`AUTO_PUBLIC_TUNNEL` or `CLOUDFLARED_TUNNEL_TOKEN`) is trusted without it, for requests addressed to its URL while it runs |
 
@@ -389,7 +425,7 @@ Notes:
 | `SOCKET_PING_TIMEOUT_MS` | `60000` | Grace period before a quiet watcher socket is considered disconnected |
 | `METRICS_BROADCAST_INTERVAL_MS` | `5000` | Room metrics broadcast interval |
 | `ALLOW_REMOTE_MEDIA_CONTROL` | `false` | Permit hosts to opt viewers into remote Play/Pause keyboard control |
-| `OPERATOR_TOKEN` | - | At least 32 high-entropy characters; required for remote room creation, sensitive JSON metrics, and TURN minting |
+| `OPERATOR_TOKEN` | - | The host password: at least 32 high-entropy characters. Required for remote room creation, sensitive JSON metrics, and TURN minting. A remote host enters it on the Host page (HTTPS only); API clients send it as `X-Nextra-Operator-Token` |
 | `TRUSTED_LAN_CIDRS` | - | Comma-separated explicit operator IPs or IPv4 CIDRs; private addresses are not trusted automatically |
 | `OPERATOR_HOSTNAMES` | - | Comma-separated extra host names (no scheme or port) you open Nextra under on this machine or a trusted LAN. IP addresses, `localhost` and the machine's own name always count; a request under any other name is never treated as the local operator, which keeps other websites from reading operator data through a DNS name pointed at your machine |
 | `ALLOW_INSECURE_TRUSTED_LAN_RELAY` | `false` | Permit plaintext Socket.IO relay bytes only on `TRUSTED_LAN_CIDRS`; WebRTC DTLS does not protect relay payloads |
@@ -412,8 +448,8 @@ See `.env.example` for the full list.
 - Remote media control is host-controllable per room
 - Media is not persisted by Nextra
 - Cloudflare TURN API tokens remain server-side; only short-lived TURN credentials are sent to the host UI
-- Room creation is loopback-only by default. Remote hosts need the operator capability; public viewers never receive host authority.
-- Rotate `OPERATOR_TOKEN` by replacing it and restarting Nextra. Existing in-memory rooms keep their room-scoped host tokens until the restart ends them.
+- Room creation is loopback-only by default. Remote hosts need the operator capability: they sign in on the Host page with the host password (`OPERATOR_TOKEN`), over HTTPS only, and hold an `HttpOnly` session cookie for at most 12 hours. Public viewers never receive host authority.
+- Rotate `OPERATOR_TOKEN` by replacing it and restarting Nextra. The restart ends every host sign-in session, and existing in-memory rooms keep their room-scoped host tokens only until it ends them too.
 - On HTTP, Socket.IO WebM/fMP4 relay payloads are plaintext. Leave insecure relay disabled except on a declared trusted home LAN; use HTTPS for every other non-loopback path.
 - `.env`, TLS keys, and binaries are gitignored
 
@@ -433,7 +469,7 @@ Operational security:
 - Run under a single-process supervisor. Unexpected unhandled rejections and uncaught exceptions log a shutdown reason and exit non-zero; mediasoup worker death exits non-zero too when `EXTERNAL_SUPERVISOR=true` is set, and otherwise Nextra starts a replacement process itself. Either event ends all in-memory rooms.
 - Rotate logs outside the process, restrict file access, and redact room codes, bearer capabilities, public capability URLs, TURN credentials, and request headers before sharing diagnostics.
 - The Host page's **Troubleshooting diagnostics** export downloads an allowlisted JSON snapshot of readiness, safe configuration flags, topology counts, runtime utilization, and current errors. It excludes room codes, room/public links, credentials, authorization headers, and raw room lists; review the file before sharing it outside your organization.
-- Store `OPERATOR_TOKEN`, `METRICS_TOKEN`, TURN secrets, tunnel tokens, and OBS credentials in protected environment/service-secret storage, never in command history, URLs, or source control. The host page keeps the OBS WebSocket password you type, and TURN values only when you tick the option to remember them, in that browser tab's session storage until the tab closes; it never puts them in a URL or a log.
+- Store `OPERATOR_TOKEN`, `METRICS_TOKEN`, TURN secrets, tunnel tokens, and OBS credentials in protected environment/service-secret storage, never in command history, URLs, or source control. The host page keeps the OBS WebSocket password you type, and TURN values only when you tick the option to remember them, in that browser tab's session storage until the tab closes; it never puts them in a URL or a log. The host password is not stored by the page at all: a sign-in leaves only the session cookie, which page scripts cannot read.
 
 ---
 

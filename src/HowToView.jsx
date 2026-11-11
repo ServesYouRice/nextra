@@ -117,6 +117,11 @@ export default function HowToView() {
                         <li>On a Mac, host from Chrome, Edge, or Brave (not Safari), and allow Screen Recording for that browser in <strong>System Settings &gt; Privacy &amp; Security</strong> when asked.</li>
                     </ul>
                 </div>
+                <p>
+                    <strong>Hosting from another computer:</strong> a room can normally only be started on the machine that runs Nextra.
+                    To host from somewhere else, the person who runs the server sets a host password (<code>OPERATOR_TOKEN</code>, at least 32 characters) and serves Nextra over HTTPS.
+                    The Host page then asks for the host password and keeps that browser signed in for 12 hours, or until you choose <strong>Sign out</strong>.
+                </p>
             </div>
 
             <div className="article-step">
@@ -167,7 +172,7 @@ export default function HowToView() {
                 <ul>
                     <li><strong>Stable H.264</strong> - leave <strong>Use BYOK TURN (AV1)</strong> off. This is the compatibility path and keeps relay fallback available for viewers.</li>
                     <li><strong>AV1 WebRTC-only</strong> - enable <strong>Use BYOK TURN (AV1)</strong>. This requires an AV1-capable GPU, a TURN config, and OBS auto-configuration. Relay fallback is disabled for that room.</li>
-                    <li><strong>Cloudflare TURN autofill</strong> - if the server is configured for it, the AV1 modal can fetch short-lived TURN credentials directly into the form. This button is only exposed to local or LAN hosts.</li>
+                    <li><strong>Cloudflare TURN autofill</strong> - if the server is configured for it, the AV1 modal can fetch short-lived TURN credentials directly into the form. This button is only shown to a host on the machine that runs Nextra or on a trusted LAN, or one signed in with the host password.</li>
                 </ul>
             </div>
 
@@ -330,6 +335,7 @@ export default function HowToView() {
             <p>
                 Media is not stored by Nextra.
                 OBS WebSocket traffic stays on localhost. Room access is code-based with no user accounts.
+                Starting a room from another computer needs the host password: the browser sends it once, over HTTPS only, and then holds a sign-in cookie that page scripts cannot read. That sign-in ends after 12 hours, when you sign out, or when Nextra restarts.
                 If you enable Cloudflare TURN autofill, the long-lived API token stays on the server and the browser only receives short-lived TURN credentials.
             </p>
 
