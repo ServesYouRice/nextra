@@ -32,7 +32,7 @@ The built-in **Public Link** is meant for sharing with one or two people over th
 - **OBS streaming** - use OBS Studio as the capture source via WHIP ingest, with auto-configuration over OBS WebSocket
 - **AV1 OBS rooms** - try bounded NVIDIA, AMD, and Intel encoder candidates and keep the first one OBS verifies for WebRTC-only playback
 - **BYOK TURN for AV1** - room-scoped TURN credentials, optional session-only storage, and optional Cloudflare TURN autofill
-- **Up to 4K @ 60 fps** - quality profiles adapt to host upload and viewer count
+- **Up to 4K @ 60 fps** - pick a quality profile; the host page warns when it needs more upload than your link and viewer count allow
 - **WebRTC + Relay playback** - viewers use direct WebRTC when they can reach the host, and a relay over the page connection when they cannot (for example, through the public link); AV1 OBS rooms are WebRTC-only
 - **iPhone and iPad viewers** - public-link viewers on iOS 17.1+ can watch when the host uses Chrome, Edge, or Brave
 - **Self-adjusting relay** - a relay viewer on a slow connection skips ahead instead of being disconnected, and the relay lowers its own bitrate when the host's upload cannot keep up, then raises it again; nothing to configure
@@ -261,7 +261,7 @@ For source/dev:
 - Set `AUTO_PUBLIC_TUNNEL=true` if you want the app to create a Cloudflare tunnel automatically.
 - Ensure the `cloudflared` binary is in the project root or on PATH. Download it from [Cloudflare](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
 - For a stable named tunnel, set both `CLOUDFLARED_TUNNEL_TOKEN` and `SHARE_BASE_URL`; configure the tunnel's public hostname to forward to Nextra. The token is passed to `cloudflared` through its environment, not its command line. Nextra reports the named tunnel as active only once `cloudflared` logs a registered tunnel connection; if that does not happen within `PUBLIC_TUNNEL_TIMEOUT_MS`, `cloudflared` is stopped, the tunnel shows an error and Nextra retries.
-- Or set `SHARE_BASE_URL` if you already have your own reverse proxy or public domain. Nextra then takes each viewer's address from the `X-Forwarded-For` entries your proxies append, counted from the right (see `TRUST_PROXY`). If that proxy is a `cloudflared` tunnel you run yourself, also set `TRUST_CLOUDFLARE_CONNECTING_IP=true`; Nextra's own tunnel needs no such setting.
+- Or set `SHARE_BASE_URL` if you already have your own reverse proxy or public domain. Nextra then takes each viewer's address from the `X-Forwarded-For` entries your proxies append, counted from the right (see `TRUST_PROXY`). If that proxy is a `cloudflared` tunnel you run yourself, also set `TRUST_CLOUDFLARE_CONNECTING_IP=true`; Nextra's own tunnel needs no such setting. A reverse proxy on the same machine as Nextra must pass on the public `Host` header or append `X-Forwarded-For` (nginx: `proxy_set_header Host $host;` and `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`). Nextra treats a request from this machine as yours only when it is addressed to an IP address, `localhost` or this machine's name and no proxy header names another client; a proxy that hides both looks exactly like your own browser and would hand its visitors operator rights.
 - Without either, the app stays local/LAN only.
 
 Tunnel notes:
@@ -391,6 +391,7 @@ Notes:
 | `ALLOW_REMOTE_MEDIA_CONTROL` | `false` | Permit hosts to opt viewers into remote Play/Pause keyboard control |
 | `OPERATOR_TOKEN` | - | At least 32 high-entropy characters; required for remote room creation, sensitive JSON metrics, and TURN minting |
 | `TRUSTED_LAN_CIDRS` | - | Comma-separated explicit operator IPs or IPv4 CIDRs; private addresses are not trusted automatically |
+| `OPERATOR_HOSTNAMES` | - | Comma-separated extra host names (no scheme or port) you open Nextra under on this machine or a trusted LAN. IP addresses, `localhost` and the machine's own name always count; a request under any other name is never treated as the local operator, which keeps other websites from reading operator data through a DNS name pointed at your machine |
 | `ALLOW_INSECURE_TRUSTED_LAN_RELAY` | `false` | Permit plaintext Socket.IO relay bytes only on `TRUSTED_LAN_CIDRS`; WebRTC DTLS does not protect relay payloads |
 | `METRICS_TOKEN` | - | Bearer capability for `/metrics` when OpenMetrics is enabled |
 | `ENABLE_OPENMETRICS` | `false` | Enable token-gated Prometheus/OpenMetrics output at `/metrics`; requires `METRICS_TOKEN` |
@@ -432,7 +433,7 @@ Operational security:
 - Run under a single-process supervisor. Unexpected unhandled rejections and uncaught exceptions log a shutdown reason and exit non-zero; mediasoup worker death exits non-zero too when `EXTERNAL_SUPERVISOR=true` is set, and otherwise Nextra starts a replacement process itself. Either event ends all in-memory rooms.
 - Rotate logs outside the process, restrict file access, and redact room codes, bearer capabilities, public capability URLs, TURN credentials, and request headers before sharing diagnostics.
 - The Host page's **Troubleshooting diagnostics** export downloads an allowlisted JSON snapshot of readiness, safe configuration flags, topology counts, runtime utilization, and current errors. It excludes room codes, room/public links, credentials, authorization headers, and raw room lists; review the file before sharing it outside your organization.
-- Store `OPERATOR_TOKEN`, `METRICS_TOKEN`, TURN secrets, tunnel tokens, and OBS credentials in protected environment/service-secret storage, never in command history, URLs, source control, or client storage.
+- Store `OPERATOR_TOKEN`, `METRICS_TOKEN`, TURN secrets, tunnel tokens, and OBS credentials in protected environment/service-secret storage, never in command history, URLs, or source control. The host page keeps the OBS WebSocket password you type, and TURN values only when you tick the option to remember them, in that browser tab's session storage until the tab closes; it never puts them in a URL or a log.
 
 ---
 

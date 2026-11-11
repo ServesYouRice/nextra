@@ -8,6 +8,7 @@ const https = require('https');
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const { Server } = require('socket.io');
 const helmet = require('helmet');
 const compression = require('compression');
@@ -281,12 +282,21 @@ function getManagedTunnelOrigin() {
     return status === 'active' && baseUrl && isPublicOrigin(baseUrl) ? baseUrl : '';
 }
 
+// Names, besides IP literals and localhost, that address this machine for operator checks: its own hostname and the
+// OPERATOR_HOSTNAMES setting. See isOperatorAddressedRequest in lib/requestIdentity.js.
+const operatorHostnames = [...new Set([
+    os.hostname(),
+    `${os.hostname()}.local`,
+    ...config.OPERATOR_HOSTNAMES,
+].map((name) => String(name || '').trim().toLowerCase()).filter(Boolean))];
+
 // Who a request or socket comes from; see lib/requestIdentity.js. The tunnel and any same-host proxy relay from
 // loopback, so a relayed request is classified as a known proxy, never as the local operator.
 const {
     isKnownPublicShareOrigin,
     isKnownPublicShareRequest,
     isRelayedFromLoopback,
+    isOperatorAddressedRequest,
     shouldTrustRequestForwardedHeaders,
     getClientIpFromHeaders,
 } = createRequestIdentity({
@@ -295,6 +305,7 @@ const {
     getTrustProxy: () => config.TRUST_PROXY,
     getManagedTunnelOrigin,
     getTrustCloudflareClientIp: () => config.TRUST_CLOUDFLARE_CONNECTING_IP,
+    getOperatorHostnames: () => operatorHostnames,
 });
 
 function getRequestClientIp(req) {
@@ -303,10 +314,13 @@ function getRequestClientIp(req) {
 
 function getRequestClientClassification(req) {
     const headers = req?.headers || {};
+    const remoteAddress = getRemoteAddressFromReq(req);
     return classifyClient({
         ip: getRequestClientIp(req),
         trustedLanCidrs: config.TRUSTED_LAN_CIDRS,
-        viaKnownProxy: isKnownPublicShareRequest(headers) || isRelayedFromLoopback(headers, getRemoteAddressFromReq(req)),
+        viaKnownProxy: isKnownPublicShareRequest(headers)
+            || isRelayedFromLoopback(headers, remoteAddress)
+            || !isOperatorAddressedRequest(headers, remoteAddress),
     });
 }
 
@@ -319,10 +333,13 @@ function getSocketRemoteAddress(socket) {
 
 function getSocketClientClassification(socket) {
     const headers = socket?.handshake?.headers || {};
+    const remoteAddress = getSocketRemoteAddress(socket);
     return classifyClient({
         ip: getSocketHandshakeIp(socket),
         trustedLanCidrs: config.TRUSTED_LAN_CIDRS,
-        viaKnownProxy: isKnownPublicShareRequest(headers) || isRelayedFromLoopback(headers, getSocketRemoteAddress(socket)),
+        viaKnownProxy: isKnownPublicShareRequest(headers)
+            || isRelayedFromLoopback(headers, remoteAddress)
+            || !isOperatorAddressedRequest(headers, remoteAddress),
     });
 }
 

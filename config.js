@@ -364,6 +364,13 @@ const config = {
     METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),
     OPERATOR_TOKEN: (process.env.OPERATOR_TOKEN || '').trim(),
     TRUSTED_LAN_CIDRS: (process.env.TRUSTED_LAN_CIDRS || '').trim(),
+    // Extra names the operator opens Nextra under on this machine or a trusted LAN (comma-separated host names, no
+    // scheme or port). IP addresses, localhost and the machine's own hostname always count; any other name in the
+    // Host header is treated as a relayed request, never the local operator.
+    OPERATOR_HOSTNAMES: (process.env.OPERATOR_HOSTNAMES || '')
+        .split(',')
+        .map((name) => name.trim().toLowerCase())
+        .filter(Boolean),
     ALLOW_INSECURE_TRUSTED_LAN_RELAY: parseBoolEnv(process.env.ALLOW_INSECURE_TRUSTED_LAN_RELAY, false),
     ENABLE_OPENMETRICS: parseBoolEnv(process.env.ENABLE_OPENMETRICS, false),
     MEDIA_DEBUG_LOGS: parseBoolEnv(process.env.MEDIA_DEBUG_LOGS, false),
