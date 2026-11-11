@@ -27,6 +27,10 @@ export default defineConfig({
     timeout: 60_000,
     expect: { timeout: 15_000 },
     fullyParallel: false,
+    // One worker: the spec files share one server, and media-flow asserts on
+    // that server's only room, so a second file creating rooms at the same
+    // time fails it.
+    workers: 1,
     retries: process.env.CI ? 1 : 0,
     reporter: process.env.CI ? 'github' : 'list',
     use: {
