@@ -212,7 +212,7 @@ H.264 rooms also use the High profile, and the Simple Output page is mirrored wh
 How these reach OBS:
 
 - The output mode, encoder, resolution, frame rate and stream target go over OBS WebSocket.
-- OBS WebSocket has no request for the encoder's own settings (bitrate, keyframe interval, B-frames, look-ahead). OBS reads those from `streamEncoder.json` in its profile folder each time a stream starts, so the Nextra server writes them there. This needs OBS on the same machine as Nextra and a host page opened on that machine. Otherwise the host page lists the values to set in **Settings > Output > Streaming**; without them OBS streams on its defaults (a keyframe only every 250 frames, B-frames and look-ahead on), which delays every viewer.
+- OBS WebSocket has no request for the encoder's own settings (bitrate, keyframe interval, B-frames, look-ahead). OBS reads those from `streamEncoder.json` in its profile folder each time a stream starts, so the Nextra server writes them there. This needs OBS on the same machine as Nextra and a host page opened on that machine. Otherwise the host page lists the values to set in **Settings > Output > Streaming**; without them OBS streams on its defaults (a keyframe only every 250 frames, B-frames and look-ahead on), which delays every viewer. If the setup then fails and rolls back, the server puts that file back as it was (or removes it if the setup created it).
 - The encoder is chosen from the list OBS writes to its log when it starts, so it does not depend on what the browser reveals about the GPU.
 - OBS applies a changed encoder or output mode only when it restarts. The host page says when that is needed: restart OBS once, then start sharing again.
 - OBS does not answer keyframe requests, so the keyframe interval is how long a new WebRTC viewer waits for a picture. The host page warns when OBS sends keyframes more than 2.5 seconds apart.
@@ -260,8 +260,8 @@ For source/dev:
 
 - Set `AUTO_PUBLIC_TUNNEL=true` if you want the app to create a Cloudflare tunnel automatically.
 - Ensure the `cloudflared` binary is in the project root or on PATH. Download it from [Cloudflare](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
-- For a stable named tunnel, set both `CLOUDFLARED_TUNNEL_TOKEN` and `SHARE_BASE_URL`; configure the tunnel's public hostname to forward to Nextra. The token is passed to `cloudflared` through its environment, not its command line.
-- Or set `SHARE_BASE_URL` if you already have your own reverse proxy or public domain.
+- For a stable named tunnel, set both `CLOUDFLARED_TUNNEL_TOKEN` and `SHARE_BASE_URL`; configure the tunnel's public hostname to forward to Nextra. The token is passed to `cloudflared` through its environment, not its command line. Nextra reports the named tunnel as active only once `cloudflared` logs a registered tunnel connection; if that does not happen within `PUBLIC_TUNNEL_TIMEOUT_MS`, `cloudflared` is stopped, the tunnel shows an error and Nextra retries.
+- Or set `SHARE_BASE_URL` if you already have your own reverse proxy or public domain. Nextra then takes each viewer's address from the `X-Forwarded-For` entries your proxies append, counted from the right (see `TRUST_PROXY`). If that proxy is a `cloudflared` tunnel you run yourself, also set `TRUST_CLOUDFLARE_CONNECTING_IP=true`; Nextra's own tunnel needs no such setting.
 - Without either, the app stays local/LAN only.
 
 Tunnel notes:
@@ -311,6 +311,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 | `OPEN_BROWSER` | `false` from source, `true` in packaged builds | Open the host page automatically on startup or duplicate launch |
 | `LOCAL_HTTPS` | `false` | Serve the local app over self-signed HTTPS instead of HTTP |
 | `HTTPS_CERT_DIR` | `./certs` | TLS certificate directory when `LOCAL_HTTPS=true` |
+| `EXTERNAL_SUPERVISOR` | `false` | Set to `true` when a service manager, systemd or a container restart policy restarts Nextra after it exits. A media-engine (mediasoup worker) crash then ends the process with exit code 1 and Nextra starts no replacement of its own. See [Operations and supported scale](#operations-and-supported-scale) |
 
 ### OBS / WHIP
 
@@ -318,7 +319,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 |---|---|---|
 | `WHIP_ENABLED` | `true` | Enable WHIP ingest endpoint |
 | `PUBLIC_WHIP_ENABLED` | `false` | Also mount WHIP on the main/public server; the dedicated loopback endpoint remains available when this is off |
-| `PUBLIC_WHIP_RATE_LIMIT_MAX` | `5` | Public WHIP start attempts per IP per window |
+| `PUBLIC_WHIP_RATE_LIMIT_MAX` | `5` | Public WHIP start attempts per IP per window (an IPv6 client counts by its /64; at most 10,000 clients are tracked, oldest dropped first) |
 | `PUBLIC_WHIP_MAX_PENDING_STARTS` | `2` | Global cap on concurrent public WHIP startups before SDP/media allocation |
 | `WHIP_HTTP_PORT` | `3001` | HTTP port for WHIP endpoint |
 | `WHIP_BIND_HOST` | `127.0.0.1` | Bind address for the plaintext OBS-compatible WHIP endpoint |
@@ -338,6 +339,8 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 | `WHEP_RATE_LIMIT_MAX` | `5` | Max WHEP session creation attempts per IP per window |
 | `WHEP_RATE_LIMIT_WINDOW_MS` | `60000` | WHEP rate-limit window in ms |
 | `WHEP_MAX_GLOBAL_SESSIONS` | `30` | Max concurrent WHEP sessions across the server |
+
+A WHEP player decodes only the payload type numbers of its own offer. When a player numbers the room's codecs differently from the server's media router (Chromium and Firefox both do), the server serves it from a router made for that numbering, with the room's media piped into it over loopback UDP (a port pair on `127.0.0.1` from 49152-65535, not from the RTC range). Players that number codecs alike, such as all Chromium-based browsers, share that router; it closes with its last player. A room serves at most 4 such numberings at once and the server 16; another player then gets HTTP 503.
 
 ### TURN / AV1
 
@@ -365,6 +368,9 @@ Notes:
 | `CLOUDFLARED_TUNNEL_TOKEN` | - | Run a stable named Cloudflare tunnel; requires `SHARE_BASE_URL` |
 | `SHARE_BASE_URL` | - | Public URL for a named tunnel or your own reverse proxy |
 | `PUBLIC_TUNNEL_PROVIDER` | `cloudflared` | Tunnel provider |
+| `TRUST_X_FORWARDED_HEADERS` | `false` | Take the client's address from `X-Forwarded-For` on requests that a proxy on this machine (a loopback peer) relays. Requests addressed to `SHARE_BASE_URL` or to Nextra's own tunnel are read this way without it |
+| `TRUST_PROXY` | `false` | How many proxies sit in front of Nextra: the client is that many entries from the right of `X-Forwarded-For` (`2` takes the entry before the last). `true`, `false`, an address or a subnet list count as one. Also sets Express's `trust proxy` |
+| `TRUST_CLOUDFLARE_CONNECTING_IP` | `false` | Take the client's address from `CF-Connecting-IP` on requests from a loopback peer. Set it only when every such request comes through a `cloudflared` tunnel you run yourself: nginx, Caddy and other proxies pass on a `CF-Connecting-IP` the client wrote. Nextra's own tunnel (`AUTO_PUBLIC_TUNNEL` or `CLOUDFLARED_TUNNEL_TOKEN`) is trusted without it, for requests addressed to its URL while it runs |
 
 ### Rooms & Limits
 
@@ -378,7 +384,7 @@ Notes:
 | `RELAY_VIDEO_BITS_PER_SECOND` | `45000000` | Max relay video bitrate ceiling. No tuning is needed: a relay viewer that falls behind skips ahead to the next keyframe, and when every relay viewer falls behind the host lowers the relay bitrate (down to 2.5 Mbps) and raises it 25% after every 30 quiet seconds |
 | `RELAY_FLUSH_INTERVAL_MS` | `300` | Relay socket flush interval in ms |
 | `RELAY_PUBLIC_LINK_KBPS` | `0` | What one connection through the public link carries, in kbps. `0` measures it when the link comes up; set a value to skip the measurement. The OBS relay starts at 70% of it |
-| `RELAY_SOCKET_MAX_BUFFERED_BYTES` | `16777216` | Per-viewer relay send-buffer hard cap; a viewer past it is disconnected and rejoins (MP4 relay viewers normally skip ahead long before this) |
+| `RELAY_SOCKET_MAX_BUFFERED_BYTES` | `16777216` | Per-viewer relay send-buffer hard cap; a viewer past it is disconnected and rejoins (MP4 relay viewers normally skip ahead long before this). A late viewer's bootstrap, sent once at its start, is not counted |
 | `MAX_CONNECTIONS_PER_IP` | `60` | Rate limit: connections per IP |
 | `SOCKET_PING_TIMEOUT_MS` | `60000` | Grace period before a quiet watcher socket is considered disconnected |
 | `METRICS_BROADCAST_INTERVAL_MS` | `5000` | Room metrics broadcast interval |
@@ -398,7 +404,7 @@ See `.env.example` for the full list.
 
 ## Security and Privacy
 
-- Public HTTPS tunnel links and WebRTC DTLS media encryption in transit
+- WebRTC viewing, OBS WHIP ingest and WHEP playback are encrypted in transit with DTLS-SRTP. Relay media travels over the page connection and is encrypted only as far as that connection is: public links use HTTPS that ends at the tunnel provider, so relay media is not end-to-end encrypted to the host, and a local link is plain HTTP unless `LOCAL_HTTPS=true`
 - Room-code based access with no user accounts; hosts may opt into an additional room passphrase
 - Rate limiting and connection limits on signaling
 - OBS WebSocket communication is localhost-only
@@ -414,7 +420,7 @@ Important limits:
 
 - By default, anyone with the room code or share link can attempt to join. Hosts can set an optional passphrase in the host **Settings** panel; browser viewers are prompted after entering the code, while WHEP clients send `Authorization: Bearer <passphrase>`. Only a salted scrypt hash is kept in ephemeral room state.
 - Passphrase hashing runs asynchronously. Pending room creations count toward `MAX_ACTIVE_ROOMS`, and an existing room remains active unless its fully prepared replacement succeeds.
-- **Allow recovery after reload** stores the room code and reclaim token in tab-scoped session storage and preserves an opted-in room for the host reconnect grace (30 seconds by default). This only reclaims a room from the same running server process; a process replacement ends every in-memory room. OBS remains attached during same-process recovery; browser capture requires clicking **Resume Sharing** and selecting a screen again. Explicit stop still ends the room immediately.
+- **Allow recovery after reload** stores the room code and reclaim token in tab-scoped session storage and preserves an opted-in room for the host reconnect grace (30 seconds by default). This only reclaims a room from the same running server process; a process replacement ends every in-memory room. OBS remains attached during same-process recovery; browser capture requires clicking **Resume Sharing** and selecting a screen again. Explicit stop still ends the room immediately, also when the host's connection is down at that moment: the page, while it stays open, sends the stop with the room's host token as soon as it reconnects, so viewers do not wait out the grace.
 - Every Local/Public viewer link names one in-memory room. Explicit Host stop or a Nextra process restart retires that link; starting again creates a new room code and link. Joined viewers can copy the canonical current link, but protected-room passphrases are never embedded in it.
 - Tunnel providers, TURN servers, ISPs, and network operators are external parties.
 - Treat this as secure-by-default self-hosted software, not a zero-trust system.
@@ -423,7 +429,7 @@ Operational security:
 
 - A quick tunnel pointing at self-signed local HTTPS may need cloudflared's local-origin `--no-tls-verify`; this relaxes only cloudflared-to-Nextra certificate verification, so never use it for an unrelated upstream.
 - Alert when `/readyz` is non-ready, the media-worker PID changes unexpectedly, relay restart/error counters rise, or the tunnel remains in an error/backoff state.
-- Run under a single-process supervisor. Unexpected unhandled rejections and uncaught exceptions log a shutdown reason and exit non-zero; mediasoup worker death replaces the process. Either event ends all in-memory rooms.
+- Run under a single-process supervisor. Unexpected unhandled rejections and uncaught exceptions log a shutdown reason and exit non-zero; mediasoup worker death exits non-zero too when `EXTERNAL_SUPERVISOR=true` is set, and otherwise Nextra starts a replacement process itself. Either event ends all in-memory rooms.
 - Rotate logs outside the process, restrict file access, and redact room codes, bearer capabilities, public capability URLs, TURN credentials, and request headers before sharing diagnostics.
 - The Host page's **Troubleshooting diagnostics** export downloads an allowlisted JSON snapshot of readiness, safe configuration flags, topology counts, runtime utilization, and current errors. It excludes room codes, room/public links, credentials, authorization headers, and raw room lists; review the file before sharing it outside your organization.
 - Store `OPERATOR_TOKEN`, `METRICS_TOKEN`, TURN secrets, tunnel tokens, and OBS credentials in protected environment/service-secret storage, never in command history, URLs, source control, or client storage.
@@ -474,13 +480,16 @@ npm run benchmark:runtime -- --scenario=relay --label=1080p60-h264-relay-5-viewe
 
 Run each profile on the deployment hardware, keep the complete JSON output with the profile name, and increase the conservative limits only when signalling, event-loop, CPU, memory, and relay-byte checks all retain acceptable headroom. A run with sockets but no flowing media fails topology validation rather than becoming a capacity claim.
 
-For a loopback-only test server using Nextra's self-signed local HTTPS certificate, `--allow-insecure-tls` disables Socket.IO certificate verification for that benchmark run; Node's HTTPS fetches also require `NODE_TLS_REJECT_UNAUTHORIZED=0`. Never use either setting against a remote or untrusted host. The JSON result records when Socket.IO TLS verification was disabled.
+For a loopback-only test server using Nextra's self-signed local HTTPS certificate, `--allow-insecure-tls` disables certificate verification for that benchmark run, for both its Socket.IO connections and its `/api/metrics` requests; `NODE_TLS_REJECT_UNAUTHORIZED=0` is not needed. `npm run churn:runtime` has no such option and always verifies the certificate, so point it at a plain `http://` URL or a certificate the machine trusts. Never use `--allow-insecure-tls` against a remote or untrusted host. The JSON result records when TLS verification was disabled.
 
 Production supervision means exactly one replica; a restart ends all in-memory rooms. Keep the verified `caxa` packaging path for Windows x64 and macOS arm64 until either fails its gate or a supported platform change requires a replacement.
 
 - `/healthz` is an unauthenticated process-liveness check.
 - `/readyz` returns 200 only when every component required by the active profile is ready: HTTP, Socket.IO, the mediasoup worker, the production SPA bundle, and WHIP when enabled. Development marks the Vite-served SPA as external; disabled WHIP and optional FFmpeg/NVENC fallback do not block readiness. A 503 response includes each component's required flag, state, and WHIP startup error when present.
-- An uncaught exception or mediasoup worker death terminates/restarts the process. Run production deployments under a supervisor such as Windows Service management, systemd, or a container restart policy.
+- An uncaught exception or mediasoup worker death ends the process. Run production deployments under a supervisor such as Windows Service management, systemd, or a container restart policy, and set `EXTERNAL_SUPERVISOR=true`: after a mediasoup worker death, connected clients are told their room ended and Nextra exits with code 1 for the supervisor to restart it. A worker death during the first `WORKER_RECOVERY_MIN_UPTIME_SECONDS` (30 by default) of a run also exits 1, supervised or not, and is never restarted by Nextra itself, so a worker that cannot start does not loop.
+- Without `EXTERNAL_SUPERVISOR` (a desktop run, `node server.js` in a terminal, the packaged app), Nextra keeps the app usable after a mediasoup worker death: it ends the rooms, releases the port, and starts a replacement Nextra as an ordinary child process. The replacement writes to the same console (or the same output the launcher captured), so a startup failure is visible, and the original process stays alive until the replacement ends and exits with the replacement's exit code. A supervisor that watches the original PID therefore sees a running server, not a clean exit. Do not combine this with a supervisor: declare the supervisor instead.
+  - Signals on Linux and macOS: Ctrl+C or a closed terminal reaches both processes (same process group); `kill <pid>` of the original alone (SIGINT, SIGTERM, SIGHUP) is passed on to the replacement. A SIGKILL of the original leaves the replacement running.
+  - Signals on Windows: Ctrl+C, Ctrl+Break and closing the console window reach both processes through the console. Stopping the original with `taskkill` or Task Manager does not stop the replacement; use `taskkill /PID <pid> /T` to stop both.
 - Repeated FFmpeg failure is isolated to its room. Tunnel failures use bounded exponential restart backoff and do not stop LAN service.
 
 Version tags with or without the historical `v` prefix run the complete Windows and

@@ -1,3 +1,12 @@
+# Generates the app icons, favicons, .ico files and the brand logos from the
+# reference sheet. It does not write the social card: that image is owned by
+# scripts/generate-social-card.js.
+#
+# Run order: this script must run BEFORE generate-social-card.js whenever
+# public/brand/nextra-primary-logo.png changes, because the social card renders
+# that logo. Re-run generate-social-card.js after this script, then bump the ?v=
+# tag on the og:image and twitter:image URLs in index.html.
+
 param(
     [string]$ReferenceImage = 'C:\Users\me\Downloads\f579b7df-d60b-42db-9245-a5533c868e0d.png',
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -375,10 +384,7 @@ if (Test-Path $ReferenceImage) {
     $heroLogo = New-ComposedLogo -Mark $markTransparent -Tra $traTransparent -Width 1165 -Height 250 -MarkHeight 230 -WordHeight 98
     Save-Png -Bitmap $heroLogo -Path (Join-Path $brandDir 'nextra-hero-logo.png')
 
-    $heroSocial = New-ComposedLogo -Mark $markTransparent -Tra $traTransparent -Width 1200 -Height 630 -MarkHeight 230 -WordHeight 98 -UseBackground
-    Save-Png -Bitmap $heroSocial -Path (Join-Path $brandDir 'nextra-social-card.png')
-
-    foreach ($bitmap in @($appIconCrop, $appIconPadded, $appIcon, $faviconSource, $mark, $markTransparent, $tra, $traTransparent, $primaryLogo, $heroLogo, $heroSocial)) {
+    foreach ($bitmap in @($appIconCrop, $appIconPadded, $appIcon, $faviconSource, $mark, $markTransparent, $tra, $traTransparent, $primaryLogo, $heroLogo)) {
         $bitmap.Dispose()
     }
 

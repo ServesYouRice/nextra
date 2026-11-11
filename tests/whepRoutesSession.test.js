@@ -103,6 +103,56 @@ function listen(app) {
     });
 }
 
+/**
+ * Split an SDP into its session-level lines and its media sections.
+ * A section is { mline, lines }: the 'm=' line and the lines up to the next one.
+ * Lines are split on CRLF only, so an answer that uses bare LF stays one line and fails.
+ */
+function splitSdp(sdp) {
+    const session = [];
+    const sections = [];
+    let current = null;
+    for (const line of sdp.split('\r\n')) {
+        if (line === '') continue;
+        if (line.startsWith('m=')) {
+            current = { mline: line, lines: [] };
+            sections.push(current);
+        } else if (current) {
+            current.lines.push(line);
+        } else {
+            session.push(line);
+        }
+    }
+    return { session, sections };
+}
+
+/** The media kind and port of an 'm=<kind> <port> ...' line. */
+function parseMline(mline) {
+    const match = mline.match(/^m=(\S+) (\d+) /);
+    assert.ok(match, `malformed m-line: ${mline}`);
+    return { kind: match[1], port: Number(match[2]) };
+}
+
+/** The values of every 'a=<name>:<value>' line in a list, in order. */
+function attributeValues(lines, name) {
+    const prefix = `a=${name}:`;
+    return lines.filter((line) => line.startsWith(prefix)).map((line) => line.slice(prefix.length));
+}
+
+/** The direction attributes of a section (sendrecv, sendonly, recvonly, inactive). */
+function directionLines(lines) {
+    return lines.filter((line) => /^a=(sendrecv|sendonly|recvonly|inactive)$/.test(line));
+}
+
+/** The a=setup value a section answers with: its own, or the session-level one. */
+function effectiveSetup(session, section) {
+    const own = attributeValues(section.lines, 'setup');
+    assert.ok(own.length <= 1, `section has more than one a=setup line: ${own.join(', ')}`);
+    if (own.length === 1) return own[0];
+    const inherited = attributeValues(session, 'setup');
+    return inherited.length === 1 ? inherited[0] : undefined;
+}
+
 function createConfigurableHarness({
     onFactory = null,
     connectFails = false,
@@ -278,6 +328,41 @@ test('WHEP POST success with video and audio asserts contract, registration, and
         const sdpAnswer = await res.text();
         assert.match(sdpAnswer, /v=0/);
         assert.match(sdpAnswer, /a=sendonly/);
+
+        // One m-section per offered m-section, in offer order (video mid 0, audio mid 1)
+        assert.ok(!/(?<!\r)\n/.test(sdpAnswer), 'answer lines must end in CRLF');
+        const { session, sections } = splitSdp(sdpAnswer);
+        assert.equal(sections.length, 2);
+        assert.equal(session.filter((line) => line.startsWith('a=group:')).length, 1);
+        assert.ok(session.includes('a=group:BUNDLE 0 1'), `BUNDLE group: ${session.join(' | ')}`);
+
+        const [videoSection, audioSection] = sections;
+        const video = parseMline(videoSection.mline);
+        assert.equal(video.kind, 'video');
+        assert.notEqual(video.port, 0);
+        assert.deepEqual(attributeValues(videoSection.lines, 'mid'), ['0']);
+        assert.deepEqual(directionLines(videoSection.lines), ['a=sendonly']);
+        assert.ok(videoSection.lines.includes('a=ssrc:11111111 cname:whep'));
+        assert.deepEqual(attributeValues(videoSection.lines, 'ssrc').map((v) => v.split(' ')[0]), ['11111111']);
+
+        const audio = parseMline(audioSection.mline);
+        assert.equal(audio.kind, 'audio');
+        assert.notEqual(audio.port, 0);
+        assert.deepEqual(attributeValues(audioSection.lines, 'mid'), ['1']);
+        assert.deepEqual(directionLines(audioSection.lines), ['a=sendonly']);
+        assert.ok(audioSection.lines.includes('a=ssrc:22222222 cname:whep'));
+        assert.deepEqual(attributeValues(audioSection.lines, 'ssrc').map((v) => v.split(' ')[0]), ['22222222']);
+
+        // The remote DTLS role handed to mediasoup is 'client', so the answer is passive
+        // wherever it states a setup role, and states one for every section.
+        const allSetups = [
+            ...attributeValues(session, 'setup'),
+            ...sections.flatMap((section) => attributeValues(section.lines, 'setup')),
+        ];
+        assert.ok(allSetups.length > 0, 'answer states no a=setup');
+        assert.deepEqual([...new Set(allSetups)], ['passive']);
+        assert.equal(effectiveSetup(session, videoSection), 'passive');
+        assert.equal(effectiveSetup(session, audioSection), 'passive');
 
         assert.deepEqual(stats.factoryOptions, [{ purpose: 'whep' }]);
         assert.ok(stats.connectedDtls);
@@ -588,6 +673,37 @@ test('partial failure: audio consume() rejection continues as 201 video-only and
         });
 
         assert.equal(res.status, 201);
+
+        // The answer still has one m-section per offered m-section, in offer order. The
+        // audio section whose consume() failed is rejected in place (RFC 3264 section 6),
+        // carries no media and stays out of the BUNDLE group.
+        const sdpAnswer = await res.text();
+        assert.ok(!/(?<!\r)\n/.test(sdpAnswer), 'answer lines must end in CRLF');
+        const { session, sections } = splitSdp(sdpAnswer);
+        assert.equal(sections.length, 2);
+        assert.equal(session.filter((line) => line.startsWith('a=group:')).length, 1);
+        assert.ok(session.includes('a=group:BUNDLE 0'), `BUNDLE group: ${session.join(' | ')}`);
+
+        const [videoSection, audioSection] = sections;
+        const video = parseMline(videoSection.mline);
+        assert.equal(video.kind, 'video');
+        assert.notEqual(video.port, 0);
+        assert.deepEqual(attributeValues(videoSection.lines, 'mid'), ['0']);
+        assert.deepEqual(directionLines(videoSection.lines), ['a=sendonly']);
+        assert.deepEqual(attributeValues(videoSection.lines, 'ssrc').map((v) => v.split(' ')[0]), ['11111111']);
+        assert.equal(effectiveSetup(session, videoSection), 'passive');
+
+        const audio = parseMline(audioSection.mline);
+        assert.equal(audio.kind, 'audio');
+        assert.equal(audio.port, 0, `audio section is not rejected: ${audioSection.mline}`);
+        assert.deepEqual(attributeValues(audioSection.lines, 'mid'), ['1']);
+        assert.deepEqual(directionLines(audioSection.lines), ['a=inactive']);
+        assert.ok(!audioSection.lines.some((line) => line.startsWith('a=ssrc')), 'rejected audio section carries an SSRC');
+        assert.ok(!audioSection.lines.includes('a=sendonly'));
+        for (const setup of attributeValues(audioSection.lines, 'setup')) {
+            assert.equal(setup, 'passive');
+        }
+
         assert.equal(stats.videoResumes, 1);
         assert.equal(stats.audioResumes, 0);
         assert.equal(room.whepSessions.size, 1);

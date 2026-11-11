@@ -1,12 +1,18 @@
 import { useCallback } from 'react';
 import { createLifecycleController } from '../lib/lifecycleController.mjs';
+import { releaseSubscription } from '../lib/subscriptionLedger.mjs';
 
-/** Owns playback transports, consumers, relay subscriptions, media, and queues. */
-export function useViewerSessionController({ socket, refs, setPlaybackMode }) {
+/**
+ * Owns playback transports, consumers, relay subscriptions, media, and queues.
+ * The returned cleanup supersedes the playback attempt in flight (it moves
+ * activePlaybackAttemptRef on) before it releases what the refs hold.
+ */
+export function useViewerSessionController({ socket, refs, setPlaybackMode, subscriptionLedger }) {
     const {
         activePlaybackAttemptRef,
         fmp4PlayerRef,
         relaySubscribedRef,
+        relayClaimRef,
         relayCleanupRef,
         consumersRef,
         recvTransportRef,
@@ -15,8 +21,6 @@ export function useViewerSessionController({ socket, refs, setPlaybackMode }) {
         mediaStreamRef,
         mediaSourceRef,
         sourceBufferRef,
-        chunkQueueRef,
-        queuedBytesRef,
         userPausedRef,
         relayUnsupportedWarnedRef,
     } = refs;
@@ -27,8 +31,6 @@ export function useViewerSessionController({ socket, refs, setPlaybackMode }) {
         lifecycle.own('state', () => {
             mediaSourceRef.current = null;
             sourceBufferRef.current = null;
-            chunkQueueRef.current = [];
-            queuedBytesRef.current = 0;
             userPausedRef.current = false;
             relayUnsupportedWarnedRef.current = false;
             setPlaybackMode('');
@@ -65,7 +67,14 @@ export function useViewerSessionController({ socket, refs, setPlaybackMode }) {
             relayCleanupRef.current = null;
         });
         lifecycle.own('relay-subscription', () => {
-            if (relaySubscribedRef.current) socket.emit('relay-consume-stop');
+            // The committed claim of the attempt that subscribed. relay-consume-stop is
+            // socket-wide, so it goes out only while that claim is the latest start on
+            // the same, still connected socket.id (see subscriptionLedger.mjs).
+            const claim = relayClaimRef.current;
+            relayClaimRef.current = null;
+            if (relaySubscribedRef.current) {
+                releaseSubscription(subscriptionLedger, 'relay', claim, socket, 'relay-consume-stop');
+            }
             relaySubscribedRef.current = false;
         });
         lifecycle.own('fmp4-player', () => {
@@ -76,9 +85,11 @@ export function useViewerSessionController({ socket, refs, setPlaybackMode }) {
     }, [
         socket,
         setPlaybackMode,
+        subscriptionLedger,
         activePlaybackAttemptRef,
         fmp4PlayerRef,
         relaySubscribedRef,
+        relayClaimRef,
         relayCleanupRef,
         consumersRef,
         recvTransportRef,
@@ -87,8 +98,6 @@ export function useViewerSessionController({ socket, refs, setPlaybackMode }) {
         mediaStreamRef,
         mediaSourceRef,
         sourceBufferRef,
-        chunkQueueRef,
-        queuedBytesRef,
         userPausedRef,
         relayUnsupportedWarnedRef,
     ]);

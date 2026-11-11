@@ -1,0 +1,7 @@
+[20:35:44] run 1 (original spec, holder releases after test 1) exit 1
+[20:35:49] run 4a (original spec, other outputDir, stale tickets) exit 1
+[20:35:51] server readyz: {"status":"ready","components":{"http":{"required":true,"status":"ready"},"socketIo":{"required":true,"status":"ready"},
+[20:36:25] run 3 (playwright.config.mjs, fixed spec) exit 0
+[20:37:54] run 2 (fixed spec, holder releases after test 1) exit 1
+[20:37:57] run 4b (fixed spec, other outputDir, stale tickets) exit 0
+[20:37:59] cleanup done; port 3210 listener: ''; lock removed

@@ -1,0 +1,23 @@
+== lane netcheck at 109f819 (before the fix) ==
+﻿whep module: C:\Users\V\nextra-lanes\netcheck\lib\whep.js
+mediasoup 3.27.1
+{"offerSetup":"actpass","roleGivenToConnect":"client","mediasoupLocalRole":"server","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":false,"dtlsPacketsFromMediasoup":0,"answerSetup":["passive"],"answerMatchesMediasoup":true}
+{"offerSetup":"active","roleGivenToConnect":"client","mediasoupLocalRole":"server","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":false,"dtlsPacketsFromMediasoup":0,"answerSetup":["passive"],"answerMatchesMediasoup":true}
+{"offerSetup":"passive","roleGivenToConnect":"server","mediasoupLocalRole":"client","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":true,"dtlsPacketsFromMediasoup":5,"answerSetup":["passive"],"answerMatchesMediasoup":false}
+{"offerSetup":"(none)","roleGivenToConnect":"client","mediasoupLocalRole":"server","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":false,"dtlsPacketsFromMediasoup":0,"answerSetup":["passive"],"answerMatchesMediasoup":true}
+
+== lib/whep.js from ac1c688 (original code) ==
+﻿whep module: C:\Users\V\AppData\Local\Temp\claude\c--Users-V-arbitra\53025464-426b-4472-9c62-52c45e3849f5\scratchpad\netcheck-check-17-whep-ac1c688.js
+mediasoup 3.27.1
+{"offerSetup":"actpass","roleGivenToConnect":"client","mediasoupLocalRole":"server","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":false,"dtlsPacketsFromMediasoup":0,"answerSetup":["passive"],"answerMatchesMediasoup":true}
+{"offerSetup":"active","roleGivenToConnect":"client","mediasoupLocalRole":"server","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":false,"dtlsPacketsFromMediasoup":0,"answerSetup":["passive"],"answerMatchesMediasoup":true}
+{"offerSetup":"passive","roleGivenToConnect":"server","mediasoupLocalRole":"client","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":true,"dtlsPacketsFromMediasoup":5,"answerSetup":["passive"],"answerMatchesMediasoup":false}
+{"offerSetup":"(none)","roleGivenToConnect":"client","mediasoupLocalRole":"server","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":false,"dtlsPacketsFromMediasoup":0,"answerSetup":["passive"],"answerMatchesMediasoup":true}
+
+== after the fix (a863cb6) ==
+whep module: C:\Users\V\nextra-lanes\netcheck\lib\whep.js
+mediasoup 3.27.1
+{"offerSetup":"actpass","roleGivenToConnect":"client","mediasoupLocalRole":"server","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":false,"dtlsPacketsFromMediasoup":0,"answerSetup":["passive"],"answerMatchesMediasoup":true}
+{"offerSetup":"active","roleGivenToConnect":"client","mediasoupLocalRole":"server","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":false,"dtlsPacketsFromMediasoup":0,"answerSetup":["passive"],"answerMatchesMediasoup":true}
+{"offerSetup":"passive","roleGivenToConnect":"server","mediasoupLocalRole":"client","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":true,"dtlsPacketsFromMediasoup":5,"answerSetup":["active"],"answerMatchesMediasoup":true}
+{"offerSetup":"(none)","roleGivenToConnect":"client","mediasoupLocalRole":"server","iceState":"completed","dtlsState":"connecting","stunSuccessResponses":3,"mediasoupSentClientHello":false,"dtlsPacketsFromMediasoup":0,"answerSetup":["passive"],"answerMatchesMediasoup":true}

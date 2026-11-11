@@ -1,0 +1,49 @@
+== TASK-047 reproduction against the UNCHANGED run() in scripts/package-app.js (lane/package at 109f819; run only added to module.exports) ==
+== node TASK-047-repro.js <lane>/scripts/package-app.js ==
+platform: win32, node v22.14.0
+arguments given to run("node", [probe, ...]):
+  "C:\\Users\\A B\\proj & x\\.caxa-stage"
+  "C:\\Users\\A B\\proj & x\\Nextra.exe"
+  "C:\\Users\\A B\\AppData\\Local\\Temp (1)\\a^b|c\\nextra-caxa-stub-42.exe"
+  "--"
+  "{{caxa}}/server.js"
+line Node hands to cmd.exe under shell:true: node C:\Users\V\AppData\Local\Temp\package-TASK-047-repro-2b8zx4\probe.js C:\Users\A B\proj & x\.caxa-stage C:\Users\A B\proj & x\Nextra.exe C:\Users\A B\AppData\Local\Temp (1)\a^b|c\nextra-caxa-stub-42.exe -- {{caxa}}/server.js
+The system cannot find the path specified.
+The system cannot find the path specified.
+run() result: threw "node failed with code 255"
+the child received 2 arguments:
+  "C:\\Users\\A"
+  "B\\proj"
+identical to what was given: false
+
+== New tests on the unchanged code: node --test tests/packageApp.test.js ==
+not ok 49 - off Windows buildPackagerCommand returns the command and arguments as given, without a shell
+not ok 50 - on Windows npm ci runs as node plus npm_execpath, with no shell and its flags unchanged
+not ok 51 - on Windows an npm_execpath that is not npm's own CLI is not used to run npm ci
+not ok 52 - on Windows caxa runs as node plus its bin script, each path one argument, the -- and {{caxa}} placeholders verbatim
+not ok 53 - the Windows cmd.exe fallback double-quotes every argument, so spaces and & | ^ ( ) stay inside one argument
+not ok 54 - the Windows cmd.exe fallback refuses ", %, ! and line breaks instead of escaping them
+not ok 55 - getCaxaBinPath finds the bin caxa's package.json names, and node runs it as the caxa CLI
+not ok 56 - caxa started the Windows way receives a path with spaces, & ^ ( ), % and ! as one argument
+not ok 57 - npm ci started the Windows way keeps its flags and runs in a stage directory with spaces and & ( ) in its path
+not ok 58 - run passes path arguments with spaces and cmd.exe metacharacters to the child unchanged
+not ok 59 - run passes them unchanged through a .cmd shim built like npm.cmd
+not ok 60 - run still throws "<command> failed with code <status>" when the child exits non-zero
+# tests 60
+# pass 48
+# fail 12
+# skipped 0
+
+== Failure details of the three run() tests (the ones that exercise the unchanged spawn) ==
+not ok 58 - run passes path arguments with spaces and cmd.exe metacharacters to the child unchanged
+  error: 'C:\\Program Files\\nodejs\\node.exe failed with code 255'
+not ok 59 - run passes them unchanged through a .cmd shim built like npm.cmd
+  error: 'C:\\Users\\V\\AppData\\Local\\Temp\\nextra-download-test-eCxf6R\\A B (1) & x\\tool.cmd failed with code 255'
+not ok 60 - run still throws "<command> failed with code <status>" when the child exits non-zero
+    +   message: 'C:\\Program Files\\nodejs\\node.exe failed with code 1'
+    -   message: 'C:\\Program Files\\nodejs\\node.exe failed with code 3'
+    message: 'C:\\Program Files\\nodejs\\node.exe failed with code 3'
+
+== Tests 49-57 fail only because buildPackagerCommand / getCaxaBinPath do not exist in the unchanged code ==
+      8   error: 'buildPackagerCommand is not a function'
+      1   error: 'getCaxaBinPath is not a function'

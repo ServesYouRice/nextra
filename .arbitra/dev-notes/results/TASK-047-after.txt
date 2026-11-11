@@ -1,0 +1,20 @@
+== TASK-047 reproduction against the FIXED run() (same script, same arguments). The 'line Node hands to cmd.exe under shell:true' row only shows what the old option would have built; the fixed run() does not use shell:true. ==
+platform: win32, node v22.14.0
+arguments given to run("node", [probe, ...]):
+  "C:\\Users\\A B\\proj & x\\.caxa-stage"
+  "C:\\Users\\A B\\proj & x\\Nextra.exe"
+  "C:\\Users\\A B\\AppData\\Local\\Temp (1)\\a^b|c\\nextra-caxa-stub-42.exe"
+  "--"
+  "{{caxa}}/server.js"
+line Node hands to cmd.exe under shell:true: node C:\Users\V\AppData\Local\Temp\package-TASK-047-repro-9MHrG5\probe.js C:\Users\A B\proj & x\.caxa-stage C:\Users\A B\proj & x\Nextra.exe C:\Users\A B\AppData\Local\Temp (1)\a^b|c\nextra-caxa-stub-42.exe -- {{caxa}}/server.js
+run() result: returned
+the child received 5 arguments:
+  "C:\\Users\\A B\\proj & x\\.caxa-stage"
+  "C:\\Users\\A B\\proj & x\\Nextra.exe"
+  "C:\\Users\\A B\\AppData\\Local\\Temp (1)\\a^b|c\\nextra-caxa-stub-42.exe"
+  "--"
+  "{{caxa}}/server.js"
+identical to what was given: true
+
+== node --test tests/packageApp.test.js after the fix ==
+# tests 62 / pass 62 / fail 0

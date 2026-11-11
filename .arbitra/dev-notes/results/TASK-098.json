@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-58d755516428",
+    "title": "Disconnect-during-creation check waits a fixed 25 ms, likely shorter than the scrypt hash it races",
+    "severity": "medium",
+    "task": "TASK-098",
+    "result": "fixed",
+    "failedBefore": false,
+    "test": "tests/roomCreationConcurrency.test.js: 'pending room reservations bound capacity, duplicates, failure, disconnect, and replacement' (the disconnect part was rewritten; the capacity, duplicate, failure and replacement parts are unchanged)",
+    "proof": "The defect is in the test, so no new test can fail on unchanged production code; it was shown by mutation instead. In a scratch copy of dev 84c0dd9 with the post-prepare guard in the create-room handler of lib/socket.js removed ('if (!reservation.active || reservation.cancelled || socket.connected === false) {' replaced by 'if (false) {', so a room is wrongly committed for the disconnected host), the unchanged test still PASSED (pass 1, fail 0), with the real scrypt (about 42 ms here, 3 of 3 runs) and with crypto.scrypt delayed by 200 ms: the 25 ms sleep ended before the hash finished, so the room-count assertion ran before the code path it guards. Fix: prepareForTest now returns the deferred prepareRoom promise and records it in inFlightCreations; after releaseDeferred() the test awaits that promise (the real scrypt hash is done, asserted through passphraseHash) and yields one setImmediate for the handler's continuation, which has no further awaits after prepareRoom; then it asserts findRoomBySocket(second.id) and findRoomByCode(prepared.code) are null, the room count equals the baseline and the pending creation count is 0. The finally block awaits Promise.allSettled(inFlightCreations) and one setImmediate before destroying rooms, restoring config.MAX_ACTIVE_ROOMS, stopJoinCleanup and closing ioServer and httpServer. The setTimeout(resolve, 25) is gone and no timer wait remains in the disconnect case (waitFor, the existing 5 ms poll for the pending count, is unchanged). With the guard mutation the new test FAILS (3 of 3 runs with real scrypt, and with scrypt delayed 200 ms) at the assertion that the abandoned host has no room; against unmutated code it passes (5 of 5 runs, and with scrypt delayed 200 ms). Full suite: lint, typecheck and npm test pass, 771 of 771."
+  }
+]

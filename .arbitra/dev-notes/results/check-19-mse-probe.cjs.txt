@@ -1,0 +1,116 @@
+// node check-19-mse-probe.cjs <chromium|firefox> <gen1Mime> <gen2Mime> [burstMs...]
+// Probe for check 19: needs the Playwright lock. Records relay generations in a headless browser and replays them through a copy of WatchView.jsx relay logic (see check-19-mse-probe-page.js).
+const path = require('node:path');
+const fs = require('node:fs');
+const pw = require('C:/Users/V/nextra-lanes/client/node_modules/playwright');
+
+const [browserName = 'chromium', gen1Mime = 'video/webm;codecs=vp8,opus', gen2Mime = gen1Mime, ...burstArgs] = process.argv.slice(2);
+const bursts = burstArgs.length ? burstArgs.map(Number) : [0, 400, 700];
+const pageScript = fs.readFileSync(path.join(__dirname, 'check-19-mse-probe-page.js'), 'utf8');
+
+// ── container boundary analysis ──
+function readVint(buf, pos, keepMarker) {
+    const first = buf[pos];
+    if (first === undefined) return null;
+    let len = 1;
+    let mask = 0x80;
+    while (len <= 8 && !(first & mask)) { len += 1; mask >>= 1; }
+    if (len > 8 || pos + len > buf.length) return null;
+    let value = keepMarker ? first : (first & (mask - 1));
+    let allOnes = (first & (mask - 1)) === (mask - 1);
+    for (let i = 1; i < len; i += 1) {
+        value = value * 256 + buf[pos + i];
+        if (buf[pos + i] !== 0xff) allOnes = false;
+    }
+    return { value, len, unknown: !keepMarker && allOnes };
+}
+const MASTER = new Set([0x18538067, 0x1F43B675, 0xA0]);
+const LEVEL1 = new Set([0x114D9B74, 0x1549A966, 0x1654AE6B, 0x1F43B675, 0x1C53BB6B, 0x1941A469, 0x1043A770, 0x1254C367]);
+function webmElementStarts(buf) {
+    const starts = new Map();
+    // Walk: EBML header, then Segment (possibly unknown size), whose children may be unknown-size clusters.
+    let pos = 0;
+    const walk = (from, end, depth, parentId) => {
+        let p = from;
+        while (p < end) {
+            const id = readVint(buf, p, true);
+            if (!id) return p;
+            const size = readVint(buf, p + id.len, false);
+            if (!size) return p;
+            // An unknown-size cluster ends at the next level-1 element.
+            if (parentId === 0x1F43B675 && (LEVEL1.has(id.value) || id.value === 0x1A45DFA3)) return p;
+            starts.set(p, { id: id.value.toString(16), depth });
+            const dataStart = p + id.len + size.len;
+            if (MASTER.has(id.value)) {
+                const childEnd = size.unknown ? end : Math.min(end, dataStart + size.value);
+                const stop = walk(dataStart, childEnd, depth + 1, id.value);
+                p = size.unknown ? stop : dataStart + size.value;
+            } else {
+                p = dataStart + size.value;
+            }
+        }
+        return p;
+    };
+    pos = walk(0, buf.length, 0, 0);
+    return starts;
+}
+function mp4BoxStarts(buf) {
+    const starts = new Map();
+    let p = 0;
+    while (p + 8 <= buf.length) {
+        const size = buf.readUInt32BE(p);
+        const type = buf.toString('latin1', p + 4, p + 8);
+        starts.set(p, { id: type, depth: 0 });
+        if (size < 8) break;
+        p += size;
+    }
+    return starts;
+}
+function boundaryReport(b64, sizes, mime) {
+    const buf = Buffer.from(b64, 'base64');
+    const starts = mime.startsWith('video/mp4') ? mp4BoxStarts(buf) : webmElementStarts(buf);
+    console.log(`  ${starts.size} element starts parsed, last @${Math.max(...starts.keys())}`);
+    let off = 0;
+    const out = [];
+    for (const s of sizes) {
+        off += s;
+        if (off >= buf.length) break;
+        const hit = starts.get(off);
+        if (hit) { out.push(`@${off} ${hit.id}`); continue; }
+        const keys = [...starts.keys()].filter((k) => k < off);
+        const prev = keys.length ? Math.max(...keys) : -1;
+        out.push(`@${off} MID-ELEMENT in ${prev >= 0 ? starts.get(prev).id : '?'} started @${prev} (+${off - prev})`);
+    }
+    return { bytes: buf.length, chunks: sizes.length, boundaries: out };
+}
+
+(async () => {
+    const launchArgs = browserName === 'chromium'
+        ? { args: ['--autoplay-policy=no-user-gesture-required'] }
+        : { firefoxUserPrefs: { 'media.autoplay.default': 0, 'media.autoplay.blocking_policy': 0 } };
+    const browser = await pw[browserName].launch(launchArgs);
+    const page = await browser.newPage();
+    await page.setContent('<!doctype html><html><body></body></html>');
+    await page.addScriptTag({ content: pageScript });
+    const support = await page.evaluate(([a, b]) => ({
+        recorder: [MediaRecorder.isTypeSupported(a), MediaRecorder.isTypeSupported(b)],
+        mse: [MediaSource.isTypeSupported(a), MediaSource.isTypeSupported(b)],
+        changeType: typeof SourceBuffer.prototype.changeType,
+        ua: navigator.userAgent,
+    }), [gen1Mime, gen2Mime]);
+    console.log('support', JSON.stringify(support));
+    const events = await page.evaluate((opts) => window.recordRelay(opts), { gen1Mime, gen2Mime });
+    console.log('events', JSON.stringify(events));
+    for (const gen of [1, 2]) {
+        const { b64, sizes } = await page.evaluate((g) => window.getRelayBytes(g), gen);
+        const mime = gen === 1 ? gen1Mime : gen2Mime;
+        console.log(`gen${gen} boundaries`, JSON.stringify(boundaryReport(b64, sizes, mime)));
+    }
+    for (const mode of ['current', 'fixed']) {
+        for (const burstMs of bursts) {
+            const result = await page.evaluate((opts) => window.playRelay(opts), { mode, burstMs });
+            console.log('play', JSON.stringify(result));
+        }
+    }
+    await browser.close();
+})().catch((err) => { console.error(err); process.exit(1); });

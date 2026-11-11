@@ -1,0 +1,262 @@
+TAP version 13
+# Client connected: aDgjR5x6_XyymLpaAAAA
+# Client disconnected: aDgjR5x6_XyymLpaAAAA
+# Client connected: ARMQVpNm0MrooRE6AAAB
+# Client disconnected: ARMQVpNm0MrooRE6AAAB
+# Subtest: the socket handlers' own IP fallback skips the TRUST_PROXY hop count and honours only the explicit Cloudflare flag
+not ok 1 - the socket handlers' own IP fallback skips the TRUST_PROXY hop count and honours only the explicit Cloudflare flag
+  ---
+  duration_ms: 45.227
+  location: 'C:\\Users\\V\\nextra-lanes\\server\\tests\\forwardedClientIdentity.test.js:72:1'
+  failureType: 'testCodeFailure'
+  error: "second client behind the same proxies was rate-limited: it shared another client's bucket"
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual: 'Too many attempts. Wait 1 minute.'
+  operator: 'doesNotMatch'
+  stack: |-
+    assertAdmitted (C:\Users\V\nextra-lanes\server\tests\forwardedClientIdentity.test.js:57:12)
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\server\tests\forwardedClientIdentity.test.js:93:5)
+    process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    async Test.run (node:internal/test_runner/test:980:9)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: the WHEP router's own IP fallback skips the TRUST_PROXY hop count and honours only the explicit Cloudflare flag
+not ok 2 - the WHEP router's own IP fallback skips the TRUST_PROXY hop count and honours only the explicit Cloudflare flag
+  ---
+  duration_ms: 20.5985
+  location: 'C:\\Users\\V\\nextra-lanes\\server\\tests\\forwardedClientIdentity.test.js:108:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    a second client behind the same proxies shared the first one's bucket
+    
+    429 !== 404
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 404
+  actual: 429
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\server\tests\forwardedClientIdentity.test.js:134:12)
+    process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    async Test.run (node:internal/test_runner/test:980:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: VAL-132 on the real server: behind a SHARE_BASE_URL proxy a client-supplied CF-Connecting-IP never names the client
+not ok 3 - VAL-132 on the real server: behind a SHARE_BASE_URL proxy a client-supplied CF-Connecting-IP never names the client
+  ---
+  duration_ms: 855.0579
+  location: 'C:\\Users\\V\\nextra-lanes\\server\\tests\\forwardedClientIdentity.test.js:250:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    CF-Connecting-IP 127.0.0.1 through a non-Cloudflare proxy was taken as a local client
+    
+    200 !== 403
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 403
+  actual: 200
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\server\tests\forwardedClientIdentity.test.js:257:16)
+    process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    async Test.run (node:internal/test_runner/test:980:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: VAL-146 on the real server: TRUST_CLOUDFLARE_CONNECTING_IP=true gives each Cloudflare viewer its own identity
+ok 4 - VAL-146 on the real server: TRUST_CLOUDFLARE_CONNECTING_IP=true gives each Cloudflare viewer its own identity
+  ---
+  duration_ms: 875.5716
+  ...
+# Subtest: VAL-146 on the real server: Nextra's own quick tunnel reads CF-Connecting-IP, other loopback relays do not
+not ok 5 - VAL-146 on the real server: Nextra's own quick tunnel reads CF-Connecting-IP, other loopback relays do not
+  ---
+  duration_ms: 862.6125
+  location: 'C:\\Users\\V\\nextra-lanes\\server\\tests\\forwardedClientIdentity.test.js:279:1'
+  failureType: 'testCodeFailure'
+  error: 'relayed attempt with a new CF-Connecting-IP was not rate-limited: it got a bucket of its own'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual: 'Room not found.'
+  operator: 'match'
+  stack: |-
+    assertRateLimited (C:\Users\V\nextra-lanes\server\tests\forwardedClientIdentity.test.js:62:12)
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\server\tests\forwardedClientIdentity.test.js:290:5)
+    process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    async Test.run (node:internal/test_runner/test:980:9)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: VAL-075: a loopback request for the share host without Origin or Referer is not the operator, whatever the scheme
+ok 6 - VAL-075: a loopback request for the share host without Origin or Referer is not the operator, whatever the scheme
+  ---
+  duration_ms: 4.3969
+  ...
+# Subtest: VAL-076: Cloudflare's headers from loopback are a relay even with a local Origin and Host
+ok 7 - VAL-076: Cloudflare's headers from loopback are a relay even with a local Origin and Host
+  ---
+  duration_ms: 0.4787
+  ...
+# Subtest: VAL-077: the host's own browser on this machine stays the operator
+ok 8 - VAL-077: the host's own browser on this machine stays the operator
+  ---
+  duration_ms: 0.2106
+  ...
+# Subtest: VAL-078: a direct client that claims the share host cannot choose its identity with cf-connecting-ip
+ok 9 - VAL-078: a direct client that claims the share host cannot choose its identity with cf-connecting-ip
+  ---
+  duration_ms: 0.1216
+  ...
+# Subtest: VAL-079: viewers through the tunnel keep their own identities, never a local one
+ok 10 - VAL-079: viewers through the tunnel keep their own identities, never a local one
+  ---
+  duration_ms: 0.2106
+  ...
+# Subtest: configured forwarded-header trust is unchanged
+ok 11 - configured forwarded-header trust is unchanged
+  ---
+  duration_ms: 0.4972
+  ...
+# Subtest: VAL-145: with forwarded-header trust the client is the rightmost X-Forwarded-For entry, never a spoofed one
+ok 12 - VAL-145: with forwarded-header trust the client is the rightmost X-Forwarded-For entry, never a spoofed one
+  ---
+  duration_ms: 0.3446
+  ...
+# Subtest: VAL-145: a request relayed with CF-Connecting-IP but no X-Forwarded-For is never loopback or trusted-LAN
+ok 13 - VAL-145: a request relayed with CF-Connecting-IP but no X-Forwarded-For is never loopback or trusted-LAN
+  ---
+  duration_ms: 0.2496
+  ...
+# Subtest: Nextra's own tunnel is the one place CF-Connecting-IP is read; a spoofed X-Forwarded-For entry still is not
+ok 14 - Nextra's own tunnel is the one place CF-Connecting-IP is read; a spoofed X-Forwarded-For entry still is not
+  ---
+  duration_ms: 0.3107
+  ...
+# Subtest: the TRUST_PROXY hop count is skipped from the right of X-Forwarded-For
+ok 15 - the TRUST_PROXY hop count is skipped from the right of X-Forwarded-For
+  ---
+  duration_ms: 0.3477
+  ...
+# Subtest: VAL-132: behind a SHARE_BASE_URL proxy a client-supplied CF-Connecting-IP never chooses the client
+not ok 16 - VAL-132: behind a SHARE_BASE_URL proxy a client-supplied CF-Connecting-IP never chooses the client
+  ---
+  duration_ms: 0.7301
+  location: 'C:\\Users\\V\\nextra-lanes\\server\\tests\\requestIdentity.test.js:133:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    trustForwarded=false cf-connecting-ip=127.0.0.1
+    + actual - expected
+    
+    + '127.0.0.1'
+    - '203.0.113.20'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: '203.0.113.20'
+  actual: '127.0.0.1'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\server\tests\requestIdentity.test.js:142:20)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: VAL-146: CF-Connecting-IP is read for Nextra's own running tunnel and under TRUST_CLOUDFLARE_CONNECTING_IP only
+not ok 17 - VAL-146: CF-Connecting-IP is read for Nextra's own running tunnel and under TRUST_CLOUDFLARE_CONNECTING_IP only
+  ---
+  duration_ms: 0.2565
+  location: 'C:\\Users\\V\\nextra-lanes\\server\\tests\\requestIdentity.test.js:152:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+    
+    + '203.0.113.9'
+    - '198.51.100.40'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: '198.51.100.40'
+  actual: '203.0.113.9'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\server\tests\requestIdentity.test.js:164:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: the rate-limit bucket of a relay forwarded headers do not cover comes from CF-Connecting-IP only under a Cloudflare mode
+not ok 18 - the rate-limit bucket of a relay forwarded headers do not cover comes from CF-Connecting-IP only under a Cloudflare mode
+  ---
+  duration_ms: 0.1932
+  location: 'C:\\Users\\V\\nextra-lanes\\server\\tests\\requestIdentity.test.js:191:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    203.0.113.9
+    + actual - expected
+    
+    + 'public-share:203.0.113.9'
+    - 'public-share-proxy'
+                   ^
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'public-share-proxy'
+  actual: 'public-share:203.0.113.9'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\server\tests\requestIdentity.test.js:196:16)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+1..18
+# tests 18
+# suites 0
+# pass 11
+# fail 7
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3212.6013
+TAP version 13
+# Subtest: VAL-146 on the real server: TRUST_CLOUDFLARE_CONNECTING_IP=true gives each Cloudflare viewer its own identity
+not ok 1 - VAL-146 on the real server: TRUST_CLOUDFLARE_CONNECTING_IP=true gives each Cloudflare viewer its own identity
+  ---
+  duration_ms: 893.0198
+  location: 'C:\\Users\\V\\nextra-lanes\\server\\tests\\forwardedClientIdentity.test.js:270:1'
+  failureType: 'testCodeFailure'
+  error: "second viewer was rate-limited: it shared another client's bucket"
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  actual: 'Too many attempts. Wait 1 minute.'
+  operator: 'doesNotMatch'
+  stack: |-
+    assertAdmitted (C:\Users\V\nextra-lanes\server\tests\forwardedClientIdentity.test.js:57:12)
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\server\tests\forwardedClientIdentity.test.js:278:5)
+    process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    async Test.run (node:internal/test_runner/test:980:9)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 0
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1614.206

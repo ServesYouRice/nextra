@@ -1,0 +1,97 @@
+// Check 14 probe: does a non-Chromium engine return display/tab audio from
+// getDisplayMedia when the page asks for it? Runs each Playwright engine on a
+// routed https page (secure context, no port bound) and calls getDisplayMedia
+// from a real click with the options HostView.jsx builds, plus audio requested.
+const { chromium, firefox, webkit } = require('C:/Users/V/nextra/node_modules/playwright-core');
+
+const HTML = `<!doctype html><html><head><title>probe</title></head><body>
+<button id="go">go</button>
+<script>
+window.results = [];
+document.getElementById('go').addEventListener('click', async () => {
+  const { label, opts, api } = window.nextCase;
+  const entry = { label, opts: JSON.stringify(opts) };
+  try {
+    const md = navigator.mediaDevices;
+    const s = api === 'gum' ? await md.getUserMedia(opts) : await md.getDisplayMedia(opts);
+    entry.tracks = s.getTracks().map((t) => t.kind + (t.label ? ' (' + t.label + ')' : ''));
+    s.getTracks().forEach((t) => t.stop());
+  } catch (e) {
+    entry.error = e.name + ': ' + e.message;
+  }
+  window.results.push(entry);
+});
+</script></body></html>`;
+
+// HostView.jsx (bfe4d26 and ac1c688) builds these two option sets.
+const video = { width: 1920, height: 1080, frameRate: 30 };
+const CASES = [
+    { label: 'getUserMedia audio (control: engine has an audio source)', api: 'gum', opts: { audio: true } },
+    { label: 'HostView non-Chromium options (audio: false)', api: 'gdm', opts: { video, audio: false } },
+    { label: 'HostView Chromium options (audio {channelCount:2}, systemAudio include)', api: 'gdm', opts: { video, audio: { channelCount: 2 }, systemAudio: 'include' } },
+    { label: 'audio: true', api: 'gdm', opts: { video: true, audio: true } },
+    { label: 'audio {channelCount:2}', api: 'gdm', opts: { video: true, audio: { channelCount: 2 } } },
+];
+
+async function probe(name, launcher, launchOptions, contextOptions = {}, extra = {}) {
+    let browser;
+    const out = { engine: name };
+    try {
+        browser = await launcher.launch({ headless: true, ...launchOptions });
+        out.version = browser.version();
+        const context = await browser.newContext({ ignoreHTTPSErrors: true, ...contextOptions });
+        if (extra.grant) await context.grantPermissions(extra.grant, { origin: 'https://probe.test' }).catch((e) => { out.grantError = e.message; });
+        const page = await context.newPage();
+        await page.route('https://probe.test/**', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: HTML }));
+        await page.goto('https://probe.test/');
+        out.env = await page.evaluate(() => {
+            const isChromiumBrand = !!navigator.userAgentData?.brands?.some((b) => /Chrom/i.test(b.brand));
+            const isChromium = isChromiumBrand || /Chrome|Chromium|Edg\//i.test(navigator.userAgent || '');
+            return {
+                userAgent: navigator.userAgent,
+                secureContext: window.isSecureContext,
+                getDisplayMedia: typeof navigator.mediaDevices?.getDisplayMedia,
+                hostViewIsChromium: isChromium,
+            };
+        });
+        for (const c of CASES) {
+            await page.evaluate((nc) => { window.nextCase = nc; }, c);
+            const before = await page.evaluate(() => window.results.length);
+            await page.click('#go');
+            await page.waitForFunction((n) => window.results.length > n, before, { timeout: 15000 }).catch(() => {});
+        }
+        out.results = await page.evaluate(() => window.results);
+        await context.close();
+    } catch (e) {
+        out.error = e.message.split('\n')[0];
+    } finally {
+        if (browser) await browser.close().catch(() => {});
+    }
+    return out;
+}
+
+(async () => {
+    const runs = [];
+    runs.push(await probe('firefox (fake media streams)', firefox, {
+        firefoxUserPrefs: {
+            'media.navigator.permission.disabled': true,
+            'media.navigator.streams.fake': true,
+        },
+    }));
+    runs.push(await probe('firefox (real devices, prompts disabled)', firefox, {
+        firefoxUserPrefs: {
+            'media.navigator.permission.disabled': true,
+        },
+    }));
+    runs.push(await probe('webkit', webkit, {}, {}, { grant: ['microphone', 'camera'] }));
+    runs.push(await probe('chromium (control)', chromium, {
+        channel: 'chromium',
+        args: [
+            '--use-fake-ui-for-media-stream',
+            '--use-fake-device-for-media-stream',
+            '--auto-accept-this-tab-capture',
+            '--auto-select-desktop-capture-source=Entire screen',
+        ],
+    }));
+    console.log(JSON.stringify(runs, null, 2));
+})();

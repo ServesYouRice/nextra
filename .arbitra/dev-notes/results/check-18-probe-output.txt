@@ -1,0 +1,62 @@
+### current lane code (4daa571) (C:/Users/V/nextra-lanes/depack/src/lib/obsWebSocket.js)
+
+S0 OBS idle; setup fails (no AV1 encoder)
+  result: success=false message="No AV1 OBS encoders were configured for this host. OBS settings were restored. Disable AV1 mode and retry to use H.264."
+  requests: GetStreamServiceSettings | SetStreamServiceSettings -> http://127.0.0.1:8889/whip/ROOM | StartStream at http://127.0.0.1:8889/whip/ROOM | StopStream (was active at http://127.0.0.1:8889/whip/ROOM) | SetStreamServiceSettings -> rtmp://live.example/app | close
+  before: stream idle at rtmp://live.example/app
+  after:  stream idle at rtmp://live.example/app
+
+S1 OBS live at its own target; setup fails (no AV1 encoder)
+  result: success=false message="No AV1 OBS encoders were configured for this host. OBS settings were restored. Disable AV1 mode and retry to use H.264."
+  requests: StopStream (was active at rtmp://live.example/app) | GetStreamServiceSettings | SetStreamServiceSettings -> http://127.0.0.1:8889/whip/ROOM | SetStreamServiceSettings -> rtmp://live.example/app | StartStream at rtmp://live.example/app | close
+  before: stream active at rtmp://live.example/app
+  after:  stream active at rtmp://live.example/app
+
+S2 OBS live at its own target; autoStart to the Nextra WHIP target, which refuses the stream
+  result: success=false message="OBS configured, but streaming stopped immediately. Check the WHIP URL and local Nextra server status."
+  requests: StopStream (was active at rtmp://live.example/app) | GetStreamServiceSettings | SetStreamServiceSettings -> http://127.0.0.1:8889/whip/ROOM | StartStream at http://127.0.0.1:8889/whip/ROOM | StopStream (was idle at http://127.0.0.1:8889/whip/ROOM) | SetStreamServiceSettings -> rtmp://live.example/app | StartStream at rtmp://live.example/app | close
+  before: stream active at rtmp://live.example/app
+  after:  stream active at rtmp://live.example/app
+
+S3 OBS retrying an earlier target (reconnecting); setup fails (no AV1 encoder)
+  result: success=false message="No AV1 OBS encoders were configured for this host. OBS settings were restored. Disable AV1 mode and retry to use H.264."
+  requests: StopStream (was active at rtmp://live.example/app) | GetStreamServiceSettings | SetStreamServiceSettings -> http://127.0.0.1:8889/whip/ROOM | StartStream at http://127.0.0.1:8889/whip/ROOM | StopStream (was active at http://127.0.0.1:8889/whip/ROOM) | SetStreamServiceSettings -> rtmp://live.example/app | StartStream at rtmp://live.example/app | close
+  before: stream active at rtmp://live.example/app
+  after:  stream active at rtmp://live.example/app
+
+S4 OBS live at its own target; the video settings are refused (bad resolution)
+  result: success=true message="OBS configured: previous stream stopped, WHIP URL + token. Warnings: resolution (invalid resolution). Click \"Start Streaming\" in OBS."
+  requests: StopStream (was active at rtmp://live.example/app) | GetStreamServiceSettings | SetStreamServiceSettings -> http://127.0.0.1:8889/whip/ROOM | SetVideoSettings (refused) | close
+  before: stream active at rtmp://live.example/app
+  after:  stream idle at http://127.0.0.1:8889/whip/ROOM
+### original code (ac1c688) (C:/Users/V/AppData/Local/Temp/claude/c--Users-V-arbitra/53025464-426b-4472-9c62-52c45e3849f5/scratchpad/depack-check18-orig/src/lib/obsWebSocket.js)
+
+S0 OBS idle; setup fails (no AV1 encoder)
+  result: success=false message="No AV1 OBS encoders were configured for this host. OBS settings were restored. Disable AV1 mode and retry to use H.264."
+  requests: GetStreamServiceSettings | SetStreamServiceSettings -> http://127.0.0.1:8889/whip/ROOM | StartStream at http://127.0.0.1:8889/whip/ROOM | StopStream (was active at http://127.0.0.1:8889/whip/ROOM) | SetStreamServiceSettings -> rtmp://live.example/app | close
+  before: stream idle at rtmp://live.example/app
+  after:  stream idle at rtmp://live.example/app
+
+S1 OBS live at its own target; setup fails (no AV1 encoder)
+  result: success=false message="No AV1 OBS encoders were configured for this host. OBS settings were restored. Disable AV1 mode and retry to use H.264."
+  requests: StopStream (was active at rtmp://live.example/app) | GetStreamServiceSettings | SetStreamServiceSettings -> http://127.0.0.1:8889/whip/ROOM | SetStreamServiceSettings -> rtmp://live.example/app | StartStream at rtmp://live.example/app | close
+  before: stream active at rtmp://live.example/app
+  after:  stream active at rtmp://live.example/app
+
+S2 OBS live at its own target; autoStart to the Nextra WHIP target, which refuses the stream
+  result: success=false message="OBS configured, but streaming stopped immediately. Check the WHIP URL and local Nextra server status. Rollback incomplete: StopStream: not active"
+  requests: StopStream (was active at rtmp://live.example/app) | GetStreamServiceSettings | SetStreamServiceSettings -> http://127.0.0.1:8889/whip/ROOM | StartStream at http://127.0.0.1:8889/whip/ROOM | StopStream (was idle at http://127.0.0.1:8889/whip/ROOM) | SetStreamServiceSettings -> rtmp://live.example/app | StartStream at rtmp://live.example/app | close
+  before: stream active at rtmp://live.example/app
+  after:  stream active at rtmp://live.example/app
+
+S3 OBS retrying an earlier target (reconnecting); setup fails (no AV1 encoder)
+  result: success=false message="No AV1 OBS encoders were configured for this host. OBS settings were restored. Disable AV1 mode and retry to use H.264."
+  requests: StopStream (was active at rtmp://live.example/app) | GetStreamServiceSettings | SetStreamServiceSettings -> http://127.0.0.1:8889/whip/ROOM | StartStream at http://127.0.0.1:8889/whip/ROOM | StopStream (was active at http://127.0.0.1:8889/whip/ROOM) | SetStreamServiceSettings -> rtmp://live.example/app | StartStream at rtmp://live.example/app | close
+  before: stream active at rtmp://live.example/app
+  after:  stream active at rtmp://live.example/app
+
+S4 OBS live at its own target; the video settings are refused (bad resolution)
+  result: success=true message="OBS configured: previous stream stopped, WHIP URL + token. Warnings: resolution (invalid resolution). Click \"Start Streaming\" in OBS."
+  requests: StopStream (was active at rtmp://live.example/app) | GetStreamServiceSettings | SetStreamServiceSettings -> http://127.0.0.1:8889/whip/ROOM | SetVideoSettings (refused) | close
+  before: stream active at rtmp://live.example/app
+  after:  stream idle at http://127.0.0.1:8889/whip/ROOM

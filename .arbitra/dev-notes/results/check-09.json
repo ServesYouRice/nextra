@@ -1,0 +1,12 @@
+[
+ {
+  "issue": "C-a06046ad25c1",
+  "title": "Coverage gate calculates directory depth incorrectly causing double slashes and universal target misses",
+  "severity": "high",
+  "task": "check 09",
+  "result": "no_change_needed",
+  "failedBefore": false,
+  "test": "`node scripts/coverage-gate.js` (the gate itself, on Node 22.14.0), plus a scratch harness that preloads a spawnSync stub (`node -r scripts-check-09-stub.js.txt scripts/coverage-gate.js`) so the unchanged gate parses canned reports: the real Node 22.14 report, the same report with 2 spaces per level as the claim describes, a flat report with backslash paths, and the real report with lifecycleController.mjs lines lowered to 50%",
+  "proof": "The claim does not hold. Node's coverage report indents one space per tree level, not two: the reporter source embedded in node.exe 22.14.0 builds each row as `${prefix}${StringPrototypeRepeat(' ', depth)}${getCell(file, filePadLength - depth, ...)}` and recurses with depth + 1, and the real report reads '# lib', '#  roomMediaPipeline.js', '# src', '#  lib', '#   lifecycleController.mjs'. So rawName's leading-space count is 0, 1, 2, pathAtDepth stays dense, and the joined paths are 'lib/roomMediaPipeline.js' and 'src/lib/lifecycleController.mjs', which are in targets. `node scripts/coverage-gate.js` exits 0 with 'Coverage thresholds passed for 4 runtime files.' (52 tests pass). The harness shows the gate is not passing vacuously: lowering lifecycleController.mjs lines to 50% gives 'src/lib/lifecycleController.mjs: lines 50% is below 70%' and exit 1, and the flat backslash layout also passes. Only the claim's hypothetical 2-space report reproduces the described misses ('no coverage result' for all four targets, exit 1), i.e. the gate would fail closed, never pass silently. Not real on the original code either: `git diff ac1c688 HEAD -- scripts/coverage-gate.js` is empty, and the report format comes from Node (package.json engines >=22.0.0; 22.14.0 is the only Node on this machine). No file changed."
+ }
+]

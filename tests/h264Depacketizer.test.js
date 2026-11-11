@@ -93,7 +93,8 @@ test('SPS/PPS are cached and injected before each IDR', () => {
 
     // An IDR slice (type 5) arrives without in-band parameter sets.
     const idr = Buffer.concat([Buffer.from([0x65]), Buffer.from([1, 2, 3, 4])]);
-    const out = d.push(rtp(idr, { marker: true }));
+    // It belongs to a later access unit than the parameter sets, so it has a timestamp of its own.
+    const out = d.push(rtp(idr, { marker: true, timestamp: 3000 }));
     // Expect SPS, PPS, then the IDR — parameter sets injected ahead of the keyframe.
     assert.deepEqual(nalTypes(out), [7, 8, 5]);
 });
@@ -118,8 +119,8 @@ test('pushFrames returns whole frames, ended by the marker bit', () => {
     assert.equal(keyframe.timestamp, 9000);
     assert.equal(keyframe.keyframe, true);
     assert.equal(keyframe.intact, true);
-    // Parameter sets go in before each IDR slice.
-    assert.deepEqual(nalTypes(keyframe.data), [7, 8, 5, 7, 8, 5]);
+    // Parameter sets go in once, before the first IDR slice of the access unit.
+    assert.deepEqual(nalTypes(keyframe.data), [7, 8, 5, 5]);
 
     const [delta] = d.pushFrames(rtp(slice, { sequence: 3, timestamp: 12000, marker: true }));
     assert.equal(delta.timestamp, 12000);
@@ -155,4 +156,472 @@ test('pushFrames carries the damage forward when a frame is lost entirely', () =
     assert.deepEqual(d.pushFrames(rtp(end, { sequence: 4, timestamp: 6000, marker: true })), []);
     // ...and the frame after it, which depends on it, is the one reported.
     assert.equal(d.pushFrames(rtp(slice, { sequence: 5, timestamp: 9000, marker: true }))[0].intact, false);
+});
+
+// --- Frame-integrity attribution when packets go missing (VAL-003, VAL-004) ---
+
+const SLICE = Buffer.from([0x41, 0xbb]);
+
+test('VAL-003: a lost marker packet flags the damaged frame, not its successor', () => {
+    const d = new H264Depacketizer();
+    // Frame A is a two-packet frame whose second (marker) packet, sequence 2, never arrives.
+    assert.deepEqual(d.pushFrames(rtp(SLICE, { sequence: 1, timestamp: 3000 })), []);
+    // The first packet of frame B ends frame A by its new timestamp.
+    const atTransition = d.pushFrames(rtp(SLICE, { sequence: 3, timestamp: 6000, marker: true }));
+    assert.deepEqual(atTransition.map((frame) => [frame.timestamp, frame.intact]), [[3000, false], [6000, true]]);
+    // Nothing after it is affected.
+    assert.equal(d.pushFrames(rtp(SLICE, { sequence: 4, timestamp: 9000, marker: true }))[0].intact, true);
+});
+
+test('VAL-004 (a): one packet missing where a frame never saw its marker damages only that frame', () => {
+    const d = new H264Depacketizer();
+    d.pushFrames(rtp(SLICE, { sequence: 1, timestamp: 3000, marker: true }));
+    assert.deepEqual(d.pushFrames(rtp(SLICE, { sequence: 2, timestamp: 6000 })), []);
+    // Sequence 3, the marker packet of the 6000 frame, is lost; the next frame starts at 4.
+    assert.deepEqual(d.pushFrames(rtp(SLICE, { sequence: 4, timestamp: 9000 })).map((frame) => [frame.timestamp, frame.intact]), [[6000, false]]);
+    const [last] = d.pushFrames(rtp(SLICE, { sequence: 5, timestamp: 9000, marker: true }));
+    assert.equal(last.timestamp, 9000);
+    assert.equal(last.intact, true);
+});
+
+test('VAL-004 (b): more than one packet missing where a frame never saw its marker damages both frames', () => {
+    const d = new H264Depacketizer();
+    d.pushFrames(rtp(SLICE, { sequence: 1, timestamp: 3000, marker: true }));
+    assert.deepEqual(d.pushFrames(rtp(SLICE, { sequence: 2, timestamp: 6000 })), []);
+    // Sequence 3 and 4 are lost: the tail of frame 6000 and, possibly, the head of frame 9000.
+    const frames = d.pushFrames(rtp(SLICE, { sequence: 5, timestamp: 9000, marker: true }));
+    assert.deepEqual(frames.map((frame) => [frame.timestamp, frame.intact]), [[6000, false], [9000, false]]);
+    // The damage does not outlive the frame it belongs to.
+    assert.equal(d.pushFrames(rtp(SLICE, { sequence: 6, timestamp: 12000, marker: true }))[0].intact, true);
+});
+
+test('VAL-004 (c): packets missing after a frame that closed on its marker damage the next frame', () => {
+    const d = new H264Depacketizer();
+    const [closed] = d.pushFrames(rtp(SLICE, { sequence: 1, timestamp: 3000, marker: true }));
+    assert.equal(closed.intact, true);
+    // Sequence 2 is lost, and frame 3000 had already ended on its marker.
+    const [next] = d.pushFrames(rtp(SLICE, { sequence: 3, timestamp: 6000, marker: true }));
+    assert.equal(next.timestamp, 6000);
+    assert.equal(next.intact, false);
+    assert.equal(d.pushFrames(rtp(SLICE, { sequence: 4, timestamp: 9000, marker: true }))[0].intact, true);
+});
+
+test('VAL-004 (d): a gap inside a frame, with no timestamp change, damages that frame', () => {
+    const d = new H264Depacketizer();
+    d.pushFrames(rtp(SLICE, { sequence: 1, timestamp: 3000, marker: true }));
+    assert.deepEqual(d.pushFrames(rtp(SLICE, { sequence: 2, timestamp: 6000 })), []);
+    // Sequence 3 is lost in the middle of the 6000 frame, whose marker does arrive.
+    const [damaged] = d.pushFrames(rtp(SLICE, { sequence: 4, timestamp: 6000, marker: true }));
+    assert.equal(damaged.timestamp, 6000);
+    assert.equal(damaged.intact, false);
+    assert.equal(d.pushFrames(rtp(SLICE, { sequence: 5, timestamp: 9000, marker: true }))[0].intact, true);
+});
+
+test('pushFrames keeps a frame intact when its marker is missing but no packet is', () => {
+    // Some senders never set the marker bit; the timestamp change alone ends the frame.
+    const d = new H264Depacketizer();
+    d.pushFrames(rtp(SLICE, { sequence: 1, timestamp: 3000 }));
+    const frames = d.pushFrames(rtp(SLICE, { sequence: 2, timestamp: 6000 }));
+    assert.deepEqual(frames.map((frame) => [frame.timestamp, frame.intact]), [[3000, true]]);
+    const later = d.pushFrames(rtp(SLICE, { sequence: 3, timestamp: 9000 }));
+    assert.deepEqual(later.map((frame) => [frame.timestamp, frame.intact]), [[6000, true]]);
+});
+
+test('pushFrames counts a sequence number wrap as contiguous and a gap across it as missing', () => {
+    const d = new H264Depacketizer();
+    d.pushFrames(rtp(SLICE, { sequence: 65534, timestamp: 3000 }));
+    const wrapped = d.pushFrames(rtp(SLICE, { sequence: 65535, timestamp: 3000, marker: true }));
+    assert.equal(wrapped[0].intact, true);
+    // Sequence 0 is lost across the wrap.
+    assert.equal(d.pushFrames(rtp(SLICE, { sequence: 1, timestamp: 6000, marker: true }))[0].intact, false);
+});
+
+test('a frame whose fragments vanish at a lost marker still marks the following frame', () => {
+    const d = new H264Depacketizer();
+    d.pushFrames(rtp(SLICE, { sequence: 1, timestamp: 3000, marker: true }));
+    // Only the start of a fragmented frame arrives; its end and marker packet (sequence 3) are lost.
+    assert.deepEqual(d.pushFrames(rtp(Buffer.from([0x7c, 0x81, 0xcc]), { sequence: 2, timestamp: 6000 })), []);
+    assert.equal(d.pushFrames(rtp(SLICE, { sequence: 4, timestamp: 9000, marker: true }))[0].intact, false);
+    assert.equal(d.pushFrames(rtp(SLICE, { sequence: 5, timestamp: 12000, marker: true }))[0].intact, true);
+});
+
+// --- Bounded reassembly memory (VAL-005) ---
+
+// FU-A packet payloads: `size` bytes of body after the two FU bytes.
+const fuStart = (size) => Buffer.concat([Buffer.from([0x7c, 0x81]), Buffer.alloc(size, 0xaa)]);
+const fuMiddle = (size) => Buffer.concat([Buffer.from([0x7c, 0x01]), Buffer.alloc(size, 0xbb)]);
+const fuEnd = (size) => Buffer.concat([Buffer.from([0x7c, 0x41]), Buffer.alloc(size, 0xcc)]);
+// A complete single-NAL packet of `size` bytes (it becomes size + 4 bytes of Annex-B).
+const nalOf = (size) => Buffer.concat([Buffer.from([0x41]), Buffer.alloc(size - 1, 0xdd)]);
+
+test('VAL-005: a fragmented NAL over the byte limit is dropped instead of growing without end', () => {
+    const d = new H264Depacketizer({ maxNalBytes: 50 });
+    // NAL header + 20 + 20 = 41 bytes so far, then 61 > 50.
+    assert.equal(d.push(rtp(fuStart(20), { sequence: 1, timestamp: 3000 })).length, 0);
+    assert.equal(d.push(rtp(fuMiddle(20), { sequence: 2, timestamp: 3000 })).length, 0);
+    assert.equal(d.push(rtp(fuMiddle(20), { sequence: 3, timestamp: 3000 })).length, 0);
+    // The end of the NAL would have completed it; it was dropped, so nothing comes out.
+    assert.equal(d.push(rtp(fuEnd(5), { sequence: 4, timestamp: 3000, marker: true })).length, 0);
+    assert.equal(d._fuBuffer, null);
+});
+
+test('VAL-005: a fragmented NAL at exactly the byte limit is still reassembled', () => {
+    const d = new H264Depacketizer({ maxNalBytes: 41 });
+    d.push(rtp(fuStart(20), { sequence: 1, timestamp: 3000 }));
+    d.push(rtp(fuMiddle(20), { sequence: 2, timestamp: 3000 }));
+    const out = d.push(rtp(fuEnd(0), { sequence: 3, timestamp: 3000, marker: true }));
+    assert.equal(out.length, 4 + 41);
+});
+
+test('VAL-005: a fragmented NAL over the fragment limit is dropped', () => {
+    const d = new H264Depacketizer({ maxFragments: 3 });
+    d.push(rtp(fuStart(1), { sequence: 1, timestamp: 3000 }));
+    d.push(rtp(fuMiddle(1), { sequence: 2, timestamp: 3000 }));
+    d.push(rtp(fuMiddle(1), { sequence: 3, timestamp: 3000 }));
+    d.push(rtp(fuMiddle(1), { sequence: 4, timestamp: 3000 }));
+    assert.equal(d.push(rtp(fuEnd(1), { sequence: 5, timestamp: 3000, marker: true })).length, 0);
+    assert.equal(d._fuBuffer, null);
+});
+
+test('VAL-005: a frame whose NAL overflows is dropped, its packets are skipped, and the next frame is flagged', () => {
+    const d = new H264Depacketizer({ maxNalBytes: 50 });
+    d.pushFrames(rtp(SLICE, { sequence: 1, timestamp: 1500, marker: true }));
+    const seen = [];
+    seen.push(d.pushFrames(rtp(fuStart(20), { sequence: 2, timestamp: 3000 })));
+    seen.push(d.pushFrames(rtp(fuMiddle(20), { sequence: 3, timestamp: 3000 })));
+    seen.push(d.pushFrames(rtp(fuMiddle(20), { sequence: 4, timestamp: 3000 })));
+    // Later packets of the same frame, even a whole small NAL, are skipped.
+    seen.push(d.pushFrames(rtp(fuEnd(5), { sequence: 5, timestamp: 3000 })));
+    seen.push(d.pushFrames(rtp(SLICE, { sequence: 6, timestamp: 3000, marker: true })));
+    assert.deepEqual(seen, [[], [], [], [], []]);
+    // The frame after it carries the damage, and the one after that is clean.
+    const [next] = d.pushFrames(rtp(SLICE, { sequence: 7, timestamp: 6000, marker: true }));
+    assert.equal(next.timestamp, 6000);
+    assert.equal(next.intact, false);
+    assert.equal(d.pushFrames(rtp(SLICE, { sequence: 8, timestamp: 9000, marker: true }))[0].intact, true);
+});
+
+test('VAL-005: an access unit over the byte limit is dropped even when no marker ever arrives', () => {
+    const d = new H264Depacketizer({ maxAccessUnitBytes: 100 });
+    // Each packet adds 4 + 20 bytes: four fit (96), the fifth does not (120).
+    for (let sequence = 1; sequence <= 40; sequence++) {
+        assert.deepEqual(d.pushFrames(rtp(nalOf(20), { sequence, timestamp: 3000 })), []);
+        assert.ok(d._frameChunks.length <= 4, 'held chunks stay within the limit');
+    }
+    // The boundary to the next timestamp emits only the next frame, flagged as damaged.
+    const frames = d.pushFrames(rtp(SLICE, { sequence: 41, timestamp: 6000, marker: true }));
+    assert.deepEqual(frames.map((frame) => [frame.timestamp, frame.intact]), [[6000, false]]);
+    assert.equal(d.pushFrames(rtp(SLICE, { sequence: 42, timestamp: 9000, marker: true }))[0].intact, true);
+});
+
+test('VAL-005: the marker of an oversized frame ends the skipping', () => {
+    const d = new H264Depacketizer({ maxAccessUnitBytes: 100 });
+    for (let sequence = 1; sequence <= 5; sequence++) {
+        assert.deepEqual(d.pushFrames(rtp(nalOf(20), { sequence, timestamp: 3000 })), []);
+    }
+    assert.deepEqual(d.pushFrames(rtp(nalOf(20), { sequence: 6, timestamp: 3000, marker: true })), []);
+    const [next] = d.pushFrames(rtp(SLICE, { sequence: 7, timestamp: 6000, marker: true }));
+    assert.deepEqual([next.timestamp, next.intact], [6000, false]);
+});
+
+test('VAL-005: an access unit at exactly the byte limit is emitted whole', () => {
+    const d = new H264Depacketizer({ maxAccessUnitBytes: 96 });
+    for (let sequence = 1; sequence <= 3; sequence++) {
+        assert.deepEqual(d.pushFrames(rtp(nalOf(20), { sequence, timestamp: 3000 })), []);
+    }
+    const [frame] = d.pushFrames(rtp(nalOf(20), { sequence: 4, timestamp: 3000, marker: true }));
+    assert.equal(frame.data.length, 96);
+    assert.equal(frame.intact, true);
+});
+
+test('VAL-005: an access unit over the packet limit is dropped', () => {
+    const d = new H264Depacketizer({ maxFragments: 3 });
+    for (let sequence = 1; sequence <= 20; sequence++) {
+        assert.deepEqual(d.pushFrames(rtp(SLICE, { sequence, timestamp: 3000 })), []);
+        assert.ok(d._frameChunks.length <= 3, 'held chunks stay within the limit');
+    }
+    const [next] = d.pushFrames(rtp(SLICE, { sequence: 21, timestamp: 6000, marker: true }));
+    assert.deepEqual([next.timestamp, next.intact], [6000, false]);
+});
+
+test('VAL-005: a fragmented NAL in progress counts toward the access unit limit', () => {
+    const d = new H264Depacketizer({ maxAccessUnitBytes: 100 });
+    d.pushFrames(rtp(nalOf(20), { sequence: 1, timestamp: 3000 })); // 24 bytes held
+    d.pushFrames(rtp(fuStart(30), { sequence: 2, timestamp: 3000 })); // + 31 in progress = 55
+    d.pushFrames(rtp(fuMiddle(30), { sequence: 3, timestamp: 3000 })); // + 61 = 85
+    assert.ok(d._fuBuffer, 'still within the limit');
+    d.pushFrames(rtp(fuMiddle(30), { sequence: 4, timestamp: 3000 })); // 24 + 91 = 115 > 100
+    assert.equal(d._fuBuffer, null);
+    assert.equal(d._frameChunks.length, 0);
+    assert.deepEqual(d.pushFrames(rtp(fuEnd(5), { sequence: 5, timestamp: 3000, marker: true })), []);
+    const [next] = d.pushFrames(rtp(SLICE, { sequence: 6, timestamp: 6000, marker: true }));
+    assert.deepEqual([next.timestamp, next.intact], [6000, false]);
+});
+
+test('VAL-005: invalid limit options fall back to the defaults', () => {
+    const d = new H264Depacketizer({ maxNalBytes: 0, maxAccessUnitBytes: -1, maxFragments: 'many' });
+    d.pushFrames(rtp(fuStart(1000), { sequence: 1, timestamp: 3000 }));
+    d.pushFrames(rtp(fuMiddle(1000), { sequence: 2, timestamp: 3000 }));
+    const [frame] = d.pushFrames(rtp(fuEnd(1000), { sequence: 3, timestamp: 3000, marker: true }));
+    assert.equal(frame.data.length, 4 + 1 + 3000);
+    assert.equal(frame.intact, true);
+});
+
+// --- Parameter sets once per access unit, per missing set (C-abe73b05c848) ---
+
+const SPS_CACHED = Buffer.from([0x67, 0x42, 0xe0, 0x1f]);
+const PPS_CACHED = Buffer.from([0x68, 0xce, 0x3c, 0x80]);
+// Different bytes from the cached sets, as a sender that changes them in band would send.
+const SPS_INBAND = Buffer.from([0x67, 0x64, 0x00, 0x28]);
+const PPS_INBAND = Buffer.from([0x68, 0xee, 0x06, 0xf2]);
+const IDR = Buffer.from([0x65, 0xaa]);
+
+const seeded = (opts = {}) => new H264Depacketizer({ sps: SPS_CACHED, pps: PPS_CACHED, ...opts });
+
+// A STAP-A packet payload aggregating the given NAL units.
+function stapA(...nals) {
+    const parts = [Buffer.from([0x78])];
+    for (const nal of nals) parts.push(Buffer.from([nal.length >> 8, nal.length & 0xff]), nal);
+    return Buffer.concat(parts);
+}
+
+// Split an Annex-B buffer back into its NAL units (4-byte start codes only, as written here).
+function nalUnits(buf) {
+    const units = [];
+    let from = -1;
+    for (let i = 0; i + 4 <= buf.length; i++) {
+        if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 0 && buf[i + 3] === 1) {
+            if (from >= 0) units.push(buf.subarray(from, i));
+            from = i + 4;
+            i += 3;
+        }
+    }
+    if (from >= 0) units.push(buf.subarray(from));
+    return units;
+}
+
+test('C-abe73b05c848: a multi-slice keyframe gets one injection, before its first slice only', () => {
+    const d = seeded();
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 1, timestamp: 9000 }))), [7, 8, 5]);
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 2, timestamp: 9000 }))), [5]);
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 3, timestamp: 9000, marker: true }))), [5]);
+});
+
+test('C-abe73b05c848: a multi-slice keyframe of FU-A slices gets injection before its first slice only', () => {
+    const d = seeded();
+    const fu = (flags, body) => Buffer.concat([Buffer.from([0x7c, flags | 5]), body]); // IDR, nri=3
+    const frames = [];
+    const send = (payload, sequence, marker = false) => frames.push(...d.pushFrames(rtp(payload, { sequence, timestamp: 9000, marker })));
+    send(fu(0x80, Buffer.from([1, 2])), 1);
+    send(fu(0x40, Buffer.from([3])), 2);
+    send(fu(0x80, Buffer.from([4, 5])), 3);
+    send(fu(0x00, Buffer.from([6])), 4);
+    send(fu(0x40, Buffer.from([7])), 5, true);
+    assert.equal(frames.length, 1);
+    assert.equal(frames[0].keyframe, true);
+    assert.equal(frames[0].intact, true);
+    assert.deepEqual(nalTypes(frames[0].data), [7, 8, 5, 5]);
+});
+
+test('C-abe73b05c848: an access unit that carries both parameter sets in band gets nothing injected', () => {
+    const d = seeded();
+    const frames = [
+        ...d.pushFrames(rtp(SPS_INBAND, { sequence: 1, timestamp: 9000 })),
+        ...d.pushFrames(rtp(PPS_INBAND, { sequence: 2, timestamp: 9000 })),
+        ...d.pushFrames(rtp(IDR, { sequence: 3, timestamp: 9000, marker: true })),
+    ];
+    assert.equal(frames.length, 1);
+    assert.deepEqual(nalUnits(frames[0].data), [SPS_INBAND, PPS_INBAND, IDR]);
+    // The in-band sets still replace the cached ones, for the keyframes that follow.
+    const [next] = d.pushFrames(rtp(IDR, { sequence: 4, timestamp: 12000, marker: true }));
+    assert.deepEqual(nalUnits(next.data), [SPS_INBAND, PPS_INBAND, IDR]);
+});
+
+test('C-abe73b05c848: push() does not repeat parameter sets that came in band before the IDR', () => {
+    const d = seeded();
+    assert.deepEqual(nalTypes(d.push(rtp(SPS_INBAND, { sequence: 1, timestamp: 9000 }))), [7]);
+    assert.deepEqual(nalTypes(d.push(rtp(PPS_INBAND, { sequence: 2, timestamp: 9000 }))), [8]);
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 3, timestamp: 9000, marker: true }))), [5]);
+});
+
+test('C-abe73b05c848: with only the SPS in band, the cached PPS is injected before the first IDR slice', () => {
+    const d = seeded();
+    const frames = [
+        ...d.pushFrames(rtp(SPS_INBAND, { sequence: 1, timestamp: 9000 })),
+        ...d.pushFrames(rtp(IDR, { sequence: 2, timestamp: 9000 })),
+        ...d.pushFrames(rtp(IDR, { sequence: 3, timestamp: 9000, marker: true })),
+    ];
+    assert.equal(frames.length, 1);
+    assert.deepEqual(nalUnits(frames[0].data), [SPS_INBAND, PPS_CACHED, IDR, IDR]);
+});
+
+test('C-abe73b05c848: with only the PPS in band, the cached SPS and then the PPS are injected before the first IDR slice', () => {
+    const d = seeded();
+    const frames = [
+        ...d.pushFrames(rtp(PPS_INBAND, { sequence: 1, timestamp: 9000 })),
+        ...d.pushFrames(rtp(IDR, { sequence: 2, timestamp: 9000 })),
+        ...d.pushFrames(rtp(IDR, { sequence: 3, timestamp: 9000, marker: true })),
+    ];
+    assert.equal(frames.length, 1);
+    assert.deepEqual(nalTypes(frames[0].data), [8, 7, 8, 5, 5]);
+    // The PPS that follows the injected SPS is the in-band one, which the cache now holds.
+    assert.deepEqual(nalUnits(frames[0].data), [PPS_INBAND, SPS_CACHED, PPS_INBAND, IDR, IDR]);
+});
+
+test('C-abe73b05c848: a missing parameter set is injected when it is cached, even if the other is not', () => {
+    const onlySps = new H264Depacketizer({ sps: SPS_CACHED });
+    assert.deepEqual(nalTypes(onlySps.push(rtp(IDR, { timestamp: 3000, marker: true }))), [7, 5]);
+    const onlyPps = new H264Depacketizer({ pps: PPS_CACHED });
+    assert.deepEqual(nalTypes(onlyPps.push(rtp(IDR, { timestamp: 3000, marker: true }))), [8, 5]);
+    // An SPS in band is completed with the cached PPS even though nothing else is cached.
+    const spsInBand = new H264Depacketizer({ pps: PPS_CACHED });
+    spsInBand.push(rtp(SPS_INBAND, { sequence: 1, timestamp: 3000 }));
+    assert.deepEqual(nalTypes(spsInBand.push(rtp(IDR, { sequence: 2, timestamp: 3000, marker: true }))), [8, 5]);
+});
+
+test('C-abe73b05c848: an IDR with no parameter sets cached or in band is emitted as it is, and counted', () => {
+    const d = new H264Depacketizer();
+    assert.equal(d.idrsMissingParameterSets, 0);
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 1, timestamp: 3000 }))), [5]);
+    // The second slice of the same access unit is not a second keyframe without sets.
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 2, timestamp: 3000, marker: true }))), [5]);
+    assert.equal(d.idrsMissingParameterSets, 1);
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 3, timestamp: 6000, marker: true }))), [5]);
+    assert.equal(d.idrsMissingParameterSets, 2);
+    // One set still missing counts too; none missing does not.
+    const half = new H264Depacketizer({ sps: SPS_CACHED });
+    half.push(rtp(IDR, { timestamp: 3000, marker: true }));
+    assert.equal(half.idrsMissingParameterSets, 1);
+    const whole = seeded();
+    whole.push(rtp(IDR, { timestamp: 3000, marker: true }));
+    assert.equal(whole.idrsMissingParameterSets, 0);
+});
+
+test('C-abe73b05c848: each keyframe access unit gets the injection it needs', () => {
+    const d = seeded();
+    const frames = [];
+    // Distinct timestamps, and then the same timestamp closed by the marker.
+    frames.push(...d.pushFrames(rtp(IDR, { sequence: 1, timestamp: 9000, marker: true })));
+    frames.push(...d.pushFrames(rtp(IDR, { sequence: 2, timestamp: 12000, marker: true })));
+    frames.push(...d.pushFrames(rtp(IDR, { sequence: 3, timestamp: 12000, marker: true })));
+    // An unmarked access unit that the next timestamp ends.
+    frames.push(...d.pushFrames(rtp(IDR, { sequence: 4, timestamp: 15000 })));
+    frames.push(...d.pushFrames(rtp(IDR, { sequence: 5, timestamp: 18000, marker: true })));
+    assert.deepEqual(frames.map((frame) => nalTypes(frame.data)), [[7, 8, 5], [7, 8, 5], [7, 8, 5], [7, 8, 5], [7, 8, 5]]);
+});
+
+test('C-abe73b05c848: a new SSRC at the same timestamp starts a new access unit', () => {
+    const d = seeded();
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 1, timestamp: 9000, ssrc: 1 }))), [7, 8, 5]);
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 1, timestamp: 9000, ssrc: 2 }))), [7, 8, 5]);
+});
+
+test('C-abe73b05c848: parameter sets seen in one access unit do not stand in for the next one', () => {
+    const d = seeded();
+    d.push(rtp(SPS_INBAND, { sequence: 1, timestamp: 9000 }));
+    d.push(rtp(PPS_INBAND, { sequence: 2, timestamp: 9000 }));
+    d.push(rtp(IDR, { sequence: 3, timestamp: 9000, marker: true }));
+    // A keyframe without parameter sets of its own: the cache supplies both, once.
+    assert.deepEqual(nalUnits(d.push(rtp(IDR, { sequence: 4, timestamp: 12000 }))), [SPS_INBAND, PPS_INBAND, IDR]);
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 5, timestamp: 12000, marker: true }))), [5]);
+});
+
+test('C-abe73b05c848: a STAP-A of SPS, PPS and IDR carries no duplicates', () => {
+    const d = seeded();
+    const out = d.push(rtp(stapA(SPS_INBAND, PPS_INBAND, IDR), { timestamp: 9000, marker: true }));
+    assert.deepEqual(nalUnits(out), [SPS_INBAND, PPS_INBAND, IDR]);
+});
+
+test('C-abe73b05c848: a STAP-A of SPS and IDR gets the PPS injected between them', () => {
+    const d = seeded();
+    const out = d.push(rtp(stapA(SPS_INBAND, IDR), { timestamp: 9000, marker: true }));
+    assert.deepEqual(nalUnits(out), [SPS_INBAND, PPS_CACHED, IDR]);
+});
+
+test('C-abe73b05c848: a STAP-A of PPS and IDR gets the SPS and PPS injected before the IDR', () => {
+    const d = seeded();
+    const out = d.push(rtp(stapA(PPS_INBAND, IDR), { timestamp: 9000, marker: true }));
+    assert.deepEqual(nalUnits(out), [PPS_INBAND, SPS_CACHED, PPS_INBAND, IDR]);
+});
+
+test('C-abe73b05c848: a STAP-A of two IDR slices is injected once', () => {
+    const d = seeded();
+    const out = d.push(rtp(stapA(IDR, IDR), { timestamp: 9000, marker: true }));
+    assert.deepEqual(nalTypes(out), [7, 8, 5, 5]);
+});
+
+test('C-abe73b05c848: non-IDR slices still get no injection, in a keyframe access unit or after one', () => {
+    const d = seeded();
+    assert.deepEqual(nalTypes(d.push(rtp(IDR, { sequence: 1, timestamp: 9000, marker: true }))), [7, 8, 5]);
+    assert.deepEqual(nalTypes(d.push(rtp(Buffer.from([0x41, 0xbb]), { sequence: 2, timestamp: 12000 }))), [1]);
+    assert.deepEqual(nalTypes(d.push(rtp(Buffer.from([0x41, 0xbb]), { sequence: 3, timestamp: 12000, marker: true }))), [1]);
+});
+
+// VAL-160: the same partially in-band access units through push() and through pushFrames().
+
+test('VAL-160: with only the SPS in band, push() gives [7, 8, 5] for the access unit', () => {
+    const d = seeded();
+    const out = [
+        d.push(rtp(SPS_INBAND, { sequence: 1, timestamp: 9000 })),
+        d.push(rtp(IDR, { sequence: 2, timestamp: 9000 })),
+        d.push(rtp(IDR, { sequence: 3, timestamp: 9000, marker: true })),
+    ];
+    assert.deepEqual(nalUnits(Buffer.concat(out)), [SPS_INBAND, PPS_CACHED, IDR, IDR]);
+});
+
+test('VAL-160: with only the PPS in band, push() gives [8, 7, 8, 5] for the access unit', () => {
+    const d = seeded();
+    const out = [
+        d.push(rtp(PPS_INBAND, { sequence: 1, timestamp: 9000 })),
+        d.push(rtp(IDR, { sequence: 2, timestamp: 9000 })),
+        d.push(rtp(IDR, { sequence: 3, timestamp: 9000, marker: true })),
+    ];
+    assert.deepEqual(nalUnits(Buffer.concat(out)), [PPS_INBAND, SPS_CACHED, PPS_INBAND, IDR, IDR]);
+});
+
+test('VAL-160: a STAP-A of SPS and IDR gives [7, 8, 5] through pushFrames()', () => {
+    const d = seeded();
+    const [frame] = d.pushFrames(rtp(stapA(SPS_INBAND, IDR), { timestamp: 9000, marker: true }));
+    assert.equal(frame.keyframe, true);
+    assert.deepEqual(nalUnits(frame.data), [SPS_INBAND, PPS_CACHED, IDR]);
+});
+
+test('VAL-160: no IDR slice is emitted without an SPS and then a PPS earlier in its access unit', () => {
+    const inBandSets = {
+        'no parameter sets': [],
+        'the SPS': [SPS_INBAND],
+        'the PPS': [PPS_INBAND],
+        'the SPS and PPS': [SPS_INBAND, PPS_INBAND],
+    };
+    const packetShapes = {
+        'single-NAL packets': (nals) => nals,
+        'one STAP-A': (nals) => [stapA(...nals)],
+    };
+    for (const [setsName, sets] of Object.entries(inBandSets)) {
+        for (const sliceCount of [1, 3]) {
+            for (const [shapeName, shape] of Object.entries(packetShapes)) {
+                const label = `${setsName} in band, ${sliceCount} slice(s), ${shapeName}`;
+                const payloads = shape([...sets, ...Array(sliceCount).fill(IDR)]);
+                // One depacketizer runs two access units, so a flag left over from the first would show.
+                const d = seeded();
+                const units = [];
+                let sequence = 0;
+                for (const timestamp of [9000, 12000]) {
+                    payloads.forEach((payload, index) => {
+                        const marker = index === payloads.length - 1;
+                        units.push(...d.pushFrames(rtp(payload, { sequence: sequence++, timestamp, marker })));
+                    });
+                }
+                assert.equal(units.length, 2, label);
+                for (const unit of units) {
+                    const types = nalTypes(unit.data);
+                    const firstIdr = types.indexOf(5);
+                    const before = types.slice(0, firstIdr);
+                    assert.ok(before.includes(7), `${label}: an SPS before the first IDR slice`);
+                    assert.ok(before.lastIndexOf(8) > before.lastIndexOf(7), `${label}: a PPS after the last SPS`);
+                    assert.deepEqual(types.slice(firstIdr), Array(sliceCount).fill(5), `${label}: only the slices follow`);
+                }
+            }
+        }
+    }
 });

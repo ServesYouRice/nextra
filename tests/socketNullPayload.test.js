@@ -2,7 +2,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const http = require('node:http');
-const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
@@ -10,19 +9,9 @@ const { Server } = require('socket.io');
 const { io: createClient } = require('socket.io-client');
 
 const { registerSocketHandlers, stopJoinCleanup } = require('../lib/socket');
+const { claimServerPorts } = require('./serverPorts');
 
 const projectRoot = path.resolve(__dirname, '..');
-
-function reserveTcpPort() {
-    return new Promise((resolve, reject) => {
-        const server = net.createServer();
-        server.once('error', reject);
-        server.listen(0, '127.0.0.1', () => {
-            const { port } = server.address();
-            server.close((err) => (err ? reject(err) : resolve(port)));
-        });
-    });
-}
 
 function connect(url, extraHeaders = {}) {
     return new Promise((resolve, reject) => {
@@ -46,9 +35,7 @@ function request(client, event, payload) {
 }
 
 test('one viewer message with a null payload does not shut the server down', { concurrency: false, timeout: 40_000 }, async (t) => {
-    const port = await reserveTcpPort();
-    let rtcPort = await reserveTcpPort();
-    while (rtcPort === port) rtcPort = await reserveTcpPort();
+    const { port, rtcPort } = await claimServerPorts();
     const baseUrl = `http://127.0.0.1:${port}`;
     const testDistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-null-payload-dist-'));
     await fs.writeFile(path.join(testDistDir, 'index.html'), '<!doctype html><div id="root"></div>');

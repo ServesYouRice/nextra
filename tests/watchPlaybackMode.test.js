@@ -90,3 +90,56 @@ test('relay playback resolves MediaSource first and ManagedMediaSource on iPhone
     assert.equal(canPlayRelayFormat(mime, { ManagedMediaSource: Managed }), true);
     assert.equal(canPlayRelayFormat('video/webm;codecs=vp8,opus', { ManagedMediaSource: Managed }), false);
 });
+
+function fakeSourceBuffer({ changeType = true, failOn = null } = {}) {
+    const calls = [];
+    const sourceBuffer = {
+        calls,
+        abort() {
+            calls.push('abort');
+            if (failOn === 'abort') throw new DOMException('busy', 'InvalidStateError');
+        },
+    };
+    if (changeType) {
+        sourceBuffer.changeType = (type) => {
+            calls.push(`changeType ${type}`);
+            if (failOn === 'changeType') throw new DOMException('no', 'NotSupportedError');
+        };
+    }
+    return sourceBuffer;
+}
+
+const MP4 = 'video/mp4;codecs=avc1.640028,mp4a.40.2';
+const VP8 = 'video/webm;codecs=vp8,opus';
+
+// A recorder timeslice ends inside a WebM element. When the old generation's
+// queued chunks are dropped for a new one, the parser must be reset or it reads
+// the new init segment as the rest of that element.
+test('a new relay generation on a playing SourceBuffer resets its parser first', async () => {
+    const { prepareSourceBufferForGeneration } = await watchPlaybackModeModule;
+    const sourceBuffer = fakeSourceBuffer();
+
+    assert.equal(prepareSourceBufferForGeneration(sourceBuffer, { readyState: 'open' }, { fromMimeType: VP8, toMimeType: VP8 }), true);
+    assert.deepEqual(sourceBuffer.calls, ['abort']);
+});
+
+// The host's MP4 recorder falls back to VP8 mid-stream (relay-mp4-failed).
+test('a new relay generation in another format switches the SourceBuffer type after the reset', async () => {
+    const { prepareSourceBufferForGeneration } = await watchPlaybackModeModule;
+    const sourceBuffer = fakeSourceBuffer();
+
+    assert.equal(prepareSourceBufferForGeneration(sourceBuffer, { readyState: 'open' }, { fromMimeType: MP4, toMimeType: VP8 }), true);
+    assert.deepEqual(sourceBuffer.calls, ['abort', `changeType ${VP8}`]);
+});
+
+test('a SourceBuffer that cannot take the new relay generation is reported, not reused', async () => {
+    const { prepareSourceBufferForGeneration } = await watchPlaybackModeModule;
+    const formats = { fromMimeType: MP4, toMimeType: VP8 };
+
+    assert.equal(prepareSourceBufferForGeneration(fakeSourceBuffer({ changeType: false }), { readyState: 'open' }, formats), false);
+    assert.equal(prepareSourceBufferForGeneration(fakeSourceBuffer({ failOn: 'changeType' }), { readyState: 'open' }, formats), false);
+    assert.equal(prepareSourceBufferForGeneration(fakeSourceBuffer({ failOn: 'abort' }), { readyState: 'open' }, formats), false);
+    const ended = fakeSourceBuffer();
+    assert.equal(prepareSourceBufferForGeneration(ended, { readyState: 'ended' }, { fromMimeType: VP8, toMimeType: VP8 }), false);
+    assert.deepEqual(ended.calls, []);
+});

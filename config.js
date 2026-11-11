@@ -83,8 +83,7 @@ function parseTrustProxy(value) {
     const normalized = String(value).trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-    const asNumber = Number.parseInt(normalized, 10);
-    if (Number.isFinite(asNumber)) return asNumber;
+    if (/^\d+$/.test(normalized)) return Number(normalized);
     return String(value).trim();
 }
 
@@ -203,6 +202,9 @@ const config = {
     AUTO_DETECT_PUBLIC_IP: parseBoolEnv(process.env.AUTO_DETECT_PUBLIC_IP, false),
     TRUST_PROXY: parseTrustProxy(process.env.TRUST_PROXY),
     TRUST_X_FORWARDED_HEADERS: parseBoolEnv(process.env.TRUST_X_FORWARDED_HEADERS, false),
+    // CF-Connecting-IP from a loopback peer is Cloudflare's record of the viewer only behind cloudflared; any other
+    // proxy passes on the client's own copy. Nextra's own tunnel needs no flag; one you run yourself does.
+    TRUST_CLOUDFLARE_CONNECTING_IP: parseBoolEnv(process.env.TRUST_CLOUDFLARE_CONNECTING_IP, false),
     ALLOW_TRYCLOUDFLARE_ORIGINS: parseBoolEnv(process.env.ALLOW_TRYCLOUDFLARE_ORIGINS, false),
     ALLOW_SOCKET_NO_ORIGIN: parseBoolEnv(process.env.ALLOW_SOCKET_NO_ORIGIN, false),
     EXPOSE_LAN_URL: parseBoolEnv(process.env.EXPOSE_LAN_URL, false),
@@ -340,7 +342,8 @@ const config = {
     RELAY_VIDEO_BITS_PER_SECOND: parseIntEnv(process.env.RELAY_VIDEO_BITS_PER_SECOND, 45000000),
     // Per-socket cap on bytes queued in the engine.io write buffer before a
     // relay viewer is considered too slow (WebM viewers are kicked to recover;
-    // fMP4 viewers just skip fragments and seek past the gap client-side).
+    // fMP4 viewers just skip fragments and seek past the gap client-side). A late
+    // viewer's bootstrap, sent once at its start, is not counted.
     RELAY_SOCKET_MAX_BUFFERED_BYTES: parseIntEnv(process.env.RELAY_SOCKET_MAX_BUFFERED_BYTES, 16 * 1024 * 1024),
     // What one connection through the public link carries, in kbps. 0 measures
     // it when the link comes up; set it to skip the measurement.
@@ -352,6 +355,11 @@ const config = {
     // Avoid restarting during an immediate startup crash loop. Tests can set 0
     // when they intentionally kill a fully initialized worker.
     WORKER_RECOVERY_MIN_UPTIME_SECONDS: parseIntEnv(process.env.WORKER_RECOVERY_MIN_UPTIME_SECONDS, 30),
+    // Set when a service manager, systemd or a container restart policy restarts
+    // Nextra after it exits. A mediasoup worker death after the minimum uptime then
+    // ends the process with exit code 1 and starts no replacement of its own; without
+    // it, Nextra starts a visible replacement process itself.
+    EXTERNAL_SUPERVISOR: parseBoolEnv(process.env.EXTERNAL_SUPERVISOR, false),
     METRICS_BROADCAST_INTERVAL_MS: parseIntEnv(process.env.METRICS_BROADCAST_INTERVAL_MS, 5000),
     METRICS_TOKEN: (process.env.METRICS_TOKEN || '').trim(),
     OPERATOR_TOKEN: (process.env.OPERATOR_TOKEN || '').trim(),

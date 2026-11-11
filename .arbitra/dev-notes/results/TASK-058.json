@@ -1,0 +1,12 @@
+[
+ {
+  "issue": "C-d0ab9d3f522a",
+  "title": "Worker-crash recovery starts a detached child with no output and exits 0, which defeats supervisors and hides failures",
+  "severity": "medium",
+  "task": "TASK-058",
+  "result": "fixed",
+  "failedBefore": true,
+  "test": "tests/workerProcessRecovery.test.js: 'worker recovery without a declared supervisor restarts Nextra as a visible child and the original process stays with it' and 'worker recovery with a declared supervisor ends the rooms, exits 1 and starts no replacement'; unit tests in tests/workerRecovery.test.js (decideWorkerDeathAction 'exit-for-supervisor'; launchReplacementProcess: stdio inherit and not detached, no exit on spawn, exit code mirrored, spawn failure reported, signal pass-on per platform) and tests/shutdownCoordinator.test.js (requestRestart: 14 cases)",
+  "proof": "On the unchanged server both integration tests start the real server, open a room and kill the mediasoup worker through /api/test/kill-media-worker. Test 1 (no supervisor declared) fails at 'the original process exited early': the original process had exited with code 0 ('0 !== null') right after spawning the detached replacement, so a launcher or supervisor saw a clean exit while the server kept running outside its console and process group; the log shows only '[recovery] ... restarting Nextra automatically.' and no output of the replacement (stdio 'ignore'). Test 2 (EXTERNAL_SUPERVISOR=true, a flag that did not exist) fails at 'the process must exit 1 for the supervisor' ('0 !== 1', expected 1): the unchanged code self-respawns and exits 0 regardless of a supervisor. After the change: without the flag the original stays alive, the replacement's output reaches the original's stdout (two 'Mediasoup Worker PID' lines, the replacement's PID is logged and equals the PID the server then reports), and after /api/test/shutdown the original exits 0 with the replacement's code; with EXTERNAL_SUPERVISOR=true the host gets room-ended 'media-worker-fatal', the process logs '[fatal] exiting after media-worker-died; an external supervisor must restart Nextra.', exits 1, the port stays closed and no second 'Mediasoup Worker PID' line appears. Both pass (three reruns of the three touched test files: 49/49 each). Signal pass-on cannot be driven on this Windows host (no POSIX process groups, console Ctrl+C is not scriptable), so the unit tests drive launchReplacementProcess with a fake spawn on both platform values."
+ }
+]

@@ -1,0 +1,29 @@
+TASK-091 (C-5a217b5eb0cb): fixed on lane/watch (from dev 3b574aa), commit 21b10e1.
+
+What changed
+- New `src/lib/timedAck.mjs`: `emitWithTimedAck(socket, event, payload, { timeoutMs = 10000 })`. One emit, resolves with the raw answer (it never reads `success` or `ok`), rejects with `SocketNotConnectedError` without emitting while `!socket.connected`, `AckTimeoutError` after the timeout, `AckDisconnectError` on 'disconnect'. Timer and listener are removed on settle, a late answer is ignored, no retry, no `socket.connect()`.
+- `emitClaimedStart` (TASK-087, claim and emit in one synchronous block) now sits on that helper instead of carrying its own copy of the timeout/disconnect code. It keeps its 15 s relay default and its messages; `SocketNotConnectedError` moved to timedAck.mjs and is re-exported from subscriptionLedger.mjs, so TASK-087's tests are untouched.
+- New `src/lib/fallbackStart.mjs`: `beginFallbackStart({ ledger, socket, token, isCurrent })` sends fallback-consume-start as the ledger's 'fallback' kind (10 s) and settles it to one of started / rejected / stale / timeout / disconnected. The classification of the answer is today's: only an answer holding `error` is a refusal. Every stop it can send goes through `releaseSubscription` (so `ledger.canRelease`: latest claim, same connected socket.id); a stale answer and a timeout compensate with it, a refusal and a disconnect only release the claim.
+- `viewerSession.current()`: the session in progress (null when none), so the fallback start can capture it without beginning one.
+- WatchView:
+  - `enterFallbackMode` needs a joined viewer, a non-empty `joinedRoomCodeRef`, a session in progress and no ended room (the `codeInput` fallback is gone), claims the start in `fallbackClaimRef`, and acts on the answer only if the claim, the session, the joined state, the room code and the terminal flag all still match. A timeout and a refusal latch `fallbackStartRejectedRef`; a disconnect (or a start refused because the socket is down) does not, and sets `fallbackResumeRef`, which the reconnect rejoin reads as `wasFallbackMode`, so it calls `enterFallbackMode()` again on the new connection.
+  - `isEnteringFallbackRef` is cleared in a `finally` (only by the start that still owns the view) and by `dropFallbackClaim` in Leave Room (before its first await), room-ended, the terminal transport-failed branch, `onReconnect` and unmount. `dropFallbackClaim` releases the ledger claim without a stop: leave-room, a destroyed room and a closed connection all drop the server's subscription themselves.
+  - `exitFallbackMode` releases the claim through `releaseSubscription` instead of always emitting `fallback-consume-stop`.
+
+Where the prompt was off, and choices made
+- The prompt cites VAL-146/147; read as VAL-157/158 (validation-fixes.md).
+- read_first lists `src/lib/timedAck.mjs` and `tests/timedAck.test.js` as if they existed; both are new, like `viewerSession.mjs` was for TASK-090. Line numbers were stale.
+- Step 3 says to call `ledger.claim` in the same block as the emit; the existing `emitClaimedStart` does that, so the fallback start uses it (on top of `emitWithTimedAck`) rather than a second copy of the claim-and-emit code.
+- Step 6 says a disconnect must not latch "so onReconnect can retry". Nothing retried on its own: the reconnect only re-enters fallback if `wasFallbackMode` is set, and the disconnect has just reset `fallbackMode` to false (and the auto-enter effect does not re-run, none of its dependencies change). `fallbackResumeRef` is what makes the retry happen. It is also set when `enterFallbackMode` finds the socket down (without touching fallbackMode, so the auto-enter effect cannot spin).
+- Timeout text: 'Relay mode did not respond in time. Try again in a moment.'; disconnect text: 'Connection interrupted. Reconnecting...' (the rejoin's existing copy).
+- An existing source guard in tests/viewerSession.test.js matches the start of handleLeave's dependency list (`}, [cleanupPlayback, recoveryGuard`), so `dropFallbackClaim` is appended after `recoveryGuard` there; no existing test was edited.
+- The verify commands say "ask before running"; per the brief they were run, on the lane's own ports with run-e2e.cjs.
+
+Browser tests added (tests/browser/media-flow.spec.mjs)
+- `installFallbackStartControl` makes the (browser) room look like an OBS room to one viewer by rewriting its join-room answer, and decides the answer of fallback-consume-start ('ok' replaces the server's refusal of a browser room with `{ ok: true, fallbackAvailable: true }`, 'hold', or 'drop'). The real fMP4 relay needs a WHIP producer, which the shared test server does not run; the player that starts after an 'ok' answer therefore never receives media, so the tests assert the viewer's status and the frames it sends, not video.
+
+For the owner
+- `src/lib/fmp4RelayPlayer.js` (read-only here) still emits its own `fallback-consume-start` after 15 s without an init segment, with a raw callback, and never stops it. It re-asserts the same viewer's subscription on the same connection, so it does not break the ledger's ownership, but it is a raw ack outside this item.
+- `recoverTransport` (a recoverable transport-failed) resets fallbackMode and stops the fMP4 player through cleanupPlayback without releasing the fallback claim or stopping the subscription on the server, as before; a fallback start still in flight at that moment is not given up either. Not touched (outside the prompt).
+- After a timeout the auto-enter effect stays latched until a new join or host-reconnected clears the latch, and a reconnect clears it without re-running the effect: the viewer gets the Watch Stream button and the error, not an automatic second try. That is the "latch, as today" the prompt asks for.
+- The rejoin still falls back to `normalizeRoomCode(codeInput)` for its room code (rejoinAfterReconnect); the prompt's step 9 is about the ack path, so it is unchanged.

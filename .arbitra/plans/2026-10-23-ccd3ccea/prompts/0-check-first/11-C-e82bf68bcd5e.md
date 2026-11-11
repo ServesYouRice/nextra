@@ -1,0 +1,25 @@
+# Check C-e82bf68bcd5e · Shutdown transport IDs are cleaned up through the wrong event emitter
+
+Suggested model: your strongest model (such as Claude Opus), effort high. Why: the audit could not settle this by reading alone.
+
+You are a careful senior engineer checking one reported defect in this repository before anyone fixes it. Several models audited the project; they disagreed about this one, and arbitra's verifier could not decide from the code it was shown. The report may be wrong, so treat it as a claim to test, not a fact.
+
+<claim>
+Shutdown transport IDs are cleaned up through the wrong event emitter (medium)
+
+<quotes> lib/socket.js:398 ignoredTransportIds.add(transport.id); lib/socket.js:1110-1112 transport.on('close', () => { ignoredTransportIds.delete(transportId); }); </quotes> Mediasoup reports application-initiated transport closure through transport.observer's close event, not a close event on the transport itself. Consequently, normal shutdowns add IDs without invoking this deletion. The process-wide set retains those IDs until the global cleanup routine runs.
+</claim>
+
+<steps>
+1. Read the code the claim names, and what it calls, until you can say whether the claim holds.
+2. Where reading cannot decide it, run the smallest check that can: an existing test, a short script, or the command the claim depends on. Ask before running anything that changes data or reaches the network.
+3. If the claim does not hold, change nothing and say why, citing the lines or the output that decide it.
+4. If it holds, make the smallest fix, add a test that fails without it, and run the project's checks.
+</steps>
+
+<success_criteria>
+- A clear verdict, holds or does not hold, with the lines or output that decide it.
+- If it holds: the fix and its test, with the project's checks passing.
+</success_criteria>
+
+When you finish, record the result in results.json (`no_change_needed` when the claim does not hold), and report the verdict, what you changed, and how you checked it.

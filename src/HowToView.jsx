@@ -319,7 +319,16 @@ export default function HowToView() {
 
             <h2>Security and privacy</h2>
             <p>
-                Public links use HTTPS, and media is encrypted in transit with WebRTC DTLS. Media is not stored by Nextra.
+                How well your video is protected depends on the path it takes:
+            </p>
+            <ul>
+                <li><strong>WebRTC:</strong> WebRTC viewing, OBS WHIP ingest and WHEP playback are encrypted in transit with DTLS-SRTP.</li>
+                <li><strong>Relay:</strong> relay media travels over the page connection instead of WebRTC, so it is encrypted only as far as that connection is.</li>
+                <li><strong>Public link:</strong> public links use HTTPS, which ends at the tunnel provider (Cloudflare), so relay media is not end-to-end encrypted to the host.</li>
+                <li><strong>Local link:</strong> a local link uses plain HTTP unless you enable local HTTPS (<code>LOCAL_HTTPS=true</code>, with a self-signed certificate), so on that link everything except WebRTC media is unencrypted on your network.</li>
+            </ul>
+            <p>
+                Media is not stored by Nextra.
                 OBS WebSocket traffic stays on localhost. Room access is code-based with no user accounts.
                 If you enable Cloudflare TURN autofill, the long-lived API token stays on the server and the browser only receives short-lived TURN credentials.
             </p>

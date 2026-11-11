@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-ad225d9c2901",
+    "title": "Session deletion does not verify the host bearer token",
+    "severity": "medium",
+    "task": "TASK-039",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/whipRoutes.test.js: \"WHIP DELETE with no Authorization header / an empty bearer token / a wrong bearer token / a bearer token of the right length that is wrong / the host token without the Bearer scheme / the host token under another scheme gets 403 and leaves the session, relay and registry alone\", \"WHIP DELETE with another room's host token gets 403 and leaves the session alone\", \"WHIP DELETE with the host token returns 200 { ok: true } and tears the session down, once\", \"WHIP DELETE answers 404 for an unknown or stale resource without asking for a token\"",
+    "proof": "Before the fix (lib/whipRoutes.js unchanged, the nine new tests added): 8 of 41 failed. Every unauthorized DELETE (no header, empty bearer, wrong token, wrong token of the right length, token without the Bearer scheme, token under the Basic scheme, another room's host token) returned 200 instead of 403 and tore the live session down: transport closed, WHIP resource unregistered, fallback relay stopped. The ninth test (404 for an unknown or stale resource without a token) passed before and after, pinning that the 404 paths are unchanged. After the fix: a bearerTokenFromRequest(req) helper (the POST handler's exact extraction) is used by POST and DELETE; DELETE returns 403 { error: 'Invalid or missing authorization token' } with CORS headers after the resource and room.whipResourceId checks and before stopFallbackRelay/closeWhipSession, and the host token still gets 200 { ok: true } with the same teardown. node --test tests/whipRoutes.test.js 41/41 (exit 0). The harness's delete() helper now sends the host's bearer token by default (an existing test, 'the establishment timer does not outlive the session', deleted without one and only passed because DELETE was unauthenticated); callers pass their own headers for the refusal cases. OBS sends bearer_token on DELETE (configureObsStream sets it), so the supported client is unaffected."
+  }
+]

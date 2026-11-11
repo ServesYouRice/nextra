@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-c40f97d49a6b",
+    "title": "Single-valued socket-to-room mapping is overwritten without removing prior membership, and room teardown unmaps sockets now in other rooms",
+    "severity": "medium",
+    "task": "TASK-019",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/rooms.test.js: 'a viewer who joins a second room leaves the first, and destroying the first keeps the new mapping', 'a viewer who becomes the host of a committed room leaves the room it was viewing', 'reclaimHostRoom keeps the old host socket mapped to the room it moved to and removes the new host from the room it viewed', 'moving the host socket of a live room into another room leaves that room's host role alone'; tests/sessionRegistry.test.js: 'SessionRegistry.unmapSocketIfRoom deletes a mapping only while it points at that room', 'SessionRegistry.clearRoomMappings leaves sockets that now belong to another room mapped'",
+    "proof": "On the unchanged code (dea3f1e) node --test tests/rooms.test.js tests/sessionRegistry.test.js failed all 6 new tests and passed the 10 existing ones. A viewer that joined room A then room B was still in A.viewers (expected false, actual true) and destroyRoom(A) deleted its mapping to B; commitRoom of a prepared room hosted by a viewer of A left it in A.viewers; reclaimHostRoom deleted the mapping of the old host socket that had moved to B (expected B's code, actual undefined) and left the reclaiming socket in B.viewers; the host socket of A that joined B lost its mapping to B when A was destroyed; unmapSocketIfRoom did not exist and clearRoomMappings deleted the mappings of the host and viewer that had moved to another room. After the fix (commit fe5c592 on lane/rooms) all 16 pass. joinRoom, commitRoom and reclaimHostRoom call a new leavePreviousRoom(socketId, nextRoom), which removes the socket from the previous live room's viewers, relayViewers, fallbackViewers, fallbackDelivery and viewerTransports (consumers and recv transport closed) through removeViewerFromRoom, the cleanup factored out of removeViewer; it never changes the previous room's hostSocketId (Q-004 default). SessionRegistry.unmapSocketIfRoom(socketId, roomCode) deletes only while the mapping equals roomCode; clearRoomMappings (viewers and host) and reclaimHostRoom (previous host) use it. Each moved-socket test also asserts that every checked socketToRoom entry points at a room listing the socket as host or viewer. Full suite: lint, typecheck and npm test pass, 734 of 734 (728 before plus 6 new)."
+  }
+]

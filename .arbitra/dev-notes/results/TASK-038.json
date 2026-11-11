@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-7eca647136d1",
+    "title": "Raw H.264 SPS/PPS captured from one OBS session persist into later WHIP sessions and into a stale capture's writes",
+    "severity": "medium",
+    "task": "TASK-038",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/whipRoutes.test.js: \"closeWhipSession clears the SPS/PPS and sprop a session captured\", \"a new WHIP session whose offer carries sprop starts its fallback relay without the previous session's SPS/PPS\", \"a sprop stream capture whose producer was replaced writes no SPS/PPS to the room and stops\"",
+    "proof": "Before the fix (lib/whipRoutes.js unchanged, the three tests added): 3 of 32 failed. closeWhipSession left fallbackH264Sprop 'c3BzLXByZXZpb3Vz,cHBzLXByZXZpb3Vz' on the room; the new session's connected handler (offer with sprop) handed the relay the previous session's sps and pps (non-null Buffers at startFallbackRelay invocation time); a sprop stream capture on a replaced producer wrote sprop 'Z0LgH9oBQBboQA==,aM48gA==' onto the room. After the fix: closeWhipSession sets fallbackH264Sprop, fallbackH264Sps and fallbackH264Pps to null; the connected handler sets fallbackH264Sps/Pps to null before the sprop block and before startFallbackRelay; the captureSpropFromStream rtp handler cleans up and writes nothing when room.whipProducer !== producer. node --test tests/whipRoutes.test.js 32/32 (exit 0). Readers of fallbackH264Sps/Pps (lib/socket.js, the H264Depacketizer constructor) already treat null as absent; fallbackH264Sprop is read only in lib/whipRoutes.js."
+  }
+]

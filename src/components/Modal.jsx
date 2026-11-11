@@ -13,6 +13,12 @@ function getFocusable(dialog) {
  */
 export default function Modal({ titleId, onClose, children, className = 'settings-modal' }) {
     const dialogRef = useRef(null);
+    // Held in a ref so a parent that passes a fresh onClose on every render does
+    // not re-run the focus effect below, which would move focus on each render.
+    const onCloseRef = useRef(onClose);
+    useEffect(() => {
+        onCloseRef.current = onClose;
+    });
 
     useEffect(() => {
         const previouslyFocused = document.activeElement;
@@ -22,7 +28,7 @@ export default function Modal({ titleId, onClose, children, className = 'setting
 
         const onKeyDown = (event) => {
             if (event.key === 'Escape') {
-                onClose();
+                onCloseRef.current();
                 return;
             }
             if (event.key !== 'Tab' || !dialog) return;
@@ -49,7 +55,7 @@ export default function Modal({ titleId, onClose, children, className = 'setting
             window.removeEventListener('keydown', onKeyDown);
             previouslyFocused?.focus?.();
         };
-    }, [onClose]);
+    }, []);
 
     return (
         <div className="modal-backdrop" role="presentation" onClick={onClose}>

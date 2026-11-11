@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-c38b441fff11",
+    "title": "\"without auto-start\" test cannot detect an unwanted StartStream",
+    "severity": "medium",
+    "task": "TASK-095",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/obsWebSocket.test.js: 'a live OBS output is stopped before its settings are rewritten, without auto-start' (now records StartStream and asserts the output stays inactive)",
+    "proof": "No test can fail on the unchanged code, because the code is correct: configureObsStream sends no StartStream with autoStart false. Mutation check: a StartStream sent at the end of configureObsStream (before the final message, in a local edit reverted afterwards) makes the test fail at its order assertion (actual includes StartStream). The new assertions (outputActive false, order excludes StartStream) are the ones that would catch it if the order assertion were removed. Commit beb4be6 on lane/obs; test file only."
+  }
+]

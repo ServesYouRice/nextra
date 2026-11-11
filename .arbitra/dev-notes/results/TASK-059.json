@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-84d11f9a0943",
+    "title": "Skip-to-content link is treated as a hash route and replaces the current view with 'Page not found'",
+    "severity": "medium",
+    "task": "TASK-059",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/browser/ui-semantics.spec.mjs: 'skip to content on /#watch focuses main and keeps the view mounted' and 'skip to content on /#host focuses main and keeps the view mounted' (chromium and mobile-chrome projects)",
+    "proof": "Before the fix (build of the unchanged src/App.jsx) both tests failed: on /#host, 'Page not found' heading count was 1 where 0 was expected and the URL hash became '#main'; on /#watch the .join-form view was not found after Enter on the skip link. After the fix all four runs pass; full ui-semantics.spec.mjs passes 40/40 on chromium and mobile-chrome."
+  }
+]
