@@ -1425,6 +1425,25 @@ export function openObsControlChannel({ password = '', ...options } = {}) {
 }
 
 /**
+ * Stop OBS through an open control channel, and through `stopFresh` (a new
+ * connection) when the channel could not deliver the stop: it never opened,
+ * was closed, or its connection dropped because OBS or its WebSocket server
+ * restarted while the room was live. Without the second step such a stop is
+ * lost and OBS keeps streaming at a room that is gone.
+ * @param {{ stopStream: () => Promise<boolean> } | null | undefined} channel
+ * @param {() => Promise<unknown>} stopFresh
+ */
+export async function stopObsThroughChannel(channel, stopFresh) {
+    if (channel) {
+        const answered = await Promise.resolve()
+            .then(() => channel.stopStream())
+            .then((result) => result === true, () => false);
+        if (answered) return true;
+    }
+    return stopFresh();
+}
+
+/**
  * Stop OBS streaming via obs-websocket v5.
  */
 export async function stopObsStream({ password = '' } = {}) {

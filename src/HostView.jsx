@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useContext } from 'react';
 import { SocketContext } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
-import { configureObsStream, openObsControlChannel, stopObsStream } from './lib/obsWebSocket';
+import { configureObsStream, openObsControlChannel, stopObsStream, stopObsThroughChannel } from './lib/obsWebSocket';
 import { getAv1EncoderCandidates } from './lib/obsOutputModel.mjs';
 import CopyField from './components/CopyField';
 import StatusPill from './components/StatusPill';
@@ -680,9 +680,9 @@ export default function HostView() {
         obsOperationQueue.stop({
             token,
             isCurrent: (session) => guard.isCurrent(session),
-            stop: channel
-                ? () => channel.stopStream()
-                : () => stopObsStream({ password }),
+            // A channel that opened and later lost OBS answers false; the
+            // stop then goes out on a fresh connection.
+            stop: () => stopObsThroughChannel(channel, () => stopObsStream({ password })),
         }).finally(() => channel?.close());
     }, []);
 

@@ -195,7 +195,7 @@ export default function HowToView() {
                 <ul>
                     <li>Output mode: Advanced</li>
                     <li>Video encoder: best available H.264 or AV1 hardware encoder for the selected room mode</li>
-                    <li>Keyframe interval: 2 seconds</li>
+                    <li>Keyframe interval: 1 second</li>
                     <li>Rate control: CBR</li>
                     <li>Tuning: Balanced, Crisp, or Max</li>
                     <li>NVENC preset: tuning-driven <code>p5</code> or <code>p6</code> with full-resolution multipass</li>
