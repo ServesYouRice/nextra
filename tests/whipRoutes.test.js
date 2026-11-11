@@ -2035,3 +2035,25 @@ test('the public WHIP router\'s own IP fallback uses the connecting address when
     assert.equal(await post({ 'x-forwarded-for': '198.51.100.41' }), 404);
     assert.equal(await post({ 'x-forwarded-for': '198.51.100.42', 'cf-connecting-ip': '198.51.100.43' }), 429, 'forwarded headers named the client although they are not trusted');
 });
+
+// The relay's worker is assigned only at the end of its start, so a replacement that arrives while the relay is
+// still starting must stop that start too, or it keeps the room's pipeline and the new session never gets a relay.
+test('a replacement WHIP start stops a fallback relay that is still starting for the old session', { concurrency: false }, async () => {
+    const h = await startWhipHarness('whip-replace-starting-relay', [{}, {}]);
+    try {
+        await startLiveSession(h);
+        const pipeline = h.room._mediaPipeline;
+        pipeline.closeFallback();
+        let cancelled = 0;
+        pipeline.beginStart({ onClose: () => { cancelled += 1; } });
+        assert.equal(pipeline.state, 'starting');
+        assert.equal(h.room.fallbackWorker ?? null, null, 'no worker is assigned while the relay starts');
+
+        const replacement = await h.post();
+        assert.equal(replacement.status, 201);
+        assert.equal(pipeline.state, 'idle', 'the old session\'s relay start still holds the pipeline');
+        assert.equal(cancelled, 1, 'the old relay start was not cancelled');
+    } finally {
+        await h.close();
+    }
+});
