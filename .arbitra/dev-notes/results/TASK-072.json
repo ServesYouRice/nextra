@@ -1,0 +1,12 @@
+[
+ {
+  "issue": "C-e4dd705a6467",
+  "title": "A relay recorder that errors while already on the VP8/fallback format is never restarted",
+  "severity": "medium",
+  "task": "TASK-072",
+  "result": "fixed",
+  "failedBefore": true,
+  "test": "tests/browser/media-flow.spec.mjs: 'the host restarts a VP8 relay recorder that errors or stops on its own, within a budget'; tests/relayRecorderFormat.test.js: 'relay recorder restarts are allowed up to the cap, then denied until the window moves on', 'relay recorder restart budget defaults to 3 per 60 s and leaves the caller's history alone', 'the restart budget reports exhaustion once, and starts over after a reset or a quiet minute'",
+  "proof": "On the unchanged code the browser test (host recording VP8 through a tracked MediaRecorder, one relay viewer playing) failed at its first step: after an error event on the current relay recorder the host never made a new one ('Expected: 4, Received: 3' recorders, 15 s poll timeout), so the relay stayed down with its safety-flush interval and silent-audio context alive. The three budget tests failed on the unchanged code because allowRelayRecorderRestart / createRelayRecorderRestartBudget did not exist. After the fix recorder.onerror and an unexpected recorder.onstop for the current recorder (the ref still points at it and its generation is the latest) release it through stopRelayRecorder, bump relayRecorderRestartToken (a dependency of the membership effect) and the effect starts the next recorder; the browser test passes: an error restarts (new recorder, server mediaGeneration rises, exactly one open silent-audio context, the viewer keeps playing), a direct recorder.stop() restarts, an error event from a long replaced recorder is ignored, the third restart of a minute is allowed, the fourth is refused with exactly one 'restart budget exhausted' warning and no open audio context. An MP4 recorder error still latches relayMp4Failed (existing test 'a playing relay viewer follows the host recorder from MP4 to VP8' passes). Not shown by a test: the real Chrome sequence error -> stop (both events of one fatal error); the browser test uses a synthetic error event and a direct stop(), and the code handles the real pair because the first event clears the ref, so the second is ignored."
+ }
+]

@@ -1,0 +1,502 @@
+{
+  "port": 28516,
+  "rtcPort": 28517,
+  "distDir": "C:\\Users\\V\\AppData\\Local\\Temp\\claude\\c--Users-V-arbitra\\53025464-426b-4472-9c62-52c45e3849f5\\scratchpad\\socket-check-10-dist",
+  "browsers": [
+    {
+      "browser": "chromium",
+      "console": [],
+      "version": "153.0.8010.12",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.8010.12 Safari/537.36",
+      "afterStart": {
+        "profile": "1440p",
+        "fps": 60,
+        "state": [
+          {
+            "requestedSendEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 2520000,
+                "scaleResolutionDownBy": 4
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 8400000,
+                "scaleResolutionDownBy": 2
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 21000000
+              }
+            ],
+            "senderEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 2520000,
+                "scaleResolutionDownBy": 4,
+                "active": true
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 8400000,
+                "scaleResolutionDownBy": 2,
+                "active": true
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 21000000,
+                "active": true
+              }
+            ]
+          }
+        ],
+        "check": {
+          "ok": true,
+          "encodingCount": 3,
+          "rows": [
+            {
+              "index": 0,
+              "rid": "r0",
+              "maxBitrate": 2520000,
+              "expectedForRid": 2520000,
+              "match": true
+            },
+            {
+              "index": 1,
+              "rid": "r1",
+              "maxBitrate": 8400000,
+              "expectedForRid": 8400000,
+              "match": true
+            },
+            {
+              "index": 2,
+              "rid": "r2",
+              "maxBitrate": 21000000,
+              "expectedForRid": 21000000,
+              "match": true
+            }
+          ]
+        }
+      },
+      "afterChange": {
+        "profile": "1080p",
+        "fps": 30,
+        "state": [
+          {
+            "requestedSendEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 2520000,
+                "scaleResolutionDownBy": 4
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 8400000,
+                "scaleResolutionDownBy": 2
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 21000000
+              }
+            ],
+            "senderEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 960000,
+                "scaleResolutionDownBy": 4,
+                "active": true
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 3200000,
+                "scaleResolutionDownBy": 2,
+                "active": true
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 8000000,
+                "active": true
+              }
+            ]
+          }
+        ],
+        "check": {
+          "ok": true,
+          "encodingCount": 3,
+          "rows": [
+            {
+              "index": 0,
+              "rid": "r0",
+              "maxBitrate": 960000,
+              "expectedForRid": 960000,
+              "match": true
+            },
+            {
+              "index": 1,
+              "rid": "r1",
+              "maxBitrate": 3200000,
+              "expectedForRid": 3200000,
+              "match": true
+            },
+            {
+              "index": 2,
+              "rid": "r2",
+              "maxBitrate": 8000000,
+              "expectedForRid": 8000000,
+              "match": true
+            }
+          ]
+        }
+      },
+      "after4k": {
+        "profile": "4k",
+        "fps": 60,
+        "state": [
+          {
+            "requestedSendEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 2520000,
+                "scaleResolutionDownBy": 4
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 8400000,
+                "scaleResolutionDownBy": 2
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 21000000
+              }
+            ],
+            "senderEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 4320000,
+                "scaleResolutionDownBy": 4,
+                "active": true
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 14400000,
+                "scaleResolutionDownBy": 2,
+                "active": true
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 36000000,
+                "active": true
+              }
+            ]
+          }
+        ],
+        "check": {
+          "ok": true,
+          "encodingCount": 3,
+          "rows": [
+            {
+              "index": 0,
+              "rid": "r0",
+              "maxBitrate": 4320000,
+              "expectedForRid": 4320000,
+              "match": true
+            },
+            {
+              "index": 1,
+              "rid": "r1",
+              "maxBitrate": 14400000,
+              "expectedForRid": 14400000,
+              "match": true
+            },
+            {
+              "index": 2,
+              "rid": "r2",
+              "maxBitrate": 36000000,
+              "expectedForRid": 36000000,
+              "match": true
+            }
+          ]
+        }
+      },
+      "outboundStats": [
+        {
+          "rid": "r1",
+          "frameWidth": 640,
+          "frameHeight": 360,
+          "bytesSent": 1253311,
+          "framesEncoded": 145,
+          "targetBitrate": 3478642,
+          "qualityLimitationReason": "bandwidth",
+          "active": true
+        },
+        {
+          "rid": "r2",
+          "bytesSent": 11249,
+          "framesEncoded": 1,
+          "qualityLimitationReason": "bandwidth",
+          "active": true
+        },
+        {
+          "rid": "r0",
+          "frameWidth": 320,
+          "frameHeight": 180,
+          "bytesSent": 2408220,
+          "framesEncoded": 145,
+          "targetBitrate": 3240000,
+          "qualityLimitationReason": "bandwidth",
+          "active": true
+        }
+      ]
+    },
+    {
+      "browser": "firefox",
+      "console": [
+        "warning: [Nextra-Host] Failed to apply capture profile constraints: Constraints could not be satisfied.",
+        "warning: [Nextra-Host] Failed to apply capture profile constraints: Constraints could not be satisfied.",
+        "warning: [Nextra-Host] Failed to apply capture profile constraints: Constraints could not be satisfied.",
+        "warning: [Nextra-Host] Failed to apply capture profile constraints: Constraints could not be satisfied.",
+        "warning: [Nextra-Host] Failed to apply capture profile constraints: Constraints could not be satisfied."
+      ],
+      "version": "155.0",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:155.0) Gecko/20100101 Firefox/155.0",
+      "afterStart": {
+        "profile": "1440p",
+        "fps": 60,
+        "state": [
+          {
+            "requestedSendEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 2520000,
+                "scaleResolutionDownBy": 4
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 8400000,
+                "scaleResolutionDownBy": 2
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 21000000
+              }
+            ],
+            "senderEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 2520000,
+                "scaleResolutionDownBy": 4,
+                "active": true
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 8400000,
+                "scaleResolutionDownBy": 2,
+                "active": true
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 21000000,
+                "scaleResolutionDownBy": 1,
+                "active": true
+              }
+            ]
+          }
+        ],
+        "check": {
+          "ok": true,
+          "encodingCount": 3,
+          "rows": [
+            {
+              "index": 0,
+              "rid": "r0",
+              "maxBitrate": 2520000,
+              "expectedForRid": 2520000,
+              "match": true
+            },
+            {
+              "index": 1,
+              "rid": "r1",
+              "maxBitrate": 8400000,
+              "expectedForRid": 8400000,
+              "match": true
+            },
+            {
+              "index": 2,
+              "rid": "r2",
+              "maxBitrate": 21000000,
+              "expectedForRid": 21000000,
+              "match": true
+            }
+          ]
+        }
+      },
+      "afterChange": {
+        "profile": "1080p",
+        "fps": 30,
+        "state": [
+          {
+            "requestedSendEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 2520000,
+                "scaleResolutionDownBy": 4
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 8400000,
+                "scaleResolutionDownBy": 2
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 21000000
+              }
+            ],
+            "senderEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 960000,
+                "scaleResolutionDownBy": 4,
+                "active": true
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 3200000,
+                "scaleResolutionDownBy": 2,
+                "active": true
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 8000000,
+                "scaleResolutionDownBy": 1,
+                "active": true
+              }
+            ]
+          }
+        ],
+        "check": {
+          "ok": true,
+          "encodingCount": 3,
+          "rows": [
+            {
+              "index": 0,
+              "rid": "r0",
+              "maxBitrate": 960000,
+              "expectedForRid": 960000,
+              "match": true
+            },
+            {
+              "index": 1,
+              "rid": "r1",
+              "maxBitrate": 3200000,
+              "expectedForRid": 3200000,
+              "match": true
+            },
+            {
+              "index": 2,
+              "rid": "r2",
+              "maxBitrate": 8000000,
+              "expectedForRid": 8000000,
+              "match": true
+            }
+          ]
+        }
+      },
+      "after4k": {
+        "profile": "4k",
+        "fps": 60,
+        "state": [
+          {
+            "requestedSendEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 2520000,
+                "scaleResolutionDownBy": 4
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 8400000,
+                "scaleResolutionDownBy": 2
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 21000000
+              }
+            ],
+            "senderEncodings": [
+              {
+                "rid": "r0",
+                "maxBitrate": 4320000,
+                "scaleResolutionDownBy": 4,
+                "active": true
+              },
+              {
+                "rid": "r1",
+                "maxBitrate": 14400000,
+                "scaleResolutionDownBy": 2,
+                "active": true
+              },
+              {
+                "rid": "r2",
+                "maxBitrate": 36000000,
+                "scaleResolutionDownBy": 1,
+                "active": true
+              }
+            ]
+          }
+        ],
+        "check": {
+          "ok": true,
+          "encodingCount": 3,
+          "rows": [
+            {
+              "index": 0,
+              "rid": "r0",
+              "maxBitrate": 4320000,
+              "expectedForRid": 4320000,
+              "match": true
+            },
+            {
+              "index": 1,
+              "rid": "r1",
+              "maxBitrate": 14400000,
+              "expectedForRid": 14400000,
+              "match": true
+            },
+            {
+              "index": 2,
+              "rid": "r2",
+              "maxBitrate": 36000000,
+              "expectedForRid": 36000000,
+              "match": true
+            }
+          ]
+        }
+      },
+      "outboundStats": [
+        {
+          "rid": "r0",
+          "frameWidth": 0,
+          "frameHeight": 0,
+          "bytesSent": 0,
+          "framesEncoded": 0
+        },
+        {
+          "rid": "r1",
+          "frameWidth": 0,
+          "frameHeight": 0,
+          "bytesSent": 0,
+          "framesEncoded": 0
+        },
+        {
+          "rid": "r2",
+          "frameWidth": 0,
+          "frameHeight": 0,
+          "bytesSent": 0,
+          "framesEncoded": 0
+        }
+      ]
+    }
+  ],
+  "serverExitCode": 0,
+  "serverOutputTail": "◇ injected env (0) from .env\n"
+}

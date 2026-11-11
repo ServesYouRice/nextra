@@ -1,0 +1,43 @@
+check 19 MSE probe (check-19-mse-probe.cjs), lane client, Oct 24 2026, Playwright lock held.
+Each run records gen 1 for 3 s, restarts the recorder (stop(); new MediaRecorder; start(300)) like
+HostView stopRelayRecorder()/startRelayRecorder(), records gen 2 for 4 s, then replays the events through
+a copy of WatchView.jsx startRelayPlayback (queue, onChunk, onMediaInit flush, sequence-mode
+SourceBuffer) behind a server that drops chunks of a superseded generation. "current" = the code as it
+is; "fixed" = abort() (+ changeType() when the type changes) at the new media-init. burstMs = events
+from [switch - burstMs, switch + 50 ms] delivered in one task, as a socket backlog arrives.
+Boundary lines: where each recorder chunk ends, by an EBML/MP4 box walk of the concatenated bytes.
+
+=== Chromium 153 (HeadlessChrome/153.0.8010.12), host VP8 -> VP8 ===
+gen1 boundaries {"bytes":1081832,"chunks":10,"boundaries":["@48984 MID-ELEMENT in a3 started @48983 (+1)","@137813 MID-ELEMENT in a3 started @137812 (+1)","@258855 MID-ELEMENT in 75a1 started @258854 (+1)","@382229 MID-ELEMENT in 75a1 started @382228 (+1)","@513426 MID-ELEMENT in 75a1 started @513425 (+1)","@626147 MID-ELEMENT in 1f43b675 started @626146 (+1)","@762110 MID-ELEMENT in a3 started @762109 (+1)","@866559 MID-ELEMENT in a3 started @866558 (+1)","@999183 MID-ELEMENT in a3 started @999182 (+1)"]}
+gen2 boundaries {"bytes":1435087,"chunks":13,"boundaries":["@58543 MID-ELEMENT in a3 started @58542 (+1)", ... all 12 the same: one byte into the next SimpleBlock/BlockGroup/Cluster]}
+(first run, same recording settings:)
+play {"mode":"current","burstMs":0,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0,7.02]],"currentTime":6.88,"appended":{"1":10,"2":13},"flushed":0,"queueLeft":0}
+play {"mode":"current","burstMs":400,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0,2.77]],"currentTime":2.36,"appended":{"1":9,"2":13},"flushed":1,"queueLeft":0}
+play {"mode":"current","burstMs":700,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0,2.42]],"currentTime":2.06,"appended":{"1":8,"2":13},"flushed":2,"queueLeft":0}
+play {"mode":"fixed","burstMs":0,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0,7]],"currentTime":6.88,"appended":{"1":10,"2":13},"flushed":0,"queueLeft":0}
+play {"mode":"fixed","burstMs":400,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0,6.4]],"currentTime":6.29,"appended":{"1":9,"2":13},"flushed":1,"queueLeft":0}
+play {"mode":"fixed","burstMs":700,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0,6.1]],"currentTime":5.99,"appended":{"1":8,"2":13},"flushed":2,"queueLeft":0}
+(second run:)
+play {"mode":"current","burstMs":700,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0,2.39]],"currentTime":2.06,"appended":{"1":8,"2":13},"flushed":2,"queueLeft":0}
+play {"mode":"fixed","burstMs":700,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0,6.09]],"currentTime":5.97,"appended":{"1":8,"2":13},"flushed":2,"queueLeft":0}
+
+=== Chromium 153, host MP4 (video/mp4;codecs=avc1.640028,mp4a.40.2) -> VP8 ===
+gen1 boundaries {"bytes":705962,"chunks":4,"boundaries":["@1252 moof","@409956 moof","@594686 moof"]}
+gen2 boundaries {"bytes":1401084,"chunks":13,"boundaries":[all 12 MID-ELEMENT, one byte into the next element]}
+play {"mode":"current","burstMs":0,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0,2.94]],"currentTime":2.88,"appended":{"1":4,"2":13},"flushed":0,"queueLeft":0}
+play {"mode":"fixed","burstMs":0,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0,7.04]],"currentTime":6.76,"appended":{"1":4,"2":13},"flushed":0,"queueLeft":0}
+
+=== Firefox 155, host VP8 -> VP8 ===
+gen1 boundaries {"bytes":1453201,"chunks":10,"boundaries":["@76932 a3","@191163 a3","@350410 a3","@515114 a3","@684722 a3","@852362 a3","@1020853 a3","@1169500 a3","@1340352 a3"]}
+(Firefox's old recorder delivered its last chunk after the new recorder's start event: "server dropped late gen 1 chunk")
+play {"mode":"current","burstMs":0,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0.01,6.81]],"currentTime":5.25,"appended":{"1":9,"2":1},"flushed":0}
+play {"mode":"current","burstMs":700,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0.01,6.5]],"currentTime":4.8,"appended":{"1":8,"2":1},"flushed":1}
+play {"mode":"fixed","burstMs":0,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0.01,6.81]],"currentTime":5.25,"appended":{"1":9,"2":1},"flushed":0}
+play {"mode":"fixed","burstMs":700,"sbErrors":0,"mediaSourceState":"open","videoError":null,"buffered":[[0.01,6.2]],"currentTime":4.64,"appended":{"1":8,"2":1},"flushed":1}
+
+Reading: Chromium's recorder ends every timeslice one byte into the next element (libwebm writes the
+element ID byte by byte and the slice is cut on that write). When the old generation's queued chunks are
+flushed, the SourceBuffer keeps the dangling bytes and takes all of the new generation (13 appends) without
+buffering any of it: no error event, MediaSource still open, no video error, picture frozen. An MP4
+SourceBuffer given the VP8 generation does the same. With abort() (+ changeType()) playback continues.
+Firefox's recorder cuts at element boundaries, so Firefox-recorded VP8 survives the flush.

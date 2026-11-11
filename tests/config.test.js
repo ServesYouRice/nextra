@@ -217,3 +217,22 @@ test('FFMPEG_PATH prefers the bundled binary, then PATH, and honors an explicit 
         fs.rmSync(tempDir, { recursive: true, force: true });
     }
 });
+
+test('TRUST_PROXY keeps address and subnet values as strings and parses only digits-only hop counts', () => {
+    const configPath = path.join(__dirname, '..', 'config.js');
+    const readTrustProxy = (value) => {
+        const result = spawnSync(process.execPath, [
+            '-e', `process.stdout.write(JSON.stringify(require(${JSON.stringify(configPath)}).TRUST_PROXY))`,
+        ], { encoding: 'utf8', env: { ...process.env, TRUST_PROXY: value } });
+        assert.equal(result.status, 0, result.stderr);
+        return JSON.parse(result.stdout);
+    };
+
+    assert.equal(readTrustProxy(''), false);
+    assert.equal(readTrustProxy('true'), true);
+    assert.equal(readTrustProxy('0'), false);
+    assert.equal(readTrustProxy('2'), 2);
+    assert.equal(readTrustProxy('127.0.0.1'), '127.0.0.1');
+    assert.equal(readTrustProxy('10.0.0.0/8'), '10.0.0.0/8');
+    assert.equal(readTrustProxy('loopback, 10.0.0.0/8'), 'loopback, 10.0.0.0/8');
+});

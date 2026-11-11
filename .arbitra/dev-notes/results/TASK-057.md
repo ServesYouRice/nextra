@@ -1,0 +1,16 @@
+TASK-057 (lane server): a fatal error during a graceful shutdown now cleans up and exits 1, and a graceful shutdown that throws is handled as a fatal error. New lib/shutdownCoordinator.js holds the phase (running, graceful, fatal) and one exit funnel with injected exit, cleanup, closeServer, notifyRoomsEnded and setTimer; server.js builds one coordinator where requestFatalShutdown used to be defined and the local shutdown() is gone. Verify: `node --test tests/shutdownCoordinator.test.js` (new, 16 cases), the new integration test in tests/serverIntegration.test.js (fails before, passes after), lint, typecheck and `npm test` (788 tests) pass.
+
+How it behaves:
+- requestGraceful arms the 5 s force-exit timer (exit 0) as its first statement, before anything that can throw or await, then emits SERVER_SHUTDOWN, waits the 150 ms flush, runs cleanup, closes the listener and exits 0 from the close callback. Any throw in that body goes to the fatal path.
+- requestFatal arms its own force-exit timer (also 5 s by default, exit 1) first, emits SERVER_FATAL only if rooms were not told already, waits 150 ms if it emitted, runs cleanup guarded by try/catch and exits 1. During a graceful shutdown it skips the notice and the wait and exits 1 immediately.
+- The exit funnel calls exit once; while the phase is fatal any exit(0) request (the graceful timer or the listener close callback) becomes exit(1).
+- Signal handlers (SIGINT, SIGTERM, SIGHUP, SIGBREAK) now go through onStopSignal, which attaches a .catch to the fatal path, as the SMOKE_TEST endpoint already did.
+- cleanupGlobalResources was checked to be safe to run twice (the coordinator can call it twice: graceful, then fatal).
+
+Prompt notes and decisions:
+- The worker-death handler read the local isShuttingDown; it now reads shutdownCoordinator.isShuttingDown() (one line in server.js, in the region TASK-058 owns; lib/workerRecovery.js is untouched). Merging TASK-058 may need that one line resolved by hand.
+- The fatal log line '[fatal] exiting after <reason>; an external supervisor must restart Nextra.' is unchanged (a test asserts it). The graceful log lines 'SIGTERM received. Shutting down gracefully...' and 'Server closed.' moved into the coordinator and still go through console.log.
+- A graceful shutdown whose cleanup throws now exits 1 (the prompt says to convert internal throws to the fatal path). Before, that rejection left the process alive.
+- Side effect to be aware of: an unhandled rejection or uncaught exception during the 5 s graceful window (including errors caused by the teardown itself) now exits 1 instead of being ignored. The existing graceful-exit tests (serverIntegration, workerProcessRecovery, testControlEndpoints, churn) still see exit 0.
+- The integration test depends on a timing window: the unhandled-rejection request must reach the server within the 150 ms flush (it is sent on an already-open kept-alive connection right after the 202 of the shutdown request, six reruns passed). A heavily loaded machine could in principle miss the window; the coordinator unit tests do not depend on timing.
+- "Confirm test runner supports fake timers": node:test has mock.timers, but the coordinator takes setTimer as an injected function, which makes the ordering of arming and firing exact without it.

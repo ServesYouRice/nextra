@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-ba70cd023811",
+    "title": "Passive DTLS offers receive a contradictory passive answer",
+    "severity": "medium",
+    "task": "TASK-027",
+    "result": "no_change_needed",
+    "failedBefore": false,
+    "test": "tests/whepRoutesDtlsRole.test.js (new, 5 tests): 'WHEP route: a=setup:<actpass|active|passive> offer is connected with remote role ... and answered a=setup:... in both sections' (each posts a session-level and a media-level offer), 'an offer with no a=setup is connected with remote role client and answered a=setup:passive', 'one DTLS role for the bundle, taken from the video section when the sections disagree'. Each asserts the dtlsParameters.role the fake transport's connect() received and every a=setup line of the answer.",
+    "proof": "The defect is already gone on dev: check 17 (a863cb6, lane netcheck, merged) added viewerDtlsRoles in lib/whep.js, which gives both the remote role for transport.connect() (passive -> 'server', anything else -> 'client') and the answer's a=setup (passive -> active, anything else -> passive) from one decision; createViewerAnswer computes it once and buildActiveSection writes it into every answered section. lib/whep.js:195 and :373 as the prompt quotes them no longer exist. That fix's tests (tests/whep.test.js, 'WHEP answer a=setup matches the DTLS role given to mediasoup') call parseViewerDtls and createViewerAnswer directly; what was still missing, and what VAL-036 asks for, is a test that sees the argument transport.connect() really receives from lib/whepRoutes.js together with the SDP the route returns. tests/whepRoutesSession.test.js asserts that only for an actpass offer. The new file does it for passive and active as well. On the current code all 5 pass (node --test tests/whepRoutesDtlsRole.test.js). Run against lib/whep.js as it was before a863cb6 (git show a863cb6^:lib/whep.js written over the file, then restored with git checkout), 2 of 5 fail: the passive offer (role 'server' but setups ['passive','passive'] instead of ['active','active']) and the disagreeing-sections case; actpass, active and no-setup pass in both versions, so actpass answers are unchanged (VAL-036). Output in the scratchpad, lifecycle-TASK-027-before.txt. npm run lint and typecheck pass; node --test tests/whep.test.js 121/121; npm test 1290/1290 (VAL-042: no existing assertion changed or removed). Commit bdc8624 on lane/lifecycle (test-only)."
+  }
+]

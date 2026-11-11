@@ -121,3 +121,26 @@ test('release compliance files are trackable and required package inputs', () =>
     assert.match(packager, /'SOURCE\.md'/);
     assert.match(packager, /'THIRD_PARTY_NOTICES\.md'/);
 });
+
+test('only the publish job holds a write token, and build jobs keep no credentials', () => {
+    const workflow = read('.github/workflows/release.yml');
+    const [buildPart, publishPart] = workflow.split(/^ {2}publish:\s*$/m);
+
+    assert.ok(publishPart, 'the publish job exists');
+    assert.match(buildPart, /^permissions:\r?\n {2}contents: read\r?$/m, 'the workflow default is read-only');
+    assert.doesNotMatch(buildPart, /contents: write/, 'a build job holds a write token');
+    assert.match(buildPart, /persist-credentials: false/);
+    assert.match(publishPart, /^ {4}permissions:\r?\n {6}contents: write\r?$/m);
+    assert.match(read('.github/workflows/ci.yml'), /^permissions:\r?\n {2}contents: read\r?$/m);
+});
+
+test('a release stops before building when its tag is not the package.json version', () => {
+    const workflow = read('.github/workflows/release.yml');
+    const check = workflow.indexOf('Check the tag matches package.json');
+    const install = workflow.indexOf('run: npm ci');
+
+    assert.ok(check > 0 && check < install, 'the version check runs before the install');
+    assert.match(workflow, /tag_version="\$\{GITHUB_REF_NAME#v\}"/);
+    assert.match(workflow, /require\('\.\/package\.json'\)\.version/);
+    assert.match(workflow, /if \[ "\$tag_version" != "\$package_version" \]; then/);
+});

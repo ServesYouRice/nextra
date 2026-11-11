@@ -1,0 +1,181 @@
+[
+  {
+    "engine": "firefox (fake media streams)",
+    "version": "155.0",
+    "env": {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:155.0) Gecko/20100101 Firefox/155.0",
+      "secureContext": true,
+      "getDisplayMedia": "function",
+      "hostViewIsChromium": false
+    },
+    "results": [
+      {
+        "label": "getUserMedia audio (control: engine has an audio source)",
+        "opts": "{\"audio\":true}",
+        "tracks": [
+          "audio (Default Audio Device)"
+        ]
+      },
+      {
+        "label": "HostView non-Chromium options (audio: false)",
+        "opts": "{\"video\":{\"width\":1920,\"height\":1080,\"frameRate\":30},\"audio\":false}",
+        "tracks": [
+          "video"
+        ]
+      },
+      {
+        "label": "HostView Chromium options (audio {channelCount:2}, systemAudio include)",
+        "opts": "{\"video\":{\"width\":1920,\"height\":1080,\"frameRate\":30},\"audio\":{\"channelCount\":2},\"systemAudio\":\"include\"}",
+        "tracks": [
+          "video"
+        ]
+      },
+      {
+        "label": "audio: true",
+        "opts": "{\"video\":true,\"audio\":true}",
+        "tracks": [
+          "video"
+        ]
+      },
+      {
+        "label": "audio {channelCount:2}",
+        "opts": "{\"video\":true,\"audio\":{\"channelCount\":2}}",
+        "tracks": [
+          "video"
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "firefox (real devices, prompts disabled)",
+    "version": "155.0",
+    "env": {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:155.0) Gecko/20100101 Firefox/155.0",
+      "secureContext": true,
+      "getDisplayMedia": "function",
+      "hostViewIsChromium": false
+    },
+    "results": [
+      {
+        "label": "getUserMedia audio (control: engine has an audio source)",
+        "opts": "{\"audio\":true}",
+        "error": "NotFoundError: The object can not be found here."
+      },
+      {
+        "label": "HostView non-Chromium options (audio: false)",
+        "opts": "{\"video\":{\"width\":1920,\"height\":1080,\"frameRate\":30},\"audio\":false}",
+        "tracks": [
+          "video"
+        ]
+      },
+      {
+        "label": "HostView Chromium options (audio {channelCount:2}, systemAudio include)",
+        "opts": "{\"video\":{\"width\":1920,\"height\":1080,\"frameRate\":30},\"audio\":{\"channelCount\":2},\"systemAudio\":\"include\"}",
+        "tracks": [
+          "video"
+        ]
+      },
+      {
+        "label": "audio: true",
+        "opts": "{\"video\":true,\"audio\":true}",
+        "tracks": [
+          "video"
+        ]
+      },
+      {
+        "label": "audio {channelCount:2}",
+        "opts": "{\"video\":true,\"audio\":{\"channelCount\":2}}",
+        "tracks": [
+          "video"
+        ]
+      }
+    ]
+  },
+  {
+    "engine": "webkit",
+    "version": "26.6",
+    "env": {
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Safari/605.1.15",
+      "secureContext": true,
+      "getDisplayMedia": "undefined",
+      "hostViewIsChromium": false
+    },
+    "results": [
+      {
+        "label": "getUserMedia audio (control: engine has an audio source)",
+        "opts": "{\"audio\":true}",
+        "error": "TypeError: undefined is not an object (evaluating 'md.getUserMedia')"
+      },
+      {
+        "label": "HostView non-Chromium options (audio: false)",
+        "opts": "{\"video\":{\"width\":1920,\"height\":1080,\"frameRate\":30},\"audio\":false}",
+        "error": "TypeError: undefined is not an object (evaluating 'md.getDisplayMedia')"
+      },
+      {
+        "label": "HostView Chromium options (audio {channelCount:2}, systemAudio include)",
+        "opts": "{\"video\":{\"width\":1920,\"height\":1080,\"frameRate\":30},\"audio\":{\"channelCount\":2},\"systemAudio\":\"include\"}",
+        "error": "TypeError: undefined is not an object (evaluating 'md.getDisplayMedia')"
+      },
+      {
+        "label": "audio: true",
+        "opts": "{\"video\":true,\"audio\":true}",
+        "error": "TypeError: undefined is not an object (evaluating 'md.getDisplayMedia')"
+      },
+      {
+        "label": "audio {channelCount:2}",
+        "opts": "{\"video\":true,\"audio\":{\"channelCount\":2}}",
+        "error": "TypeError: undefined is not an object (evaluating 'md.getDisplayMedia')"
+      }
+    ]
+  },
+  {
+    "engine": "chromium (control)",
+    "version": "153.0.8010.12",
+    "env": {
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+      "secureContext": true,
+      "getDisplayMedia": "function",
+      "hostViewIsChromium": true
+    },
+    "results": [
+      {
+        "label": "getUserMedia audio (control: engine has an audio source)",
+        "opts": "{\"audio\":true}",
+        "tracks": [
+          "audio (Fake Default Audio Input)"
+        ]
+      },
+      {
+        "label": "HostView non-Chromium options (audio: false)",
+        "opts": "{\"video\":{\"width\":1920,\"height\":1080,\"frameRate\":30},\"audio\":false}",
+        "tracks": [
+          "video (screen:-3:0)"
+        ]
+      },
+      {
+        "label": "HostView Chromium options (audio {channelCount:2}, systemAudio include)",
+        "opts": "{\"video\":{\"width\":1920,\"height\":1080,\"frameRate\":30},\"audio\":{\"channelCount\":2},\"systemAudio\":\"include\"}",
+        "tracks": [
+          "audio (Fake audio)",
+          "video (screen:-3:0)"
+        ]
+      },
+      {
+        "label": "audio: true",
+        "opts": "{\"video\":true,\"audio\":true}",
+        "tracks": [
+          "audio (Fake audio)",
+          "video (screen:-3:0)"
+        ]
+      },
+      {
+        "label": "audio {channelCount:2}",
+        "opts": "{\"video\":true,\"audio\":{\"channelCount\":2}}",
+        "tracks": [
+          "audio (Fake audio)",
+          "video (screen:-3:0)"
+        ]
+      }
+    ]
+  }
+]

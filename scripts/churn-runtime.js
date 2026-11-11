@@ -28,6 +28,12 @@
 //   --max-socket-growth=0         Socket.IO connections above the connected baseline
 
 const { io } = require('socket.io-client');
+const {
+    maxOfFiniteOrNull,
+    observeChurnResources,
+    evaluateChurnThresholds,
+} = require('./runtime-benchmark-model');
+const { closeSockets, settleWithin } = require('./runtime-harness-cleanup');
 
 function numberArg(name, fallback) {
     const prefix = `--${name}=`;
@@ -64,9 +70,12 @@ async function fetchMetrics() {
     }
 }
 
-function connectClient() {
+// Every socket is added to `sockets` as soon as it is created, so a run that fails
+// part-way can still close the ones that did connect.
+function connectClient(sockets) {
     return new Promise((resolve, reject) => {
         const socket = io(baseUrl, { transports: ['websocket'], reconnection: false, timeout: ackTimeoutMs });
+        sockets.push(socket);
         // Guard against a handshake that neither connects nor emits an error
         // (e.g. a transport closed by the server's connection limiter).
         const guard = setTimeout(() => {
@@ -114,15 +123,9 @@ async function churnCycle({ host, viewer }) {
 }
 
 async function main() {
-    // Build the persistent pool up front so the baseline sample reflects the
-    // steady-state socket count the run holds.
+    const allSockets = [];
     const pairs = [];
-    for (let i = 0; i < concurrency; i += 1) {
-        const host = await connectClient();
-        const viewer = await connectClient();
-        pairs.push({ host, viewer });
-    }
-
+    const loops = [];
     const counters = { cycles: 0, errors: 0, errorCounts: {} };
     const recordError = (error) => {
         counters.errors += 1;
@@ -131,87 +134,91 @@ async function main() {
     };
     const samples = [];
     let running = true;
-
-    await delay(sampleIntervalMs); // let the pool settle
-    const baseline = await fetchMetrics();
-
-    const sampler = (async () => {
-        const startedAt = Date.now();
-        while (running && Date.now() - startedAt < durationMs) {
-            try {
-                samples.push({ at: Date.now(), metrics: await fetchMetrics() });
-            } catch (err) {
-                recordError(err);
-                samples.push({ at: Date.now(), error: err.message });
-            }
-            await delay(sampleIntervalMs);
-        }
-        running = false;
-    })();
-
-    const workers = pairs.map(async (pair) => {
-        while (running) {
-            try {
-                await churnCycle(pair);
-                counters.cycles += 1;
-            } catch (err) {
-                recordError(err);
-            }
-            if (cycleDelayMs) await delay(cycleDelayMs);
-        }
-    });
-
-    await sampler;
-    running = false;
-    await Promise.all(workers);
-
-    // Sample while the pool is still connected and idle, so the settled sample is
-    // directly comparable to the pool-connected baseline: rooms should be back to
-    // zero and resources/heap back near baseline, while the persistent pool sockets
-    // account for the expected socket residual.
-    await delay(settleMs);
+    let baseline;
     let settled;
+
+    // Whatever ends the run, including a refused connect or a failed metrics request,
+    // the loops are stopped and every socket that connected is closed, including a
+    // host whose viewer never connected; otherwise the open sockets keep the process
+    // alive after it has failed.
     try {
-        settled = await fetchMetrics();
-    } catch (err) {
-        console.error(`Could not read settled metrics: ${err.message}`);
-        pairs.forEach(({ host, viewer }) => { host.close(); viewer.close(); });
-        process.exitCode = 1;
-        return;
+        // Build the persistent pool up front so the baseline sample reflects the
+        // steady-state socket count the run holds.
+        for (let i = 0; i < concurrency; i += 1) {
+            const host = await connectClient(allSockets);
+            const viewer = await connectClient(allSockets);
+            pairs.push({ host, viewer });
+        }
+
+        await delay(sampleIntervalMs); // let the pool settle
+        baseline = await fetchMetrics();
+
+        const sampler = (async () => {
+            const startedAt = Date.now();
+            while (running && Date.now() - startedAt < durationMs) {
+                try {
+                    samples.push({ at: Date.now(), metrics: await fetchMetrics() });
+                } catch (err) {
+                    recordError(err);
+                    samples.push({ at: Date.now(), error: err.message });
+                }
+                await delay(sampleIntervalMs);
+            }
+            running = false;
+        })();
+        loops.push(sampler);
+
+        const workers = pairs.map(async (pair) => {
+            while (running) {
+                try {
+                    await churnCycle(pair);
+                    counters.cycles += 1;
+                } catch (err) {
+                    recordError(err);
+                }
+                if (cycleDelayMs) await delay(cycleDelayMs);
+            }
+        });
+        loops.push(...workers);
+
+        await sampler;
+        running = false;
+        await Promise.all(workers);
+
+        // Sample while the pool is still connected and idle, so the settled sample is
+        // directly comparable to the pool-connected baseline: rooms should be back to
+        // zero and resources/heap back near baseline, while the persistent pool sockets
+        // account for the expected socket residual.
+        await delay(settleMs);
+        try {
+            settled = await fetchMetrics();
+        } catch (err) {
+            console.error(`Could not read settled metrics: ${err.message}`);
+            process.exitCode = 1;
+            return;
+        }
+    } finally {
+        running = false;
+        // A cycle in flight normally ends within an acknowledgement timeout; the bound
+        // only keeps a stuck loop from holding up the cleanup.
+        await settleWithin(loops, ackTimeoutMs + cycleDelayMs + 1_000);
+        closeSockets(allSockets);
     }
-    pairs.forEach(({ host, viewer }) => { host.close(); viewer.close(); });
 
-    const baseHeap = baseline.process?.memory?.heapUsed || 0;
-    const settledHeap = settled.process?.memory?.heapUsed || 0;
-    const heapGrowthPercent = baseHeap > 0 ? ((settledHeap - baseHeap) / baseHeap) * 100 : 0;
-    const baseResources = baseline.process?.resources?.total || 0;
-    const settledResources = settled.process?.resources?.total || 0;
-    const resourceGrowth = settledResources - baseResources;
-    const roomResidual = settled.rooms?.active || 0;
-    const baselineSockets = baseline.sockets?.counters?.activeSockets ?? baseline.sockets?.activeSockets ?? 0;
-    const settledSockets = settled.sockets?.counters?.activeSockets ?? settled.sockets?.activeSockets ?? 0;
-    const socketGrowth = settledSockets - baselineSockets;
+    // A field the server did not report is null (unavailable), never 0: zero would
+    // read as no growth and pass. The run then fails with an explicit "unavailable".
+    const resources = observeChurnResources(baseline, settled);
+    const { observed } = resources;
 
-    const heapSamples = samples.map(({ metrics }) => metrics?.process?.memory?.heapUsed || 0);
-    const resourceSamples = samples.map(({ metrics }) => metrics?.process?.resources?.total || 0);
-    const peakHeap = Math.max(settledHeap, ...heapSamples);
-    const peakResources = Math.max(settledResources, ...resourceSamples);
+    const heapSamples = samples.map(({ metrics }) => metrics?.process?.memory?.heapUsed);
+    const resourceSamples = samples.map(({ metrics }) => metrics?.process?.resources?.total);
+    const peakHeap = maxOfFiniteOrNull([resources.settled.heapUsed, ...heapSamples]);
+    const peakResources = maxOfFiniteOrNull([resources.settled.resources, ...resourceSamples]);
 
     const failures = [];
     if (counters.cycles === 0) failures.push('no churn cycles completed');
     if (counters.errors > 0) failures.push(`${counters.errors} churn or metrics operations failed`);
-    if (heapGrowthPercent > thresholds.heapGrowthPercent) {
-        failures.push(`heap grew ${heapGrowthPercent.toFixed(1)}% (limit ${thresholds.heapGrowthPercent}%)`);
-    }
-    if (resourceGrowth > thresholds.resourceGrowth) {
-        failures.push(`active resources grew by ${resourceGrowth} (limit ${thresholds.resourceGrowth})`);
-    }
-    if (roomResidual > thresholds.roomResidual) {
-        failures.push(`${roomResidual} rooms still active after settle (limit ${thresholds.roomResidual})`);
-    }
-    if (socketGrowth > thresholds.socketGrowth) {
-        failures.push(`active sockets grew by ${socketGrowth} (limit ${thresholds.socketGrowth})`);
-    }
+    failures.push(...evaluateChurnThresholds(observed, thresholds));
 
     const summary = {
         url: baseUrl,
@@ -222,18 +229,15 @@ async function main() {
         churnErrors: counters.errors,
         churnErrorCounts: counters.errorCounts,
         samples: samples.length,
-        baseline: { heapUsed: baseHeap, resources: baseResources, socketsActive: baselineSockets },
+        baseline: resources.baseline,
         settled: {
-            heapUsed: settledHeap,
-            resources: settledResources,
-            roomsActive: roomResidual,
-            socketsActive: settledSockets,
+            ...resources.settled,
             resourcesByType: settled.process?.resources?.byType || {},
         },
         observed: {
-            heapGrowthPercent: Number(heapGrowthPercent.toFixed(2)),
-            resourceGrowth,
-            socketGrowth,
+            heapGrowthPercent: observed.heapGrowthPercent === null ? null : Number(observed.heapGrowthPercent.toFixed(2)),
+            resourceGrowth: observed.resourceGrowth,
+            socketGrowth: observed.socketGrowth,
             peakHeapUsed: peakHeap,
             peakResources,
         },

@@ -1,0 +1,47 @@
+'use strict';
+// TASK-047 reproduction: what a child receives from scripts/package-app.js run()
+// on Windows when its arguments are paths with spaces and cmd.exe metacharacters.
+// Usage: node TASK-047-repro.js <path to the lane's scripts/package-app.js>
+// The command is the bare `node` (resolved through PATH, as `npm`/`npx` are), so
+// the command itself has no space and the arguments are what gets split.
+// Every fragment cmd.exe could run as a command is a relative path that does not
+// exist in the empty temporary working directory.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const packager = require(path.resolve(process.argv[2]));
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'package-TASK-047-repro-'));
+const probe = path.join(dir, 'probe.js');
+const record = path.join(dir, 'argv.json');
+fs.writeFileSync(probe, `require('fs').writeFileSync(${JSON.stringify(record)}, JSON.stringify(process.argv.slice(2)));\n`);
+
+const args = [
+    'C:\\Users\\A B\\proj & x\\.caxa-stage',
+    'C:\\Users\\A B\\proj & x\\Nextra.exe',
+    'C:\\Users\\A B\\AppData\\Local\\Temp (1)\\a^b|c\\nextra-caxa-stub-42.exe',
+    '--',
+    '{{caxa}}/server.js',
+];
+
+console.log(`platform: ${process.platform}, node ${process.version}`);
+console.log('arguments given to run("node", [probe, ...]):');
+for (const arg of args) console.log(`  ${JSON.stringify(arg)}`);
+console.log(`line Node hands to cmd.exe under shell:true: ${['node', probe, ...args].join(' ')}`);
+let failure = null;
+try {
+    packager.run('node', [probe, ...args], { cwd: dir });
+} catch (err) {
+    failure = err;
+}
+console.log(`run() result: ${failure ? `threw "${failure.message}"` : 'returned'}`);
+if (fs.existsSync(record)) {
+    const received = JSON.parse(fs.readFileSync(record, 'utf8'));
+    console.log(`the child received ${received.length} arguments:`);
+    for (const arg of received) console.log(`  ${JSON.stringify(arg)}`);
+    console.log(`identical to what was given: ${JSON.stringify(received) === JSON.stringify(args)}`);
+} else {
+    console.log('the child never started');
+}
+fs.rmSync(dir, { recursive: true, force: true });

@@ -6,19 +6,9 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { io: createSocketClient } = require('socket.io-client');
+const { claimServerPorts } = require('./serverPorts');
 
 const projectRoot = path.resolve(__dirname, '..');
-
-function reserveTcpPort() {
-    return new Promise((resolve, reject) => {
-        const server = net.createServer();
-        server.once('error', reject);
-        server.listen(0, '127.0.0.1', () => {
-            const { port } = server.address();
-            server.close((err) => (err ? reject(err) : resolve(port)));
-        });
-    });
-}
 
 function waitForExit(child, timeoutMs = 10_000) {
     if (child.exitCode !== null) {
@@ -152,9 +142,7 @@ function waitForSocketEvent(socket, event, predicate = () => true, timeoutMs = 5
 }
 
 test('real server composition enforces HTTP and Socket.IO operational contracts', { concurrency: false, timeout: 40_000 }, async (t) => {
-    const port = await reserveTcpPort();
-    let rtcPort = await reserveTcpPort();
-    while (rtcPort === port) rtcPort = await reserveTcpPort();
+    const { port, rtcPort } = await claimServerPorts();
     const metricsToken = 'integration-metrics-token';
     const baseUrl = `http://127.0.0.1:${port}`;
     let output = '';
@@ -507,10 +495,126 @@ test('real server composition enforces HTTP and Socket.IO operational contracts'
     assert.equal(exit.code, 0, output);
 });
 
+// C-bfcdc67f6dce / VAL-142: a proxy appends to the X-Forwarded-For a client sends, so the entries on the left are the
+// client's own words and only the rightmost one, written by the loopback proxy, says who connected. The server runs
+// with the same environment as the main test (loopback peer, TRUST_X_FORWARDED_HEADERS=true, no TRUST_PROXY, so one
+// trusted hop). Every address here differs from the main test's. CREATE_ROOM_RATE_LIMIT_MAX is 1, so each room
+// creation that succeeds comes from its own address (a refused attempt does not count), and MAX_VIEWERS_PER_ROOM is 1,
+// so each viewer leaves before the next one joins.
+test('a spoofed leftmost X-Forwarded-For entry never grants loopback or trusted-LAN privilege to a remote rightmost hop', { concurrency: false, timeout: 40_000 }, async (t) => {
+    const { port, rtcPort } = await claimServerPorts();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const operatorToken = 'integration-operator-token-0123456789abcdef';
+    let output = '';
+    let shutdownRequested = false;
+    const sockets = [];
+    const testDistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-integration-dist-'));
+    await fs.writeFile(
+        path.join(testDistDir, 'index.html'),
+        '<!doctype html><html><body><div id="root"></div><script src="/assets/test.js"></script></body></html>',
+    );
+    t.after(() => fs.rm(testDistDir, { recursive: true, force: true }));
+
+    const child = spawn(process.execPath, ['server.js'], {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: createServerTestEnv({ port, rtcPort, distDir: testDistDir, metricsToken: 'integration-metrics-token' }),
+    });
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+
+    t.after(async () => {
+        for (const openSocket of sockets) openSocket.close();
+        if (child.exitCode === null && !shutdownRequested) {
+            try {
+                shutdownRequested = true;
+                await fetch(`${baseUrl}/api/test/shutdown`, { method: 'POST' });
+            } catch {
+                child.kill();
+            }
+        }
+        if (child.exitCode === null) {
+            try {
+                await waitForExit(child, 7_000);
+            } catch {
+                child.kill();
+            }
+        }
+    });
+
+    const connect = async (forwardedFor) => {
+        const connected = await connectSocket(baseUrl, baseUrl, forwardedFor ? { 'x-forwarded-for': forwardedFor } : {});
+        sockets.push(connected);
+        return connected;
+    };
+
+    await waitForReady(baseUrl, child, () => output);
+
+    // /api/metrics: the sensitive JSON is for loopback or an operator token. A remote rightmost hop is neither,
+    // whatever the client wrote to its left; a loopback rightmost hop is a local client behind the proxy.
+    for (const spoofedLoopback of ['127.0.0.1, 203.0.113.140', '::1, 203.0.113.140', '127.0.0.1, 10.0.0.1, 203.0.113.140']) {
+        const response = await fetch(`${baseUrl}/api/metrics`, { headers: { 'x-forwarded-for': spoofedLoopback } });
+        assert.equal(response.status, 403, `X-Forwarded-For: ${spoofedLoopback}`);
+    }
+    const chainWithOperatorToken = await fetch(`${baseUrl}/api/metrics`, {
+        headers: { 'x-forwarded-for': '127.0.0.1, 203.0.113.140', 'x-nextra-operator-token': operatorToken },
+    });
+    assert.equal(chainWithOperatorToken.status, 200);
+    const remoteLeftmostLoopbackRightmost = await fetch(`${baseUrl}/api/metrics`, {
+        headers: { 'x-forwarded-for': '203.0.113.141, 127.0.0.1' },
+    });
+    assert.equal(remoteLeftmostLoopbackRightmost.status, 200);
+
+    // create-room: without a token a remote client is refused, and a forged loopback entry does not change that.
+    const spoofedHost = await connect('127.0.0.1, 203.0.113.151');
+    const spoofedCreate = await socketRequest(spoofedHost, 'create-room', { ingestMode: 'browser' });
+    assert.equal(spoofedCreate.success, false);
+    assert.match(spoofedCreate.error, /Operator authorization/);
+    const spoofedLanCreate = await connect('192.168.50.125, 203.0.113.152');
+    const spoofedLanCreateResult = await socketRequest(spoofedLanCreate, 'create-room', { ingestMode: 'browser' });
+    assert.equal(spoofedLanCreateResult.success, false);
+    assert.match(spoofedLanCreateResult.error, /Operator authorization/);
+    const tokenHost = await connect('127.0.0.1, 203.0.113.151');
+    const tokenCreate = await socketRequest(tokenHost, 'create-room', { ingestMode: 'browser', operatorToken });
+    assert.equal(tokenCreate.success, true);
+    assert.deepEqual(await socketRequest(tokenHost, 'leave-room'), { success: true });
+
+    // join-room relay policy: plaintext relay is for loopback and the trusted LAN, picked by the rightmost hop.
+    const host = await connect();
+    const created = await socketRequest(host, 'create-room', { ingestMode: 'browser' });
+    assert.equal(created.success, true);
+
+    const joinWithChain = async (forwardedFor) => {
+        const viewer = await connect(forwardedFor);
+        const joined = await socketRequest(viewer, 'join-room', { code: created.code });
+        assert.equal(joined.success, true, `X-Forwarded-For: ${forwardedFor}`);
+        const relay = await socketRequest(viewer, 'relay-consume-start');
+        assert.deepEqual(await socketRequest(viewer, 'leave-room'), { success: true });
+        viewer.close();
+        return { relayAllowed: joined.relayAllowed, relay };
+    };
+
+    for (const spoofed of ['192.168.50.125, 203.0.113.161', '127.0.0.1, 203.0.113.162', '192.168.50.125, 127.0.0.1, 203.0.113.163']) {
+        const { relayAllowed, relay } = await joinWithChain(spoofed);
+        assert.equal(relayAllowed, false, `X-Forwarded-For: ${spoofed}`);
+        assert.equal(relay.success, false, `X-Forwarded-For: ${spoofed}`);
+        assert.match(relay.error, /HTTPS or an explicitly trusted LAN/);
+    }
+    // The other way round, the rightmost hop is what counts: a remote entry on the left does not take LAN trust away.
+    assert.equal((await joinWithChain('203.0.113.164, 192.168.50.126')).relayAllowed, true);
+
+    assert.deepEqual(await socketRequest(host, 'leave-room'), { success: true });
+
+    shutdownRequested = true;
+    const shutdownResponse = await fetch(`${baseUrl}/api/test/shutdown`, { method: 'POST' });
+    assert.equal(shutdownResponse.status, 202);
+    const exit = await waitForExit(child);
+    assert.equal(exit.code, 0, output);
+});
+
 test('missing production SPA keeps readiness at 503 while liveness and build guidance remain available', { concurrency: false, timeout: 30_000 }, async (t) => {
-    const port = await reserveTcpPort();
-    let rtcPort = await reserveTcpPort();
-    while (rtcPort === port) rtcPort = await reserveTcpPort();
+    const { port, rtcPort } = await claimServerPorts();
     const baseUrl = `http://127.0.0.1:${port}`;
     const ownedTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-missing-dist-'));
     const missingDistDir = path.join(ownedTempDir, 'dist');
@@ -571,9 +675,7 @@ test('missing production SPA keeps readiness at 503 while liveness and build gui
 });
 
 test('unexpected unhandled rejection logs its shutdown reason and exits for supervision', { concurrency: false, timeout: 30_000 }, async (t) => {
-    const port = await reserveTcpPort();
-    let rtcPort = await reserveTcpPort();
-    while (rtcPort === port) rtcPort = await reserveTcpPort();
+    const { port, rtcPort } = await claimServerPorts();
     const baseUrl = `http://127.0.0.1:${port}`;
     const testDistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-fatal-dist-'));
     await fs.writeFile(path.join(testDistDir, 'index.html'), '<!doctype html><div id="root"></div>');
@@ -599,4 +701,407 @@ test('unexpected unhandled rejection logs its shutdown reason and exits for supe
     assert.equal(exit.code, 1, output);
     assert.match(output, /shutdownReason=unhandled-rejection/);
     assert.match(output, /external supervisor must restart Nextra/);
+});
+
+// Requests over an agent that keeps its socket open, so a later request can follow
+// an earlier one within milliseconds on a connection that already exists.
+function requestOnAgent(agent, port, method, requestPath) {
+    return new Promise((resolve, reject) => {
+        const request = require('node:http').request({
+            agent,
+            host: '127.0.0.1',
+            port,
+            path: requestPath,
+            method,
+        }, (response) => {
+            response.resume();
+            response.once('end', () => resolve(response.statusCode));
+        });
+        request.setTimeout(5_000, () => request.destroy(new Error(`${method} ${requestPath} timed out`)));
+        request.once('error', reject);
+        request.end();
+    });
+}
+
+test('a fatal error during a graceful shutdown still ends the process with a failure code', { concurrency: false, timeout: 30_000 }, async (t) => {
+    const { port, rtcPort } = await claimServerPorts();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const testDistDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-fatal-graceful-dist-'));
+    await fs.writeFile(path.join(testDistDir, 'index.html'), '<!doctype html><div id="root"></div>');
+    let output = '';
+    const agent = new (require('node:http').Agent)({ keepAlive: true, maxSockets: 1 });
+    let socket = null;
+    const child = spawn(process.execPath, ['server.js'], {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: createServerTestEnv({ port, rtcPort, distDir: testDistDir }),
+    });
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+
+    t.after(async () => {
+        socket?.close();
+        agent.destroy();
+        if (child.exitCode === null) child.kill();
+        await fs.rm(testDistDir, { recursive: true, force: true });
+    });
+
+    await waitForReady(baseUrl, child, () => output);
+    socket = await connectSocket(baseUrl);
+    const roomEnded = waitForSocketEvent(socket, 'room-ended');
+    // Open the connection before the shutdown starts: the graceful path stops
+    // accepting new ones 150 ms after it begins.
+    assert.equal(await requestOnAgent(agent, port, 'GET', '/healthz'), 200);
+    assert.equal(await requestOnAgent(agent, port, 'POST', '/api/test/shutdown'), 202);
+    assert.equal(await requestOnAgent(agent, port, 'POST', '/api/test/unhandled-rejection'), 202, output);
+
+    const exit = await waitForExit(child);
+    // The exit event can come before the last output has been read.
+    if (!child.stdout.destroyed || !child.stderr.destroyed) await new Promise((resolve) => child.once('close', resolve));
+    assert.equal(exit.code, 1, output);
+    // The stop was the graceful one when the error arrived: rooms were told so.
+    assert.equal((await roomEnded).code, 'server-shutdown');
+    assert.match(output, /shutdownReason=unhandled-rejection/);
+    assert.match(output, /external supervisor must restart Nextra/);
+});
+
+// Requests a path from the spawned server over HTTP or HTTPS (self-signed
+// certificate accepted) and returns the status, headers and body.
+function requestFromServer(baseUrl, requestPath, method = 'GET') {
+    const transport = baseUrl.startsWith('https:') ? require('node:https') : require('node:http');
+    return new Promise((resolve, reject) => {
+        const request = transport.request(`${baseUrl}${requestPath}`, { method, rejectUnauthorized: false }, (response) => {
+            const chunks = [];
+            response.on('data', (chunk) => chunks.push(chunk));
+            response.on('end', () => resolve({
+                status: response.statusCode,
+                headers: response.headers,
+                body: Buffer.concat(chunks).toString('utf8'),
+            }));
+        });
+        request.setTimeout(5_000, () => request.destroy(new Error(`${method} ${requestPath} timed out`)));
+        request.once('error', reject);
+        request.end();
+    });
+}
+
+async function readCspFromServer({ localHttps, allowInsecureLanRelay }) {
+    const { port, rtcPort } = await claimServerPorts();
+    const baseUrl = `${localHttps ? 'https' : 'http'}://127.0.0.1:${port}`;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-csp-'));
+    await fs.writeFile(path.join(tempDir, 'index.html'), '<!doctype html><div id="root"></div>');
+    let output = '';
+    const child = spawn(process.execPath, ['server.js'], {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+            ...createServerTestEnv({ port, rtcPort, distDir: tempDir }),
+            LOCAL_HTTPS: String(localHttps),
+            ALLOW_INSECURE_TRUSTED_LAN_RELAY: String(allowInsecureLanRelay),
+            // A generated certificate must never land in the shared certs folder.
+            HTTPS_CERT_DIR: path.join(tempDir, 'certs'),
+        },
+    });
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+
+    try {
+        const deadline = Date.now() + 30_000;
+        let ready = false;
+        while (!ready && Date.now() < deadline) {
+            if (child.exitCode !== null) {
+                throw new Error(`server exited before readiness (code ${child.exitCode})\n${output}`);
+            }
+            try {
+                ready = (await requestFromServer(baseUrl, '/readyz')).status === 200;
+            } catch {
+                // The listener does not exist yet while mediasoup initializes.
+            }
+            if (!ready) await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        assert.ok(ready, `server did not become ready\n${output}`);
+        const response = await requestFromServer(baseUrl, '/healthz');
+        assert.equal(response.status, 200);
+        return {
+            csp: String(response.headers['content-security-policy'] || ''),
+            hsts: response.headers['strict-transport-security'],
+        };
+    } finally {
+        try {
+            if (child.exitCode === null) await requestFromServer(baseUrl, '/api/test/shutdown', 'POST');
+            if (child.exitCode === null) await waitForExit(child, 7_000);
+        } catch {
+            child.kill();
+        }
+        if (child.exitCode === null) child.kill();
+        await fs.rm(tempDir, { recursive: true, force: true });
+    }
+}
+
+function cspDirectives(csp) {
+    return csp.split(';').map((directive) => directive.trim()).filter(Boolean);
+}
+
+test('CSP asks browsers to upgrade requests to HTTPS only when the listener serves HTTPS and plaintext LAN relay is off', { concurrency: false, timeout: 120_000 }, async () => {
+    const modes = [
+        { localHttps: false, allowInsecureLanRelay: false, upgrades: false },
+        { localHttps: true, allowInsecureLanRelay: false, upgrades: true },
+        { localHttps: true, allowInsecureLanRelay: true, upgrades: false },
+        { localHttps: false, allowInsecureLanRelay: true, upgrades: false },
+    ];
+    const others = [];
+    for (const mode of modes) {
+        const label = `LOCAL_HTTPS=${mode.localHttps} ALLOW_INSECURE_TRUSTED_LAN_RELAY=${mode.allowInsecureLanRelay}`;
+        const { csp, hsts } = await readCspFromServer(mode);
+        const directives = cspDirectives(csp);
+        assert.equal(
+            directives.includes('upgrade-insecure-requests'),
+            mode.upgrades,
+            `${label}: upgrade-insecure-requests expected ${mode.upgrades ? 'present' : 'absent'} in: ${csp}`,
+        );
+        assert.equal(Boolean(hsts), mode.localHttps, `${label}: HSTS follows the serving scheme`);
+        const scriptSrc = directives.find((directive) => directive.startsWith('script-src ')) || '';
+        assert.match(scriptSrc, /^script-src 'self' 'nonce-[A-Za-z0-9+/=]+'$/, `${label}: script nonce stays`);
+        others.push(directives
+            .filter((directive) => directive !== 'upgrade-insecure-requests')
+            .map((directive) => directive.replace(/'nonce-[A-Za-z0-9+/=]+'/, "'nonce-X'")));
+    }
+    for (const other of others.slice(1)) {
+        assert.deepEqual(other, others[0], 'every CSP directive except the upgrade directive is the same in each mode');
+    }
+});
+
+// ── Advertised addresses follow the address family the servers really bound ──
+
+function reserveTcpPortOn(host) {
+    return new Promise((resolve, reject) => {
+        const server = net.createServer();
+        server.once('error', reject);
+        server.listen(0, host, () => {
+            const { port } = server.address();
+            server.close((err) => (err ? reject(err) : resolve(port)));
+        });
+    });
+}
+
+async function canBindIpv6Loopback() {
+    try {
+        await reserveTcpPortOn('::1');
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// Starts the real server with WHIP on, binding the given hosts. `getOutput`
+// returns what it printed so far; `stop` asks it to shut down and cleans up.
+async function startAddressFamilyServer({ bindHost, whipBindHost, port, whipPort, t }) {
+    const { rtcPort } = await claimServerPorts();
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-address-family-'));
+    await fs.writeFile(path.join(tempDir, 'index.html'), '<!doctype html><div id="root"></div>');
+    let output = '';
+    const child = spawn(process.execPath, ['server.js'], {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+            ...createServerTestEnv({ port, rtcPort, distDir: tempDir }),
+            BIND_HOST: bindHost,
+            WHIP_ENABLED: 'true',
+            WHIP_BIND_HOST: whipBindHost,
+            WHIP_HTTP_PORT: String(whipPort),
+            // The test reads the advertised URLs from the startup banner, which is info-level.
+            LOG_LEVEL: 'info',
+        },
+    });
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+
+    let shutdownRequested = false;
+    const stop = async (shutdownUrl) => {
+        if (child.exitCode === null && !shutdownRequested && shutdownUrl) {
+            shutdownRequested = true;
+            try {
+                await fetch(`${shutdownUrl}/api/test/shutdown`, { method: 'POST' });
+            } catch {
+                child.kill();
+            }
+        } else if (child.exitCode === null && !shutdownRequested) {
+            child.kill();
+        }
+        if (child.exitCode === null) {
+            try {
+                await waitForExit(child, 7_000);
+            } catch {
+                child.kill();
+            }
+        }
+        await fs.rm(tempDir, { recursive: true, force: true });
+    };
+    t.after(() => stop(null));
+
+    // The WHIP line is printed once its listener is up, after the app listener.
+    const deadline = Date.now() + 30_000;
+    while (!/WHIP:\s+\S+\/whip\/broadcast\//.test(output)) {
+        if (child.exitCode !== null) throw new Error(`server exited before WHIP startup (code ${child.exitCode})\n${output}`);
+        if (Date.now() > deadline) throw new Error(`server did not announce its WHIP listener\n${output}`);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return { child, getOutput: () => output, stop };
+}
+
+// fetch that names the URL and the connection error, so an unreachable advertised URL reads as such.
+async function fetchAdvertised(url, options) {
+    try {
+        return await fetch(url, options);
+    } catch (err) {
+        throw new Error(`${options?.method || 'GET'} ${url} did not connect: ${err.cause?.code || err.message}`, { cause: err });
+    }
+}
+
+function advertisedUrls(output) {
+    const local = /Local:\s+(\S+)/.exec(output)?.[1] || '';
+    const whip = /WHIP:\s+(\S+?)\/whip\/broadcast\//.exec(output)?.[1] || '';
+    return { local, whip };
+}
+
+test('BIND_HOST=::1 and WHIP_BIND_HOST=::1 advertise bracketed IPv6 URLs that reach the listeners and are accepted as socket origins', { concurrency: false, timeout: 60_000 }, async (t) => {
+    if (!(await canBindIpv6Loopback())) {
+        t.skip('IPv6 loopback is not available on this machine');
+        return;
+    }
+    const { port } = await claimServerPorts();
+    const { port: whipPort } = await claimServerPorts();
+    const baseUrl = `http://[::1]:${port}`;
+    const { getOutput, stop } = await startAddressFamilyServer({ bindHost: '::1', whipBindHost: '::1', port, whipPort, t });
+    let socket = null;
+    t.after(() => socket?.close());
+
+    try {
+        const urls = advertisedUrls(getOutput());
+        assert.equal(urls.local, baseUrl, `Local: line\n${getOutput()}`);
+        assert.equal(urls.whip, `http://[::1]:${whipPort}`, `WHIP: line\n${getOutput()}`);
+
+        // The advertised host-page URL is reachable: it is the one the browser is opened on.
+        const health = await fetchAdvertised(`${urls.local}/healthz`);
+        assert.equal(health.status, 200);
+
+        const publicConfig = await (await fetchAdvertised(`${baseUrl}/api/config`)).json();
+        assert.equal(publicConfig.whipHttpHost, '::1');
+        assert.equal(publicConfig.whipHttpPort, whipPort);
+        assert.equal(publicConfig.whipHttpUrl, `http://[::1]:${whipPort}`);
+        assert.equal(publicConfig.whipHttpStatus, 'ready');
+
+        // An HTTP request to the advertised WHIP URL reaches the WHIP listener.
+        const preflight = await fetchAdvertised(`${publicConfig.whipHttpUrl}/whip/broadcast/ABC123`, { method: 'OPTIONS' });
+        assert.equal(preflight.status, 204);
+
+        // A host page opened on the advertised URL can open its socket.
+        socket = await connectSocket(baseUrl, baseUrl);
+        const serverConfig = await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('server-config event timed out')), 5_000);
+            socket.once('server-config', (payload) => {
+                clearTimeout(timeout);
+                resolve(payload);
+            });
+            socket.emit('request-server-config');
+        });
+        assert.equal(serverConfig.whipHttpHost, '::1');
+        assert.equal(serverConfig.whipHttpUrl, `http://[::1]:${whipPort}`);
+
+        // The other loopback spellings stay allowed for the same port, and an
+        // unrelated IPv6 origin is still refused.
+        socket.close();
+        socket = await connectSocket(baseUrl, `http://localhost:${port}`);
+        socket.close();
+        socket = await connectSocket(baseUrl, `http://127.0.0.1:${port}`);
+        await assert.rejects(connectSocket(baseUrl, `http://[::2]:${port}`));
+    } finally {
+        await stop(baseUrl);
+    }
+});
+
+test('a second Nextra on the same IPv6 loopback port finds the running one instead of failing on the port', { concurrency: false, timeout: 60_000 }, async (t) => {
+    if (!(await canBindIpv6Loopback())) {
+        t.skip('IPv6 loopback is not available on this machine');
+        return;
+    }
+    const { port } = await claimServerPorts();
+    const { port: whipPort } = await claimServerPorts();
+    const baseUrl = `http://[::1]:${port}`;
+    const first = await startAddressFamilyServer({ bindHost: '::1', whipBindHost: '::1', port, whipPort, t });
+
+    const { rtcPort: secondRtcPort } = await claimServerPorts();
+    let secondOutput = '';
+    const second = spawn(process.execPath, ['server.js'], {
+        cwd: projectRoot,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+            ...createServerTestEnv({ port, rtcPort: secondRtcPort, distDir: os.tmpdir() }),
+            BIND_HOST: '::1',
+            WHIP_ENABLED: 'false',
+            LOG_LEVEL: 'info',
+        },
+    });
+    second.stdout.on('data', (chunk) => { secondOutput += chunk.toString(); });
+    second.stderr.on('data', (chunk) => { secondOutput += chunk.toString(); });
+    t.after(() => { if (second.exitCode === null) second.kill(); });
+
+    try {
+        const exit = await waitForExit(second, 20_000);
+        assert.equal(exit.code, 0, secondOutput);
+        assert.match(secondOutput, new RegExp(`Nextra is already running at http://\\[::1\\]:${port}\\.`), secondOutput);
+    } finally {
+        await first.stop(baseUrl);
+    }
+});
+
+test('BIND_HOST=localhost and WHIP_BIND_HOST=localhost advertise the loopback address the listeners really bound', { concurrency: false, timeout: 60_000 }, async (t) => {
+    const { port } = await claimServerPorts();
+    const { port: whipPort } = await claimServerPorts();
+    const { getOutput, stop } = await startAddressFamilyServer({ bindHost: 'localhost', whipBindHost: 'localhost', port, whipPort, t });
+    let shutdownUrl = null;
+
+    try {
+        const urls = advertisedUrls(getOutput());
+        // 'localhost' resolves to ::1 on some machines and 127.0.0.1 on others.
+        // Either way the advertised URLs must be the family that was bound.
+        assert.match(urls.local, new RegExp(`^http://(127\\.0\\.0\\.1|\\[::1\\]):${port}$`), getOutput());
+        assert.match(urls.whip, new RegExp(`^http://(127\\.0\\.0\\.1|\\[::1\\]):${whipPort}$`), getOutput());
+        shutdownUrl = urls.local;
+
+        const health = await fetchAdvertised(`${urls.local}/healthz`);
+        assert.equal(health.status, 200, `host page URL ${urls.local} must reach the app listener`);
+        const publicConfig = await (await fetchAdvertised(`${urls.local}/api/config`)).json();
+        assert.equal(publicConfig.whipHttpUrl, urls.whip);
+        const preflight = await fetchAdvertised(`${publicConfig.whipHttpUrl}/whip/broadcast/ABC123`, { method: 'OPTIONS' });
+        assert.equal(preflight.status, 204, `WHIP URL ${publicConfig.whipHttpUrl} must reach the WHIP listener`);
+    } finally {
+        await stop(shutdownUrl);
+    }
+});
+
+test('the default IPv4 binding still advertises 127.0.0.1 for the host page and WHIP', { concurrency: false, timeout: 60_000 }, async (t) => {
+    const { port } = await claimServerPorts();
+    const { port: whipPort } = await claimServerPorts();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const { getOutput, stop } = await startAddressFamilyServer({ bindHost: '127.0.0.1', whipBindHost: '127.0.0.1', port, whipPort, t });
+
+    try {
+        const urls = advertisedUrls(getOutput());
+        assert.equal(urls.local, baseUrl);
+        assert.equal(urls.whip, `http://127.0.0.1:${whipPort}`);
+        const publicConfig = await (await fetch(`${baseUrl}/api/config`)).json();
+        assert.equal(publicConfig.whipHttpHost, '127.0.0.1');
+        assert.equal(publicConfig.whipHttpUrl, `http://127.0.0.1:${whipPort}`);
+        const socket = await connectSocket(baseUrl, baseUrl);
+        socket.close();
+        // The IPv6 loopback origin is not added when only IPv4 is bound.
+        await assert.rejects(connectSocket(baseUrl, `http://[::1]:${port}`));
+    } finally {
+        await stop(baseUrl);
+    }
 });

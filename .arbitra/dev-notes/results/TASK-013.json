@@ -1,0 +1,22 @@
+[
+ {
+  "issue": "C-a9f26790d388",
+  "title": "Transport creation handlers do not re-check state after the await; overlapping create-send-transport calls leak host transports",
+  "severity": "medium",
+  "task": "TASK-013",
+  "result": "fixed",
+  "failedBefore": true,
+  "test": "tests/socketHostSendPath.test.js: 'overlapping create-send-transport calls resolving in order leave one open host transport', '... resolving out of order ...', 'create-send-transport stores nothing and closes its transport when the host socket left during the await', 'create-send-transport reports failure and closes its transport when another socket reclaimed the room during the await'",
+  "proof": "On the unchanged code the two overlapping-call tests failed with 'exactly one host transport stays open: 2 !== 1' (both orders: the earlier-stored transport was overwritten and never closed). The host-left test timed out waiting for the stale transport to be closed (it was stored in room.hostTransport instead), and the reclaimed-room test failed because the call answered success: true for a transport on a room the socket no longer hosts. After the fix create-send-transport attaches its state handlers, then checks socket.connected and findRoomByHost(socket.id) after the await (closing and not storing its transport, answering success: false), and closes a raced room.hostTransport with its producers before storing the new one. All four pass, and the single non-overlapping call test ('a single create-send-transport still closes the old producers and transport and returns its parameters') passes before and after. The create-recv-transport handler was not changed (C-a6d7a1b075f4 is another section)."
+ },
+ {
+  "issue": "C-5c63bfc64dd0",
+  "title": "Repeated produce requests leave superseded producers open",
+  "severity": "medium",
+  "task": "TASK-013",
+  "result": "fixed",
+  "failedBefore": true,
+  "test": "tests/socketHostSendPath.test.js: 'a repeated video produce closes the producer it supersedes', 'a repeated audio produce closes the producer it supersedes', 'a produce that resolves after the send transport was replaced is closed and not published', 'a produce that resolves after another socket reclaimed the room is closed and not published'",
+  "proof": "On the unchanged code a second same-kind produce left the first producer open ('the superseded producer is closed: false !== true') for both video and audio, and a produce that resolved after the send transport was replaced (or after another socket reclaimed the room) answered success: true, published new-producer and kept the producer open. After the fix produce captures room.hostTransport before the await, closes the new producer and answers success: false when the transport was replaced or findRoomByHost(socket.id) no longer returns the room, and otherwise closes a same-kind producer with a different id and removes it from activeProducerIds before storing the new one. All four pass; 'a produce of the other kind leaves the existing producer alone' passes before and after."
+ }
+]

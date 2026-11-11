@@ -3,6 +3,10 @@
 // card is committed art, not a build output - re-run this only when the lockup,
 // tagline, or palette changes, then bump the ?v= tag on the og:image and
 // twitter:image URLs in index.html so caches refetch it.
+// This script owns the social card. generate-icons.ps1 no longer writes it.
+// Run order: generate-icons.ps1 must run BEFORE this script whenever
+// nextra-primary-logo.png changes, because this card reads that logo and
+// generate-icons.ps1 is what produces it.
 const fs = require('fs');
 const path = require('path');
 const { chromium } = require('@playwright/test');

@@ -8,6 +8,7 @@ const https = require('https');
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const { Server } = require('socket.io');
 const helmet = require('helmet');
 const compression = require('compression');
@@ -35,7 +36,7 @@ const {
     emitHostMetrics,
 } = require('./lib/socket');
 const { createRelayCapacityProbe } = require('./lib/relayCapacityProbe');
-const { listObsVideoEncoders, writeStreamEncoderSettings } = require('./lib/obsProfile');
+const { listObsVideoEncoders, restoreStreamEncoderSettings, writeStreamEncoderSettings } = require('./lib/obsProfile');
 const { startRoomCleanup, stopRoomCleanup, getAllRoomStats } = require('./lib/rooms');
 const { getOrCreateCert } = require('./lib/https');
 const { startCloudflareTunnel } = require('./lib/tunnel');
@@ -55,9 +56,16 @@ const { createWhipRouter, setIo: setWhipIo, setMediaLifecycle: setWhipMediaLifec
 const { createWhepRouter } = require('./lib/whepRoutes');
 const { warmNvencProbe, getNvencProbeStatus } = require('./lib/ffmpegRelay');
 const { findAvailablePort } = require('./lib/portResolver');
+const {
+    clientHostForBoundAddress,
+    formatHostForUrl,
+    isBoundToIpv6Loopback,
+    probeHostsForBindHost,
+} = require('./lib/listenerHost');
 const { resolveExecutablePath } = require('./lib/executable');
 const { renderOpenMetrics } = require('./lib/openMetrics');
-const { decideWorkerDeathAction } = require('./lib/workerRecovery');
+const { decideWorkerDeathAction, launchReplacementProcess } = require('./lib/workerRecovery');
+const { createShutdownCoordinator } = require('./lib/shutdownCoordinator');
 const { ROOM_STATE_CODES, createRoomState } = require('./lib/roomState');
 const { ExpiringTracker } = require('./lib/expiringTracker');
 const { execFile, execFileSync } = require('child_process');
@@ -96,6 +104,10 @@ let runtimeWhipHttpPort = config.WHIP_HTTP_PORT;
 let whipHttpStatus = config.WHIP_ENABLED ? 'starting' : 'disabled';
 let whipHttpError = '';
 let whipHttpServer = null;
+// What server.address() reported once each listener was up. URLs for clients on
+// this machine follow it, because 'localhost' may have bound ::1 or 127.0.0.1.
+let boundAppAddress = null;
+let boundWhipAddress = null;
 let serviceReady = false;
 let requestGracefulShutdown = null;
 const RELAY_PROBE_PATH = '/api/relay-probe';
@@ -159,8 +171,13 @@ function getLocalProtocol() {
     return config.LOCAL_HTTPS ? 'https' : 'http';
 }
 
-function getHostPageUrl(protocol = getLocalProtocol()) {
-    return `${protocol}://127.0.0.1:${config.PORT}/#host`;
+// The address a client on this machine uses to reach the app listener.
+function getAppClientHost() {
+    return clientHostForBoundAddress(config.BIND_HOST, boundAppAddress);
+}
+
+function getHostPageUrl(protocol = getLocalProtocol(), host = getAppClientHost()) {
+    return `${protocol}://${formatHostForUrl(host)}:${config.PORT}/#host`;
 }
 
 function openBrowser(url) {
@@ -209,10 +226,13 @@ app.use(helmet({
             imgSrc: ["'self'", 'data:', 'blob:'],
             mediaSrc: ["'self'", 'blob:'],
             workerSrc: ["'self'", 'blob:'],
-            // Operators who explicitly allow plaintext relay on a declared LAN
-            // must be able to load the SPA over HTTP on that LAN. All other
-            // deployments keep Helmet's HTTPS-upgrade directive.
-            upgradeInsecureRequests: config.ALLOW_INSECURE_TRUSTED_LAN_RELAY ? null : [],
+            // The directive follows the scheme this listener really serves. On
+            // plain HTTP it would make some browsers (Safari on localhost) fetch
+            // the app's own resources over TLS from a plaintext port, so it is
+            // sent only when LOCAL_HTTPS is on. Operators who explicitly allow
+            // plaintext relay on a declared LAN must also be able to load the
+            // SPA over HTTP on that LAN, so that setting turns it off too.
+            upgradeInsecureRequests: config.LOCAL_HTTPS && !config.ALLOW_INSECURE_TRUSTED_LAN_RELAY ? [] : null,
         },
     },
     crossOriginEmbedderPolicy: false,
@@ -255,17 +275,37 @@ function getKnownPublicShareOrigins() {
     ].filter((origin) => origin && isPublicOrigin(origin));
 }
 
+// The URL of the cloudflared tunnel Nextra launched (quick or named), while it runs: the one relay whose
+// CF-Connecting-IP is Cloudflare's record of the viewer. A SHARE_BASE_URL on its own may front any proxy.
+function getManagedTunnelOrigin() {
+    const { status, baseUrl } = getPublicTunnelState();
+    return status === 'active' && baseUrl && isPublicOrigin(baseUrl) ? baseUrl : '';
+}
+
+// Names, besides IP literals and localhost, that address this machine for operator checks: its own hostname and the
+// OPERATOR_HOSTNAMES setting. See isOperatorAddressedRequest in lib/requestIdentity.js.
+const operatorHostnames = [...new Set([
+    os.hostname(),
+    `${os.hostname()}.local`,
+    ...config.OPERATOR_HOSTNAMES,
+].map((name) => String(name || '').trim().toLowerCase()).filter(Boolean))];
+
 // Who a request or socket comes from; see lib/requestIdentity.js. The tunnel and any same-host proxy relay from
 // loopback, so a relayed request is classified as a known proxy, never as the local operator.
 const {
     isKnownPublicShareOrigin,
     isKnownPublicShareRequest,
     isRelayedFromLoopback,
+    isOperatorAddressedRequest,
     shouldTrustRequestForwardedHeaders,
     getClientIpFromHeaders,
 } = createRequestIdentity({
     getKnownPublicShareOrigins,
     getTrustForwardedHeaders: () => config.TRUST_X_FORWARDED_HEADERS,
+    getTrustProxy: () => config.TRUST_PROXY,
+    getManagedTunnelOrigin,
+    getTrustCloudflareClientIp: () => config.TRUST_CLOUDFLARE_CONNECTING_IP,
+    getOperatorHostnames: () => operatorHostnames,
 });
 
 function getRequestClientIp(req) {
@@ -274,10 +314,13 @@ function getRequestClientIp(req) {
 
 function getRequestClientClassification(req) {
     const headers = req?.headers || {};
+    const remoteAddress = getRemoteAddressFromReq(req);
     return classifyClient({
         ip: getRequestClientIp(req),
         trustedLanCidrs: config.TRUSTED_LAN_CIDRS,
-        viaKnownProxy: isKnownPublicShareRequest(headers) || isRelayedFromLoopback(headers, getRemoteAddressFromReq(req)),
+        viaKnownProxy: isKnownPublicShareRequest(headers)
+            || isRelayedFromLoopback(headers, remoteAddress)
+            || !isOperatorAddressedRequest(headers, remoteAddress),
     });
 }
 
@@ -290,10 +333,13 @@ function getSocketRemoteAddress(socket) {
 
 function getSocketClientClassification(socket) {
     const headers = socket?.handshake?.headers || {};
+    const remoteAddress = getSocketRemoteAddress(socket);
     return classifyClient({
         ip: getSocketHandshakeIp(socket),
         trustedLanCidrs: config.TRUSTED_LAN_CIDRS,
-        viaKnownProxy: isKnownPublicShareRequest(headers) || isRelayedFromLoopback(headers, getSocketRemoteAddress(socket)),
+        viaKnownProxy: isKnownPublicShareRequest(headers)
+            || isRelayedFromLoopback(headers, remoteAddress)
+            || !isOperatorAddressedRequest(headers, remoteAddress),
     });
 }
 
@@ -422,6 +468,12 @@ function getAllowedOrigins() {
         `${localProtocol}://127.0.0.1:${config.PORT}`,
     ]);
 
+    // A listener on the IPv6 loopback is reached, and its host page opened,
+    // through [::1] only.
+    if (isBoundToIpv6Loopback(config.BIND_HOST, boundAppAddress)) {
+        origins.add(`${localProtocol}://${formatHostForUrl('::1')}:${config.PORT}`);
+    }
+
     if (config.LAN_IP) {
         origins.add(`${localProtocol}://${config.LAN_IP}:${config.PORT}`);
     }
@@ -489,20 +541,20 @@ function getLocalBaseUrl() {
         return `${localProtocol}://localhost:${config.PORT}`;
     }
     if (bindHost && bindHost !== '0.0.0.0' && bindHost !== '::') {
-        return `${localProtocol}://${config.BIND_HOST}:${config.PORT}`;
+        return `${localProtocol}://${formatHostForUrl(config.BIND_HOST)}:${config.PORT}`;
     }
     return `${localProtocol}://${config.LAN_IP}:${config.PORT}`;
 }
 
-function getLoopbackBaseUrl(protocol = getLocalProtocol()) {
-    return `${protocol}://127.0.0.1:${config.PORT}`;
+function getLoopbackBaseUrl(protocol = getLocalProtocol(), host = getAppClientHost()) {
+    return `${protocol}://${formatHostForUrl(host)}:${config.PORT}`;
 }
 
-async function probeExistingNextraInstance(protocol = getLocalProtocol()) {
+async function probeExistingNextraInstance(protocol = getLocalProtocol(), host = getAppClientHost()) {
     return new Promise((resolve) => {
         const client = protocol === 'https' ? https : http;
         const requestOptions = {
-            hostname: '127.0.0.1',
+            hostname: host,
             port: config.PORT,
             path: '/api/config',
             timeout: 1500,
@@ -551,27 +603,31 @@ async function probeExistingNextraInstance(protocol = getLocalProtocol()) {
     });
 }
 
-async function findRunningNextraProtocol() {
+// Another Nextra on this port, as { protocol, host } (host being what a client on
+// this machine puts in the URL), or null. A Nextra bound to the other loopback
+// family does not hold our address, so each protocol tries every candidate host.
+// The candidates are probed together, so the wait stays one probe timeout per
+// protocol however many there are.
+async function findRunningNextraInstance() {
     const primaryProtocol = getLocalProtocol();
     const alternateProtocol = primaryProtocol === 'https' ? 'http' : 'https';
+    const hosts = probeHostsForBindHost(config.BIND_HOST, boundAppAddress);
 
-    if (await probeExistingNextraInstance(primaryProtocol)) {
-        return primaryProtocol;
+    for (const protocol of [primaryProtocol, alternateProtocol]) {
+        const results = await Promise.all(hosts.map((host) => probeExistingNextraInstance(protocol, host)));
+        const index = results.findIndex(Boolean);
+        if (index !== -1) return { protocol, host: hosts[index] };
     }
 
-    if (await probeExistingNextraInstance(alternateProtocol)) {
-        return alternateProtocol;
-    }
-
-    return '';
+    return null;
 }
 
 async function exitIfAlreadyRunning() {
-    const runningProtocol = await findRunningNextraProtocol();
-    if (!runningProtocol) return false;
+    const running = await findRunningNextraInstance();
+    if (!running) return false;
 
-    console.log(`Nextra is already running at ${getLoopbackBaseUrl(runningProtocol)}.`);
-    openBrowser(getHostPageUrl(runningProtocol));
+    console.log(`Nextra is already running at ${getLoopbackBaseUrl(running.protocol, running.host)}.`);
+    openBrowser(getHostPageUrl(running.protocol, running.host));
     process.exit(0);
     return true;
 }
@@ -630,20 +686,9 @@ function shouldExposeLanForSocket(socket) {
     return isLocalClientIp(getSocketHandshakeIp(socket));
 }
 
+// The address a client on this machine (OBS, the host page) uses to reach the WHIP listener.
 function getWhipHttpClientHost() {
-    const host = (config.WHIP_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1';
-    if (host === '0.0.0.0' || host === '::' || host === '[::]' || host === 'localhost' || host === '::1' || host === '[::1]') {
-        return '127.0.0.1';
-    }
-    return host;
-}
-
-function formatHostForUrl(host) {
-    if (!host) return '127.0.0.1';
-    if (host.includes(':') && !host.startsWith('[')) {
-        return `[${host}]`;
-    }
-    return host;
+    return clientHostForBoundAddress(config.WHIP_BIND_HOST, boundWhipAddress);
 }
 
 function getWhipHttpBaseUrl() {
@@ -767,6 +812,9 @@ app.get('/api/config', (req, res) => {
 });
 
 let cachedCloudflareTurnCredentials = null;
+// Absolute ms when the cached credentials expire, and the end of the window in
+// which the cache is still served (one minute before that expiry).
+let cachedCloudflareTurnCredentialsExpiresAtMs = 0;
 let cachedCloudflareTurnCredentialsExpiresAt = 0;
 const TURN_MINT_WINDOW_MS = 10_000;
 const cloudflareTurnMintByIp = new ExpiringTracker(TURN_MINT_WINDOW_MS);
@@ -800,14 +848,20 @@ app.post('/api/cloudflare-turn-credentials', async (req, res) => {
     }
 
     if (cachedCloudflareTurnCredentials && now < cachedCloudflareTurnCredentialsExpiresAt) {
+        // Advertise the lifetime that is left, not the one the provider issued.
+        const remainingSeconds = Math.max(
+            1,
+            Math.floor((cachedCloudflareTurnCredentialsExpiresAtMs - Date.now()) / 1000),
+        );
         res.set('Cache-Control', 'no-store');
-        res.json(cachedCloudflareTurnCredentials);
+        res.json({ ...cachedCloudflareTurnCredentials, ttlSeconds: remainingSeconds });
         return;
     }
 
     cloudflareTurnMintByIp.record(clientIp);
 
     try {
+        const mintedAt = Date.now();
         const result = await loadCloudflareTurnCredentials();
         const payload = {
             provider: 'cloudflare',
@@ -815,7 +869,8 @@ app.post('/api/cloudflare-turn-credentials', async (req, res) => {
             turnConfig: result.turnConfig,
         };
         cachedCloudflareTurnCredentials = payload;
-        cachedCloudflareTurnCredentialsExpiresAt = now + Math.max(0, (result.ttlSeconds - 60) * 1000);
+        cachedCloudflareTurnCredentialsExpiresAtMs = mintedAt + result.ttlSeconds * 1000;
+        cachedCloudflareTurnCredentialsExpiresAt = mintedAt + Math.max(0, (result.ttlSeconds - 60) * 1000);
         res.set('Cache-Control', 'no-store');
         res.json(payload);
     } catch (err) {
@@ -1201,6 +1256,7 @@ function cleanupGlobalResources() {
         try { whipHttpServer.close(); } catch { }
         whipHttpServer = null;
     }
+    boundWhipAddress = null;
 
     if (worker) {
         try { worker.close(); } catch { }
@@ -1216,10 +1272,10 @@ function cleanupGlobalResources() {
 async function handleAppServerError(err) {
     console.error(`${getLocalProtocol().toUpperCase()} server error: ${err.message}`);
     if (err.code === 'EADDRINUSE') {
-        const runningProtocol = await findRunningNextraProtocol();
-        if (runningProtocol) {
-            console.log(`Nextra is already running at ${getLoopbackBaseUrl(runningProtocol)}.`);
-            openBrowser(getHostPageUrl(runningProtocol));
+        const running = await findRunningNextraInstance();
+        if (running) {
+            console.log(`Nextra is already running at ${getLoopbackBaseUrl(running.protocol, running.host)}.`);
+            openBrowser(getHostPageUrl(running.protocol, running.host));
             cleanupGlobalResources();
             process.exit(0);
             return;
@@ -1290,6 +1346,7 @@ async function startWhipHttpServer(whipRouter) {
         const server = http.createServer(whipApp);
         await listenServer(server, resolvedPort, config.WHIP_BIND_HOST);
         whipHttpServer = server;
+        boundWhipAddress = server.address();
         runtimeWhipHttpPort = resolvedPort;
         if (resolvedPort !== config.WHIP_HTTP_PORT) {
             console.warn(`[Startup] WHIP HTTP port ${config.WHIP_HTTP_PORT} was unavailable; using ${resolvedPort}.`);
@@ -1326,6 +1383,9 @@ async function startWhipHttpServer(whipRouter) {
     if (config.TRUST_X_FORWARDED_HEADERS) {
         console.log('Forwarded header trust: enabled for loopback proxy peers only.');
     }
+    if (config.TRUST_CLOUDFLARE_CONNECTING_IP) {
+        console.log('CF-Connecting-IP trust: enabled for loopback proxy peers; use it only behind cloudflared.');
+    }
     if (config.WHIP_ALLOW_INSECURE_REMOTE
         && config.WHIP_BIND_HOST.toLowerCase() !== 'localhost'
         && !isLoopbackIp(config.WHIP_BIND_HOST)) {
@@ -1336,22 +1396,28 @@ async function startWhipHttpServer(whipRouter) {
     }
 
     let appServer = null;
-    let isShuttingDown = false;
-    requestFatalShutdown = async (shutdownReason) => {
-        if (isShuttingDown) return;
-        isShuttingDown = true;
-        serviceReady = false;
-        if (ioServer) {
-            ioServer.emit('room-ended', createRoomState(
-                ROOM_STATE_CODES.SERVER_FATAL,
-                'The server stopped unexpectedly. This room ended; create or join a new room after it restarts.'
-            ));
-            await new Promise((resolve) => setTimeout(resolve, 150));
-        }
-        cleanupGlobalResources();
-        console.error(`[fatal] exiting after ${shutdownReason}; an external supervisor must restart Nextra.`);
-        process.exit(1);
-    };
+    // One coordinator owns both ways the process ends (a requested stop and a fatal
+    // error), so a fatal error during a graceful shutdown still ends it with 1.
+    const shutdownCoordinator = createShutdownCoordinator({
+        notifyRoomsEnded: (kind) => {
+            if (!ioServer) return false;
+            ioServer.emit('room-ended', kind === 'fatal'
+                ? createRoomState(
+                    ROOM_STATE_CODES.SERVER_FATAL,
+                    'The server stopped unexpectedly. This room ended; create or join a new room after it restarts.'
+                )
+                : createRoomState(
+                    ROOM_STATE_CODES.SERVER_SHUTDOWN,
+                    'The server stopped. This room ended; create or join a new room.'
+                ));
+            return true;
+        },
+        onShutdownStart: () => { serviceReady = false; },
+        cleanup: cleanupGlobalResources,
+        closeServer: (onClosed) => appServer.close(onClosed),
+        exit: (code) => process.exit(code),
+    });
+    requestFatalShutdown = (shutdownReason) => shutdownCoordinator.requestFatal(shutdownReason);
     if (config.LOCAL_HTTPS) {
         const { cert, key } = await getOrCreateCert();
         appServer = https.createServer({ cert, key }, app);
@@ -1397,13 +1463,18 @@ async function startWhipHttpServer(whipRouter) {
     }
 
     // If the mediasoup worker subprocess dies, the media engine and every
-    // in-memory room are gone. Tell connected clients that their room ended,
-    // then replace the process so new rooms can be created.
+    // in-memory room are gone. Tell connected clients that their room ended, then
+    // recover one way or the other, never both:
+    // - EXTERNAL_SUPERVISOR set: exit 1 and let the supervisor restart Nextra;
+    // - otherwise: start a replacement as a visible child (output inherited), wait
+    //   for it, and exit with its exit code (see lib/workerRecovery.js).
+    // A crash during startup exits 1 without a restart, so it cannot loop.
     setWorkerDeathHandler(() => {
         const recoveryAction = decideWorkerDeathAction({
-            isShuttingDown,
+            isShuttingDown: shutdownCoordinator.isShuttingDown(),
             uptimeSeconds: process.uptime(),
             minimumUptimeSeconds: config.WORKER_RECOVERY_MIN_UPTIME_SECONDS,
+            supervised: config.EXTERNAL_SUPERVISOR,
         });
         if (recoveryAction === 'ignore') return;
 
@@ -1414,56 +1485,29 @@ async function startWhipHttpServer(whipRouter) {
             return;
         }
 
-        console.error('[recovery] Media engine (mediasoup worker) crashed. Ending active rooms and restarting Nextra automatically.');
-
-        if (ioServer) {
+        // The coordinator waits for the notice to flush before it tears anything down.
+        const notifyRoomsMediaWorkerFatal = () => {
+            if (!ioServer) return false;
             ioServer.emit('room-ended', createRoomState(
                 ROOM_STATE_CODES.MEDIA_WORKER_FATAL,
                 'The media engine restarted. This room ended; create or join a new room.'
             ));
+            return true;
+        };
+        const onRecoveryError = (err) => handleUnexpectedProcessError('worker-recovery-failed', err);
+
+        if (recoveryAction === 'exit-for-supervisor') {
+            console.error('[recovery] Media engine (mediasoup worker) crashed. Ending active rooms and exiting with code 1 for the external supervisor to restart Nextra.');
+            shutdownCoordinator.requestFatal('media-worker-died', { notifyRooms: notifyRoomsMediaWorkerFatal })
+                .catch(onRecoveryError);
+            return;
         }
 
-        let finished = false;
-        const finish = () => {
-            if (finished) return;
-            finished = true;
-            try {
-                const { spawn } = require('child_process');
-                const replacement = spawn(process.execPath, [
-                    ...process.execArgv,
-                    ...process.argv.slice(1),
-                ], {
-                    detached: true,
-                    stdio: 'ignore',
-                    cwd: process.cwd(),
-                    env: process.env,
-                    windowsHide: true,
-                });
-                replacement.once('spawn', () => {
-                    replacement.unref();
-                    process.exit(0);
-                });
-                replacement.once('error', (err) => {
-                    console.error('[recovery] Failed to relaunch automatically:', err.message);
-                    process.exit(1);
-                });
-            } catch (err) {
-                console.error('[recovery] Failed to relaunch automatically:', err.message);
-                process.exit(1);
-            }
-        };
-
-        // Give Socket.IO one event-loop turn to flush the terminal state before
-        // releasing listeners and allowing the replacement process to bind.
-        setTimeout(() => {
-            cleanupGlobalResources();
-            try {
-                appServer.close(() => finish());
-                setTimeout(finish, 2000).unref();
-            } catch {
-                finish();
-            }
-        }, 150).unref();
+        console.error('[recovery] Media engine (mediasoup worker) crashed. Ending active rooms and restarting Nextra automatically.');
+        shutdownCoordinator.requestRestart('media-worker-died', {
+            notifyRooms: notifyRoomsMediaWorkerFatal,
+            launchReplacement: launchReplacementProcess,
+        }).catch(onRecoveryError);
     });
 
     // Mount WHIP routes on the main app and a separate HTTP server.
@@ -1575,6 +1619,13 @@ async function startWhipHttpServer(whipRouter) {
             if (result.ok) console.log(`[OBS] Wrote stream encoder settings to ${result.path}`);
             return result;
         },
+        // Putting the file back is as local as writing it.
+        restoreObsEncoderSettings: (socket, payload) => {
+            if (getSocketClientClassification(socket).kind !== 'loopback') return { ok: false, reason: 'not-local' };
+            const result = restoreStreamEncoderSettings(payload);
+            if (result.ok) console.log(`[OBS] Put stream encoder settings back at ${result.path}`);
+            return result;
+        },
         listObsEncoders: (socket) => (getSocketClientClassification(socket).kind === 'loopback' ? listObsVideoEncoders() : null),
     });
     startJoinCleanup();
@@ -1586,12 +1637,13 @@ async function startWhipHttpServer(whipRouter) {
     });
 
     appServer.listen(config.PORT, config.BIND_HOST, () => {
+        boundAppAddress = appServer.address();
         serviceReady = true;
         console.log(`\nNextra running (${getLocalProtocol().toUpperCase()}):`);
         console.log(`   Bind:    ${config.BIND_HOST}:${config.PORT}`);
         console.log(`   Mode:    ${isDevMode ? 'development (Vite dev origins enabled)' : 'production'}`);
         console.log(`   Media:   RTC listen ${config.RTC_LISTEN_IP}${config.RTC_LISTEN_IP === '127.0.0.1' ? ' (local only)' : `, announce ${config.PUBLIC_IP || config.LAN_IP}`}`);
-        console.log(`   Local:   ${getLocalProtocol()}://127.0.0.1:${config.PORT}`);
+        console.log(`   Local:   ${getLoopbackBaseUrl()}`);
         console.log(`   Access:  ${getLocalBaseUrl()}`);
         const manualShareBase = normalizeBaseUrl(config.SHARE_BASE_URL);
         if (config.CLOUDFLARED_TUNNEL_TOKEN) {
@@ -1618,40 +1670,24 @@ async function startWhipHttpServer(whipRouter) {
         openBrowser(getHostPageUrl());
     });
 
-    async function shutdown(signal) {
-        if (isShuttingDown) return;
-        isShuttingDown = true;
-        serviceReady = false;
-        console.log(`\n${signal} received. Shutting down gracefully...`);
-        if (ioServer) {
-            ioServer.emit('room-ended', createRoomState(
-                ROOM_STATE_CODES.SERVER_SHUTDOWN,
-                'The server stopped. This room ended; create or join a new room.'
-            ));
-            await new Promise((resolve) => setTimeout(resolve, 150));
-        }
-        cleanupGlobalResources();
-
-        appServer.close(() => {
-            console.log('Server closed.');
-            process.exit(0);
+    // The coordinator arms the force-exit timer first (open connections, such as
+    // the prewarmed relay or socket.io clients, can keep the listener from closing)
+    // and turns an error inside the shutdown into the fatal path. The catch below
+    // is for a rejection that still gets past it.
+    requestGracefulShutdown = (signal) => shutdownCoordinator.requestGraceful(signal);
+    const onStopSignal = (signal) => {
+        requestGracefulShutdown(signal).catch((err) => {
+            handleUnexpectedProcessError('graceful-shutdown-failed', err);
         });
+    };
 
-        // Force exit if open connections (e.g. the prewarmed relay or socket.io
-        // clients) keep the server from closing. This is an intentional shutdown,
-        // so exit 0 — a non-zero code is misreported as a startup failure.
-        setTimeout(() => process.exit(0), 5000);
-    }
-
-    requestGracefulShutdown = shutdown;
-
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => onStopSignal('SIGINT'));
+    process.on('SIGTERM', () => onStopSignal('SIGTERM'));
     // Windows console-close (SIGHUP) and Ctrl+Break (SIGBREAK) take the same
     // shutdown path so the worker dying during teardown is flagged as an
     // intentional stop and never triggers the auto-restart.
-    process.on('SIGHUP', () => shutdown('SIGHUP'));
-    process.on('SIGBREAK', () => shutdown('SIGBREAK'));
+    process.on('SIGHUP', () => onStopSignal('SIGHUP'));
+    process.on('SIGBREAK', () => onStopSignal('SIGBREAK'));
 })().catch((err) => {
     console.error(`Fatal startup error: ${err?.stack || err?.message || err}`);
     cleanupGlobalResources();

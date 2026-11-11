@@ -1,6 +1,8 @@
 import { test, expect, devices } from '@playwright/test';
 import { execFile } from 'node:child_process';
+import path from 'node:path';
 import { promisify } from 'node:util';
+import { createLockSession } from './support/exclusiveFileLock.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -85,8 +87,292 @@ async function joinAndWatch(viewerPage, code) {
     ))).toBe(true);
 }
 
-async function joinAndWatchRelay(viewerPage, code) {
-    await viewerPage.goto(`https://nextra.cloudflare.test:3210/#watch/${code}`);
+// Lets a test hold back the media-init events a viewer receives and drop the
+// viewer's Socket.IO WebSocket, which socket.io-client then re-establishes
+// under a new socket.id (the viewer's reconnect path). Engine.IO reads the
+// WebSocket constructor when its bundle loads, so this runs before the page.
+async function installViewerSocketControl(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const control = { withholdMediaInit: false, withheldMediaInit: 0, sockets: [] };
+        window.__nextraSocketControl = control;
+        class ControlledWebSocket extends NativeWebSocket {
+            constructor(...args) {
+                super(...args);
+                control.sockets.push(this);
+            }
+
+            get onmessage() {
+                return super.onmessage;
+            }
+
+            set onmessage(handler) {
+                super.onmessage = typeof handler === 'function'
+                    ? (event) => {
+                        if (control.withholdMediaInit
+                            && typeof event.data === 'string'
+                            && event.data.startsWith('42["media-init"')) {
+                            control.withheldMediaInit += 1;
+                            return;
+                        }
+                        handler.call(this, event);
+                    }
+                    : handler;
+            }
+        }
+        window.WebSocket = ControlledWebSocket;
+    });
+}
+
+// Lets a test drop the viewer's Socket.IO WebSocket (socket.io-client then
+// reconnects under a new socket.id), log the events the page sends, and hold the
+// next outgoing request of one event back, as a slow network does, until the
+// test lets it go. A held request counts as sent when it is released.
+async function installViewerRequestControl(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const control = { sockets: [], sent: [], holdNext: '', held: [] };
+        window.__nextraRequestControl = control;
+        control.releaseHeld = () => control.held.splice(0).map((send) => send()).length;
+        window.WebSocket = class RequestControlWebSocket extends NativeWebSocket {
+            constructor(...args) {
+                super(...args);
+                control.sockets.push(this);
+            }
+
+            send(data) {
+                const event = typeof data === 'string' ? /^42\d*\["([^"]+)"/.exec(data)?.[1] : undefined;
+                const transmit = () => {
+                    if (event) control.sent.push(event);
+                    super.send(data);
+                };
+                if (event && event === control.holdNext) {
+                    control.holdNext = '';
+                    control.held.push(transmit);
+                    return;
+                }
+                transmit();
+            }
+        };
+    });
+}
+
+// Makes the room look like an OBS room to this viewer, whose relay-first path
+// then asks for the fMP4 relay by itself (fallback-consume-start), and lets a
+// test decide what answers that request: the join-room answer is rewritten to
+// ingestMode 'obs' with a producer, and every fallback-consume-start answer from
+// the real server (a browser room refuses it) is replaced by the server's
+// success shape `{ ok: true, fallbackAvailable: true }`, held back until the
+// test releases it, or dropped as a lost answer. `answer` is 'ok', 'hold' or
+// 'drop'. The events the page sends are logged; the Socket.IO WebSockets can be
+// closed to make socket.io-client reconnect under a new socket.id.
+async function installFallbackStartControl(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const control = { answer: 'ok', sockets: [], sent: [], held: [], joinIds: new Set(), startIds: new Set() };
+        window.__nextraFallbackControl = control;
+        control.releaseHeld = () => control.held.splice(0).map((deliver) => deliver()).length;
+        window.WebSocket = class FallbackStartControlWebSocket extends NativeWebSocket {
+            constructor(...args) {
+                super(...args);
+                control.sockets.push(this);
+            }
+
+            send(data) {
+                const request = typeof data === 'string' ? /^42(\d*)\["([^"]+)"/.exec(data) : null;
+                if (request) {
+                    const [, id, event] = request;
+                    control.sent.push(event);
+                    if (id && event === 'join-room') control.joinIds.add(id);
+                    if (id && event === 'fallback-consume-start') control.startIds.add(id);
+                }
+                super.send(data);
+            }
+
+            get onmessage() {
+                return super.onmessage;
+            }
+
+            set onmessage(handler) {
+                super.onmessage = typeof handler === 'function'
+                    ? (event) => {
+                        const answerPacket = typeof event.data === 'string' ? /^43(\d+)([\s\S]*)$/.exec(event.data) : null;
+                        if (answerPacket) {
+                            const [, id, body] = answerPacket;
+                            if (control.joinIds.delete(id)) {
+                                const [response] = JSON.parse(body);
+                                const rewritten = response && response.success !== false
+                                    ? { ...response, ingestMode: 'obs', hasProducer: true, relayAllowed: true }
+                                    : response;
+                                handler.call(this, new MessageEvent('message', { data: `43${id}${JSON.stringify([rewritten])}` }));
+                                return;
+                            }
+                            if (control.startIds.delete(id)) {
+                                const deliver = () => handler.call(this, new MessageEvent('message', {
+                                    data: `43${id}[{"ok":true,"fallbackAvailable":true}]`,
+                                }));
+                                if (control.answer === 'ok') deliver();
+                                else if (control.answer === 'hold') control.held.push(deliver);
+                                return;
+                            }
+                        }
+                        handler.call(this, event);
+                    }
+                    : handler;
+            }
+        };
+    });
+}
+
+const fallbackStartsSent = (page) => page.evaluate(
+    () => window.__nextraFallbackControl.sent.filter((event) => event === 'fallback-consume-start').length,
+);
+
+// Drops a watching viewer's connection with the room join of its reconnect held
+// back, so Leave Room can be pressed while the rejoin is still on its way.
+async function dropWatchingViewerWithRejoinHeld(viewerPage) {
+    await viewerPage.evaluate(() => { window.__nextraRequestControl.holdNext = 'join-room'; });
+    await viewerPage.evaluate(() => window.__nextraRequestControl.sockets.at(-1).close());
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraRequestControl.held.length)).toBe(1);
+}
+
+// Lets a test hold back the server's answer to the next request of one event
+// (holdAnswerOf) and hand it over later, as it came or replaced by another
+// answer, hand the page a server event of its own (deliver), and count the
+// relay media chunks the page receives. A binary answer (a Socket.IO
+// BINARY_ACK, `46<attachments>-<id>[...]`, then its attachment frames) is held
+// whole. What the test hands over waits for the end of a binary packet in
+// passage (a media-chunk is a text frame and then its attachment): a frame of
+// anything else while socket.io-client reassembles one is a parse error that
+// drops the connection. It can sit on top of the other WebSocket helpers.
+async function installAnswerControl(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const control = { holdAnswerOf: '', heldIds: new Set(), held: [], mediaChunks: 0, sockets: [] };
+        window.__nextraAnswerControl = control;
+        control.releaseHeld = (replacement) => control.held.splice(0).map((deliver) => deliver(replacement)).length;
+        control.deliver = (event, payload) => {
+            const socket = control.sockets.at(-1);
+            socket.betweenPackets(() => socket.onmessage(
+                new MessageEvent('message', { data: `42${JSON.stringify([event, payload])}` }),
+            ));
+        };
+        window.WebSocket = class AnswerControlWebSocket extends NativeWebSocket {
+            constructor(...args) {
+                super(...args);
+                control.sockets.push(this);
+            }
+
+            send(data) {
+                const request = typeof data === 'string' ? /^42(\d+)\["([^"]+)"/.exec(data) : null;
+                if (request && control.holdAnswerOf && request[2] === control.holdAnswerOf) {
+                    control.holdAnswerOf = '';
+                    control.heldIds.add(request[1]);
+                }
+                super.send(data);
+            }
+
+            get onmessage() {
+                return super.onmessage;
+            }
+
+            set onmessage(handler) {
+                // The attachment frames still to come of a held binary answer.
+                let capture = null;
+                // The attachment frames still to come of a binary packet handed on.
+                let passing = 0;
+                const afterPacket = [];
+                this.betweenPackets = (handOver) => {
+                    if (passing > 0) afterPacket.push(handOver);
+                    else handOver();
+                };
+                super.onmessage = typeof handler === 'function'
+                    ? (event) => {
+                        if (capture) {
+                            capture.frames.push(event);
+                            capture.remaining -= 1;
+                            if (capture.remaining === 0) capture = null;
+                            return;
+                        }
+                        if (typeof event.data === 'string') {
+                            if (event.data.startsWith('451-["media-chunk"')) control.mediaChunks += 1;
+                            const answer = /^4(3|6)(?:(\d+)-)?(\d+)\[/.exec(event.data);
+                            if (answer && control.heldIds.delete(answer[3])) {
+                                const frames = [event];
+                                const attachments = answer[1] === '6' ? Number(answer[2]) : 0;
+                                if (attachments > 0) capture = { remaining: attachments, frames };
+                                control.held.push((replacement) => this.betweenPackets(() => {
+                                    if (replacement === undefined) {
+                                        for (const frame of frames) handler.call(this, frame);
+                                        return;
+                                    }
+                                    handler.call(this, new MessageEvent('message', {
+                                        data: `43${answer[3]}${JSON.stringify([replacement])}`,
+                                    }));
+                                }));
+                                return;
+                            }
+                            const binary = /^4[56](\d+)-/.exec(event.data);
+                            handler.call(this, event);
+                            if (binary) passing = Number(binary[1]);
+                            return;
+                        }
+                        handler.call(this, event);
+                        if (passing > 0) {
+                            passing -= 1;
+                            if (passing === 0) for (const handOver of afterPacket.splice(0)) handOver();
+                        }
+                    }
+                    : handler;
+            }
+        };
+    });
+}
+
+// What the server sends a viewer whose WebRTC transport failed and can be replaced.
+const RECOVERABLE_TRANSPORT_FAILURE = {
+    code: 'viewer-transport-failed',
+    reason: 'Stream connection interrupted. Reconnecting...',
+    recoverable: true,
+    terminal: false,
+};
+
+// Lets a test make a viewer's WebRTC start stall the way an unreachable
+// connection does, from the moment it switches the flags on: ICE finds no usable
+// candidate (the peer connection may only use relay candidates, and the test
+// server offers no TURN server) and video.play() on a MediaStream never settles
+// (it stays pending until media arrives). The relay path attaches no
+// srcObject, so its play() calls are untouched.
+async function installWebRtcStall(page) {
+    await page.addInitScript(() => {
+        const stall = { blockIce: false, hangPlay: false, hungPlays: 0 };
+        window.__nextraStall = stall;
+        const NativePeerConnection = window.RTCPeerConnection;
+        window.RTCPeerConnection = class StalledPeerConnection extends NativePeerConnection {
+            constructor(configuration = {}, ...rest) {
+                super(stall.blockIce ? { ...configuration, iceTransportPolicy: 'relay' } : configuration, ...rest);
+            }
+        };
+        const nativePlay = HTMLMediaElement.prototype.play;
+        HTMLMediaElement.prototype.play = function play(...args) {
+            if (stall.hangPlay && this.srcObject) {
+                stall.hungPlays += 1;
+                return new Promise(() => { });
+            }
+            return nativePlay.apply(this, args);
+        };
+    });
+}
+
+// The server's port, read from the baseURL playwright.config.mjs sets from
+// NEXTRA_E2E_PORT, so a run on another port needs no change here.
+function serverPort(testInfo) {
+    const url = new URL(testInfo.project.use.baseURL);
+    return Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+}
+
+async function joinAndWatchRelay(viewerPage, code, testInfo) {
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
     await viewerPage.getByRole('button', { name: 'Watch Stream' }).click();
     await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible();
@@ -96,6 +382,224 @@ async function joinAndWatchRelay(viewerPage, code) {
         && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
         && video.currentTime > 0
     ))).toBe(true);
+}
+
+// Keeps every MediaRecorder the host page makes, so a test can read the relay
+// format and stand in for a recorder failure. Without MP4 the host records VP8,
+// as a browser without MP4 recording does.
+async function trackHostRecorders(page, { recordMp4 = true } = {}) {
+    await page.addInitScript((allowMp4) => {
+        const NativeMediaRecorder = window.MediaRecorder;
+        window.__nextraRecorders = [];
+        window.MediaRecorder = class TrackedMediaRecorder extends NativeMediaRecorder {
+            static isTypeSupported(type) {
+                if (!allowMp4 && String(type).startsWith('video/mp4')) return false;
+                return NativeMediaRecorder.isTypeSupported(type);
+            }
+
+            constructor(...args) {
+                super(...args);
+                window.__nextraRecorders.push(this);
+            }
+        };
+    }, recordMp4);
+}
+
+// Hands each relay recording slice of the host page to HostView as `parts`
+// chunks, as a recorder with a far shorter timeslice would, so a generation
+// passes hundreds of chunks in seconds; the bytes and their order are
+// unchanged. MP4 is off: a later viewer of a VP8 generation replays all of it.
+// __nextraHoldRelayChunks() keeps the chunks back until
+// __nextraReleaseRelayChunks() hands them over, in order.
+async function splitHostRelayChunks(page, parts) {
+    await page.addInitScript((count) => {
+        const NativeMediaRecorder = window.MediaRecorder;
+        window.__nextraRecorders = [];
+        const held = [];
+        let holding = false;
+        window.__nextraHoldRelayChunks = () => { holding = true; };
+        window.__nextraReleaseRelayChunks = () => {
+            holding = false;
+            for (const handOver of held.splice(0)) handOver();
+        };
+        window.MediaRecorder = class SplittingMediaRecorder extends NativeMediaRecorder {
+            static isTypeSupported(type) {
+                if (String(type).startsWith('video/mp4')) return false;
+                return NativeMediaRecorder.isTypeSupported(type);
+            }
+
+            constructor(...args) {
+                super(...args);
+                this.chunksMade = 0;
+                window.__nextraRecorders.push(this);
+            }
+
+            get ondataavailable() {
+                return super.ondataavailable;
+            }
+
+            set ondataavailable(handler) {
+                super.ondataavailable = typeof handler === 'function'
+                    ? (event) => {
+                        const blob = event.data;
+                        const size = Math.max(1, Math.ceil(blob.size / count));
+                        for (let offset = 0; offset < blob.size; offset += size) {
+                            this.chunksMade += 1;
+                            const data = blob.slice(offset, offset + size);
+                            if (holding) held.push(() => handler.call(this, { data }));
+                            else handler.call(this, { data });
+                        }
+                    }
+                    : handler;
+            }
+        };
+    }, parts);
+}
+
+// Holds what the viewer's WebSocket receives and hands it over in one task, as
+// a connection that stalls and then catches up does.
+async function installHeldWebSocket(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const held = [];
+        let holding = false;
+        window.__nextraHoldSocket = () => { holding = true; };
+        window.__nextraReleaseSocket = () => {
+            holding = false;
+            const batch = held.splice(0);
+            for (const deliver of batch) deliver();
+            return batch.length;
+        };
+        window.WebSocket = class HeldWebSocket extends NativeWebSocket {
+            get onmessage() {
+                return super.onmessage;
+            }
+
+            set onmessage(handler) {
+                super.onmessage = handler && ((event) => {
+                    if (holding) {
+                        held.push(() => handler.call(this, event));
+                        return;
+                    }
+                    handler.call(this, event);
+                });
+            }
+        };
+    });
+}
+
+// Stands in for SourceBuffer failures on a viewer. The next append can reach
+// the SourceBuffer as bytes it cannot parse (a real append error: 'error' on
+// the SourceBuffer, then the MediaSource ends), or throw a DOMException of a
+// given name before it starts; appends can also be made never to finish. It
+// records the SourceBuffer removals and counts an append of a chunk that was
+// refused before.
+async function installRelayAppendFaults(page) {
+    await page.addInitScript(() => {
+        const faults = {
+            corruptNext: false,
+            corrupted: 0,
+            throwNext: '',
+            thrown: 0,
+            swallow: false,
+            swallowed: 0,
+            retried: 0,
+            removes: [],
+        };
+        let refused = null;
+        window.__nextraAppendFaults = faults;
+        const nativeAppend = SourceBuffer.prototype.appendBuffer;
+        const nativeRemove = SourceBuffer.prototype.remove;
+        SourceBuffer.prototype.appendBuffer = function appendBuffer(data) {
+            if (faults.throwNext) {
+                const name = faults.throwNext;
+                faults.throwNext = '';
+                faults.thrown += 1;
+                refused = data;
+                throw new DOMException(`Injected ${name}`, name);
+            }
+            if (faults.swallow) {
+                faults.swallowed += 1;
+                return undefined;
+            }
+            if (refused && data === refused) {
+                faults.retried += 1;
+                refused = null;
+            }
+            if (faults.corruptNext) {
+                faults.corruptNext = false;
+                faults.corrupted += 1;
+                return nativeAppend.call(this, new Uint8Array(data.byteLength));
+            }
+            return nativeAppend.call(this, data);
+        };
+        SourceBuffer.prototype.remove = function remove(start, end) {
+            faults.removes.push([start, end]);
+            return nativeRemove.call(this, start, end);
+        };
+    });
+}
+
+// Delivers every relay media chunk the viewer receives `copies` times, so its
+// queue fills many times faster than the recorder produces. A Socket.IO binary
+// event is a text frame (451-["media-chunk",{...placeholder}]) followed by its
+// binary attachment; the pair is handed to Socket.IO again.
+async function installMediaChunkFlood(page) {
+    await page.addInitScript(() => {
+        const NativeWebSocket = window.WebSocket;
+        const flood = { copies: 1, flooded: 0 };
+        window.__nextraChunkFlood = flood;
+        window.WebSocket = class FloodedWebSocket extends NativeWebSocket {
+            get onmessage() {
+                return super.onmessage;
+            }
+
+            set onmessage(handler) {
+                let chunkHeader = null;
+                super.onmessage = typeof handler === 'function'
+                    ? (event) => {
+                        if (typeof event.data === 'string') {
+                            chunkHeader = event.data.startsWith('451-["media-chunk"') ? event : null;
+                            handler.call(this, event);
+                            return;
+                        }
+                        handler.call(this, event);
+                        if (chunkHeader && flood.copies > 1) {
+                            for (let copy = 1; copy < flood.copies; copy += 1) {
+                                handler.call(this, chunkHeader);
+                                handler.call(this, event);
+                            }
+                            flood.flooded += 1;
+                        }
+                        chunkHeader = null;
+                    }
+                    : handler;
+            }
+        };
+    });
+}
+
+// A relay viewer whose playback failed: the reason is shown, nothing reports
+// relay mode, Watch Stream is offered again, the MediaSource is gone from the
+// video element, and the server no longer sends the viewer relay media.
+async function expectRelayStoppedVisibly(viewerPage, request, code, reason) {
+    await expect(viewerPage.getByRole('alert')).toContainText(reason, { timeout: 10_000 });
+    await expect(viewerPage.getByText(/relay mode active/i)).toHaveCount(0);
+    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toBeEnabled();
+    expect(await viewerPage.locator('video').evaluate((video) => ({
+        src: video.getAttribute('src') || '',
+        hasStream: Boolean(video.srcObject),
+    }))).toEqual({ src: '', hasStream: false });
+    await expect.poll(async () => (await getRoomByCode(request, code))?.relayViewerCount).toBe(0);
+}
+
+async function getRoomByCode(request, code) {
+    const metrics = await (await request.get('/api/metrics')).json();
+    return metrics.rooms.list.find((room) => room.code === code) || null;
+}
+
+async function videoTime(page) {
+    return page.locator('video').evaluate((video) => video.currentTime);
 }
 
 // Stop Sharing only asks for confirmation while viewers are still connected.
@@ -111,10 +615,10 @@ async function getOnlyRoom(request) {
     return metrics.rooms.list.length === 1 ? metrics.rooms.list[0] : null;
 }
 
-async function measureLiveWebRtcTopology() {
+async function measureLiveWebRtcTopology(testInfo) {
     const { stdout } = await execFileAsync(process.execPath, [
         'scripts/benchmark-runtime.js',
-        '--url=https://127.0.0.1:3210',
+        `--url=${testInfo.project.use.baseURL}`,
         '--scenario=webrtc',
         '--label=e2e-360p30-one-viewer',
         '--allow-insecure-tls',
@@ -151,7 +655,7 @@ test('Host preflight blocks an unavailable Browser capture path before room allo
         .toMatchObject({ rooms: { active: 0 } });
 });
 
-test('host and viewer receive decoded frames through direct WebRTC and can rejoin', async ({ browser, request }) => {
+test('host and viewer receive decoded frames through direct WebRTC and can rejoin', async ({ browser, request }, testInfo) => {
     const hostContext = await browser.newContext();
     const viewerContext = await browser.newContext();
     const hostPage = await hostContext.newPage();
@@ -164,7 +668,7 @@ test('host and viewer receive decoded frames through direct WebRTC and can rejoi
     await expect(viewerPage.getByRole('button', { name: 'Join Room' })).toBeVisible();
     await joinAndWatch(viewerPage, code);
 
-    const measurement = await measureLiveWebRtcTopology();
+    const measurement = await measureLiveWebRtcTopology(testInfo);
     expect(measurement.pass).toBe(true);
     expect(measurement.measurement.scenario).toBe('webrtc');
     expect(measurement.topology.producers).toBeGreaterThanOrEqual(1);
@@ -387,7 +891,7 @@ test('reload recovery keeps the room code and concurrent stop/unmount is idempot
     await context.close();
 });
 
-test('delayed relay-first viewers select one fresh recorder generation and clean up after rejoin', async ({ browser, request }) => {
+test('delayed relay-first viewers select one fresh recorder generation and clean up after rejoin', async ({ browser, request }, testInfo) => {
     const hostContext = await browser.newContext();
     const firstViewerContext = await browser.newContext();
     const secondViewerContext = await browser.newContext();
@@ -400,12 +904,12 @@ test('delayed relay-first viewers select one fresh recorder generation and clean
     const prewarmGeneration = (await getOnlyRoom(request)).mediaGeneration;
     await hostPage.waitForTimeout(2_000);
 
-    await joinAndWatchRelay(firstViewerPage, code);
+    await joinAndWatchRelay(firstViewerPage, code, testInfo);
     await expect.poll(async () => (await getOnlyRoom(request))?.mediaGeneration || 0)
         .toBeGreaterThan(prewarmGeneration);
     const firstAudienceGeneration = (await getOnlyRoom(request)).mediaGeneration;
 
-    await joinAndWatchRelay(secondViewerPage, code);
+    await joinAndWatchRelay(secondViewerPage, code, testInfo);
     await secondViewerPage.waitForTimeout(1_000);
     expect((await getOnlyRoom(request)).mediaGeneration).toBe(firstAudienceGeneration);
 
@@ -416,7 +920,7 @@ test('delayed relay-first viewers select one fresh recorder generation and clean
         return room ? room.mediaGeneration : 'room-missing';
     }).toBeNull();
 
-    await joinAndWatchRelay(firstViewerPage, code);
+    await joinAndWatchRelay(firstViewerPage, code, testInfo);
     await expect.poll(async () => (await getOnlyRoom(request))?.mediaGeneration || 0)
         .toBeGreaterThan(firstAudienceGeneration);
 
@@ -433,6 +937,990 @@ test('delayed relay-first viewers select one fresh recorder generation and clean
 
     await secondViewerContext.close();
     await firstViewerContext.close();
+    await hostContext.close();
+});
+
+// A later relay viewer of a VP8 generation starts from the server's bootstrap,
+// every chunk since the generation began. The bootstrap arrives as one buffer,
+// so the browser's relay queue (240 chunks, 72 s of 300 ms slices) takes it
+// however many chunks the generation has passed. The host holds its chunks
+// while the late viewer starts and hands them over once it plays, so what
+// reaches the viewer during its start is the bootstrap alone.
+test('a relay viewer who joins after the generation passed 240 recorder chunks plays from its bootstrap', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const firstViewerContext = await browser.newContext();
+    const lateViewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const firstViewerPage = await firstViewerContext.newPage();
+    const lateViewerPage = await lateViewerContext.newPage();
+    await splitHostRelayChunks(hostPage, 25);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(firstViewerPage, code, testInfo);
+    const generation = (await getRoomByCode(request, code)).mediaGeneration;
+    expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1).mimeType)).toMatch(/^video\/webm/);
+    await expect.poll(() => hostPage.evaluate(() => window.__nextraRecorders.at(-1).chunksMade), {
+        timeout: 30_000,
+    }).toBeGreaterThan(300);
+
+    await hostPage.evaluate(() => window.__nextraHoldRelayChunks());
+    await joinAndWatchRelay(lateViewerPage, code, testInfo);
+    await hostPage.evaluate(() => window.__nextraReleaseRelayChunks());
+    // It joined the running generation from its bootstrap; nothing restarted for it.
+    expect((await getRoomByCode(request, code)).mediaGeneration).toBe(generation);
+    const startedAt = await videoTime(lateViewerPage);
+    await expect.poll(() => videoTime(lateViewerPage)).toBeGreaterThan(startedAt + 2);
+    expect(await lateViewerPage.locator('video').evaluate((video) => video.error?.code ?? null)).toBeNull();
+    await expect(lateViewerPage.getByText(/relay mode active/i)).toBeVisible();
+    await expect(lateViewerPage.getByRole('alert')).toHaveCount(0);
+
+    await lateViewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await firstViewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await lateViewerContext.close();
+    await firstViewerContext.close();
+    await hostContext.close();
+});
+
+// From its relay-consume-start acknowledgement on, a later viewer receives every
+// live chunk, and they continue the bootstrap the acknowledgement carries. The
+// viewer used to select the generation only from the get-media-init answer
+// that follows, and dropped the chunks that came in between: a hole after the
+// bootstrap, so the VP8 stream turned unreadable once the bootstrap had played.
+// Here that answer is held back while the host goes on recording. Each 300 ms
+// slice reaches the server as 25 chunks cut at arbitrary byte offsets, so a
+// hole cannot fall on a block boundary the WebM parser could step over.
+test('a late relay viewer keeps the live chunks that arrive before its get-media-init answer', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const firstViewerContext = await browser.newContext();
+    const lateViewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const firstViewerPage = await firstViewerContext.newPage();
+    const lateViewerPage = await lateViewerContext.newPage();
+    await splitHostRelayChunks(hostPage, 25);
+    await installAnswerControl(lateViewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(firstViewerPage, code, testInfo);
+    expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1).mimeType)).toMatch(/^video\/webm/);
+    const generation = (await getRoomByCode(request, code)).mediaGeneration;
+
+    await lateViewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await lateViewerPage.getByRole('button', { name: 'Join Room' }).click();
+    await lateViewerPage.evaluate(() => { window.__nextraAnswerControl.holdAnswerOf = 'get-media-init'; });
+    await lateViewerPage.getByRole('button', { name: 'Watch Stream' }).click();
+    await expect.poll(() => lateViewerPage.evaluate(() => window.__nextraAnswerControl.held.length)).toBe(1);
+    // Live chunks of about two slices arrive ahead of the answer.
+    const chunksAtHold = await lateViewerPage.evaluate(() => window.__nextraAnswerControl.mediaChunks);
+    await expect.poll(() => lateViewerPage.evaluate(() => window.__nextraAnswerControl.mediaChunks))
+        .toBeGreaterThanOrEqual(chunksAtHold + 50);
+    expect(await lateViewerPage.evaluate(() => window.__nextraAnswerControl.releaseHeld())).toBe(1);
+
+    await expect(lateViewerPage.getByText(/relay mode active/i)).toBeVisible();
+    const startedAt = await videoTime(lateViewerPage);
+    await expect.poll(() => videoTime(lateViewerPage), { timeout: 15_000 }).toBeGreaterThan(startedAt + 3);
+    expect(await lateViewerPage.locator('video').evaluate((video) => video.error?.code ?? null)).toBeNull();
+    await expect(lateViewerPage.getByText(/relay mode active/i)).toBeVisible();
+    await expect(lateViewerPage.getByRole('alert')).toHaveCount(0);
+    // It joined the running generation; nothing restarted for it.
+    expect(await getRoomByCode(request, code)).toMatchObject({ mediaGeneration: generation, relayViewerCount: 2 });
+
+    await lateViewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await firstViewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await lateViewerContext.close();
+    await firstViewerContext.close();
+    await hostContext.close();
+});
+
+// A new recorder generation reaches relay viewers that are already playing.
+// The host falls back from MP4 to VP8 when the server cannot frame its MP4
+// (relay-mp4-failed) or the MP4 recorder fails; the viewer's SourceBuffer was
+// made for MP4.
+test('a playing relay viewer follows the host recorder from MP4 to VP8', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await trackHostRecorders(hostPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(viewerPage, code, testInfo);
+    const relayMimeType = () => hostPage.evaluate(() => window.__nextraRecorders.at(-1)?.mimeType || '');
+    test.skip(!(await relayMimeType()).startsWith('video/mp4'), 'the host browser does not record MP4');
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
+    const mp4Generation = (await getRoomByCode(request, code)).mediaGeneration;
+
+    // HostView's recorder.onerror for MP4: setRelayMp4Failed(true), and the
+    // recorder restarts on VP8.
+    await hostPage.evaluate(() => window.__nextraRecorders.at(-1).dispatchEvent(new Event('error')));
+    await expect.poll(async () => (await getRoomByCode(request, code))?.mediaGeneration || 0).toBeGreaterThan(mp4Generation);
+    expect(await relayMimeType()).toMatch(/^video\/webm/);
+
+    const atSwitch = await videoTime(viewerPage);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atSwitch + 3);
+    expect(await viewerPage.locator('video').evaluate((video) => video.error?.code ?? null)).toBeNull();
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// A relay recorder that errors, or stops by itself, while the host already
+// records VP8 changes no state the host view depends on, so it used to stay
+// down with its safety-flush interval and silent-audio context still running.
+// The host restarts the current recorder, at most three times a minute, and
+// ignores events from recorders it has already replaced.
+test('the host restarts a VP8 relay recorder that errors or stops on its own, within a budget', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await trackHostRecorders(hostPage, { recordMp4: false });
+    await hostPage.addInitScript(() => {
+        const NativeAudioContext = window.AudioContext;
+        window.__nextraAudioContexts = [];
+        window.AudioContext = class TrackedAudioContext extends NativeAudioContext {
+            constructor(...args) {
+                super(...args);
+                window.__nextraAudioContexts.push(this);
+            }
+        };
+    });
+    const budgetWarnings = [];
+    hostPage.on('console', (message) => {
+        if (/restart budget/i.test(message.text())) budgetWarnings.push(message.text());
+    });
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(viewerPage, code, testInfo);
+    expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1)?.mimeType || '')).toMatch(/^video\/webm/);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
+
+    const recorderCount = () => hostPage.evaluate(() => window.__nextraRecorders.length);
+    const openAudioContexts = () => hostPage.evaluate(() => (
+        window.__nextraAudioContexts.filter((context) => context.state !== 'closed').length
+    ));
+    const failCurrentRecorder = (how) => hostPage.evaluate((kind) => {
+        const recorder = window.__nextraRecorders.at(-1);
+        if (kind === 'error') recorder.dispatchEvent(new Event('error'));
+        else recorder.stop();
+    }, how);
+    const started = await recorderCount();
+    expect(await openAudioContexts()).toBe(1);
+
+    // A recorder error that no state change follows: restarted, one recorder
+    // and one silent-audio context left, and the viewer keeps playing.
+    const generationBefore = (await getRoomByCode(request, code)).mediaGeneration;
+    await failCurrentRecorder('error');
+    await expect.poll(recorderCount).toBe(started + 1);
+    await expect.poll(async () => (await getRoomByCode(request, code))?.mediaGeneration || 0).toBeGreaterThan(generationBefore);
+    await expect.poll(openAudioContexts).toBe(1);
+    expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1).state)).toBe('recording');
+    const atRestart = await videoTime(viewerPage);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atRestart + 2);
+
+    // The recorder stopping without the host asking for it.
+    await failCurrentRecorder('stop');
+    await expect.poll(recorderCount).toBe(started + 2);
+    await expect.poll(openAudioContexts).toBe(1);
+
+    // An error event from a recorder the host replaced long ago is ignored.
+    await hostPage.evaluate(() => window.__nextraRecorders[0].dispatchEvent(new Event('error')));
+    await hostPage.waitForTimeout(1_000);
+    expect(await recorderCount()).toBe(started + 2);
+
+    // The third restart of the minute is still allowed; the fourth is not, and
+    // the host says so once.
+    await failCurrentRecorder('error');
+    await expect.poll(recorderCount).toBe(started + 3);
+    await failCurrentRecorder('error');
+    await expect.poll(() => budgetWarnings.length).toBe(1);
+    await hostPage.waitForTimeout(1_000);
+    expect(await recorderCount()).toBe(started + 3);
+    expect(await openAudioContexts()).toBe(0);
+    expect(budgetWarnings).toHaveLength(1);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// MediaRecorder timeslices end inside a WebM element, so the chunk after one
+// finishes it. A viewer that is behind still holds old-generation chunks when
+// the new generation's init arrives, and drops them.
+test('a relay viewer that is behind keeps playing across a VP8 recorder restart', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await trackHostRecorders(hostPage, { recordMp4: false });
+    await installHeldWebSocket(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(viewerPage, code, testInfo);
+    expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1)?.mimeType || '')).toMatch(/^video\/webm/);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
+    const firstGeneration = (await getRoomByCode(request, code)).mediaGeneration;
+
+    await viewerPage.evaluate(() => window.__nextraHoldSocket());
+    await hostPage.waitForTimeout(1_200);
+    // A frame-rate change restarts the recorder: a new generation.
+    const frameRate = hostPage.getByRole('group', { name: 'Frame rate' });
+    await frameRate.locator('button[aria-pressed="false"]').first().click();
+    await expect.poll(async () => (await getRoomByCode(request, code))?.mediaGeneration || 0).toBeGreaterThan(firstGeneration);
+    await hostPage.waitForTimeout(1_000);
+    expect(await viewerPage.evaluate(() => window.__nextraReleaseSocket())).toBeGreaterThan(4);
+
+    const atRelease = await videoTime(viewerPage);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atRelease + 3);
+    expect(await viewerPage.locator('video').evaluate((video) => video.error?.code ?? null)).toBeNull();
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// Bytes the SourceBuffer cannot parse fire 'error' on it and end the
+// MediaSource. The player used to clear its append lock and nothing else, so
+// the picture froze under "relay mode active" until 240 chunks had piled up.
+test('a relay viewer whose stream turns unreadable is told why, gets Watch Stream back and can watch again', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installRelayAppendFaults(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(viewerPage, code, testInfo);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
+
+    await viewerPage.evaluate(() => { window.__nextraAppendFaults.corruptNext = true; });
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraAppendFaults.corrupted)).toBe(1);
+    await expectRelayStoppedVisibly(viewerPage, request, code, 'The browser could not read the relay stream');
+
+    // Watch Stream starts the relay again.
+    await viewerPage.getByRole('button', { name: 'Watch Stream' }).click();
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible();
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(1);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect.poll(async () => (await getRoomByCode(request, code))?.relayViewerCount).toBe(1);
+
+    // The MediaSource closing under the player, which nothing in Nextra asked
+    // for, ends playback the same way.
+    await viewerPage.locator('video').evaluate((video) => {
+        video.removeAttribute('src');
+        video.load();
+    });
+    await expectRelayStoppedVisibly(viewerPage, request, code, 'The browser closed the relay stream');
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The player used to take a chunk off its queue before appendBuffer() and only
+// log a synchronous failure, so the chunk was lost and playback went on
+// without it, whatever the error.
+test('a relay viewer whose SourceBuffer is full evicts and appends the same chunk again; any other refused append ends playback visibly', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installRelayAppendFaults(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatchRelay(viewerPage, code, testInfo);
+    // An eviction keeps the 10 s before the playhead, so there must be more than that.
+    await expect.poll(async () => videoTime(viewerPage), { timeout: 25_000 }).toBeGreaterThan(11);
+
+    await viewerPage.evaluate(() => { window.__nextraAppendFaults.throwNext = 'QuotaExceededError'; });
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraAppendFaults.thrown)).toBe(1);
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraAppendFaults.retried),
+        'the refused chunk is appended again').toBe(1);
+    const { removes, currentTime } = await viewerPage.evaluate(() => ({
+        removes: window.__nextraAppendFaults.removes,
+        currentTime: document.querySelector('video').currentTime,
+    }));
+    expect(removes).toHaveLength(1);
+    expect(removes[0][0]).toBe(0);
+    expect(removes[0][1]).toBeGreaterThan(0);
+    expect(removes[0][1]).toBeLessThanOrEqual(currentTime - 10);
+    const atRetry = await videoTime(viewerPage);
+    await expect.poll(async () => videoTime(viewerPage)).toBeGreaterThan(atRetry + 2);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible();
+
+    await viewerPage.evaluate(() => { window.__nextraAppendFaults.throwNext = 'InvalidStateError'; });
+    await expectRelayStoppedVisibly(viewerPage, request, code, 'The browser refused relay media (InvalidStateError)');
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// A direct viewer whose WebRTC cannot connect falls back to the relay; that
+// relay start overflows its queue before anything buffers (appends never
+// finish, and every chunk arrives 30 times). The overflow used to be reported
+// as "cleaned up before media buffered": the attempt's cleanup settled the
+// start with its own generic error before the overflow could.
+test('a relay start that falls behind before it plays reports that, not a generic cleanup error', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installWebRtcStall(viewerPage);
+    await installRelayAppendFaults(viewerPage);
+    await installMediaChunkFlood(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
+    await expect(watchButton).toBeEnabled();
+    await viewerPage.evaluate(() => {
+        window.__nextraStall.blockIce = true;
+        window.__nextraAppendFaults.swallow = true;
+        window.__nextraChunkFlood.copies = 30;
+    });
+
+    await watchButton.click();
+    await expect(viewerPage.getByRole('alert'))
+        .toContainText('Relay playback fell behind and must be restarted.', { timeout: 30_000 });
+    expect(await viewerPage.evaluate(() => window.__nextraChunkFlood.flooded)).toBeGreaterThan(0);
+    await expect(viewerPage.getByText(/relay mode active|WebRTC mode active/i)).toHaveCount(0);
+    await expect(watchButton).toBeEnabled();
+    await expect.poll(async () => getRoomByCode(request, code)).toMatchObject({
+        relayViewerCount: 0,
+        mediasoupConsumerCount: 0,
+    });
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+test('a relay start superseded by a socket reconnect leaves no stale playback, error or subscription', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerSocketControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
+    await expect(watchButton).toBeEnabled();
+
+    // A tunnel viewer's relay-first attempt waits up to 7 s for the live
+    // media-init of the recorder generation its start triggers; hold it back
+    // so the attempt is still waiting when the connection drops.
+    await viewerPage.evaluate(() => { window.__nextraSocketControl.withholdMediaInit = true; });
+    await watchButton.click();
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraSocketControl.withheldMediaInit))
+        .toBeGreaterThan(0);
+    const liveInitWaitStartedAt = Date.now();
+
+    await viewerPage.evaluate(() => window.__nextraSocketControl.sockets.at(-1).close());
+    await expect.poll(() => viewerPage.evaluate(() => {
+        const { sockets } = window.__nextraSocketControl;
+        return sockets.length > 1 && sockets.at(-1).readyState === WebSocket.OPEN;
+    })).toBe(true);
+    // The reconnect rejoined the room on the new socket.id.
+    await expect.poll(async () => (await getOnlyRoom(request))?.viewerCount).toBe(1);
+
+    // Past the moment the superseded attempt's media-init wait gives up: it
+    // must not report an error, start another playback mode, or leave a
+    // relay subscription or consumer behind.
+    await viewerPage.waitForTimeout(Math.max(0, liveInitWaitStartedAt + 9_500 - Date.now()));
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect(viewerPage.getByText(/WebRTC mode active|relay mode active/i)).toHaveCount(0);
+    expect(await getOnlyRoom(request)).toMatchObject({
+        viewerCount: 1,
+        relayViewerCount: 0,
+        mediasoupConsumerCount: 0,
+    });
+    expect(await viewerPage.locator('video').evaluate((video) => ({
+        src: video.getAttribute('src') || '',
+        hasStream: Boolean(video.srcObject),
+    }))).toEqual({ src: '', hasStream: false });
+    await expect(watchButton).toBeEnabled();
+
+    // A new Watch on the reconnected socket plays through the relay.
+    await viewerPage.evaluate(() => { window.__nextraSocketControl.withholdMediaInit = false; });
+    await watchButton.click();
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible();
+    await expect.poll(() => viewerPage.locator('video').evaluate((video) => (
+        video.videoWidth > 0
+        && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+        && video.currentTime > 0
+    ))).toBe(true);
+    expect((await getOnlyRoom(request)).relayViewerCount).toBe(1);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json()).toMatchObject({
+        rooms: {
+            active: 0,
+            totalRelayViewers: 0,
+            totalMediasoupConsumers: 0,
+        },
+    });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// With ICE blocked, the 8 s ICE wait ends the WebRTC start and the viewer falls
+// back to the relay. The start used to await video.play() first; that promise
+// never settles without media, so the ICE wait was never reached and only
+// handleWatch's 40 s safety timer ended the attempt, with no fallback.
+test('a WebRTC start whose video.play() never settles still times out in its ICE window and falls back to the relay', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installWebRtcStall(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
+    await expect(watchButton).toBeEnabled();
+    await viewerPage.evaluate(() => Object.assign(window.__nextraStall, { blockIce: true, hangPlay: true }));
+
+    const clickedAt = Date.now();
+    await watchButton.click();
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible({ timeout: 25_000 });
+    expect(Date.now() - clickedAt, 'the ICE window, not the 40 s safety timer, ended the WebRTC start')
+        .toBeLessThan(25_000);
+    expect(await viewerPage.evaluate(() => window.__nextraStall.hungPlays),
+        'the WebRTC start reached video.play()').toBeGreaterThan(0);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    expect(await getOnlyRoom(request)).toMatchObject({ viewerCount: 1, relayViewerCount: 1, mediasoupConsumerCount: 0 });
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json()).toMatchObject({
+        rooms: { active: 0, totalRelayViewers: 0, totalMediasoupConsumers: 0 },
+    });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The automatic recovery after a reconnect has no safety timer of its own: a
+// WebRTC restart that stalls in video.play() used to leave the viewer on
+// "Connecting..." for good.
+test('a viewer whose WebRTC recovery after a reconnect stalls in video.play() falls back to the relay', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerSocketControl(viewerPage);
+    await installWebRtcStall(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+
+    await viewerPage.evaluate(() => Object.assign(window.__nextraStall, { blockIce: true, hangPlay: true }));
+    const droppedAt = Date.now();
+    await viewerPage.evaluate(() => window.__nextraSocketControl.sockets.at(-1).close());
+    await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible({ timeout: 30_000 });
+    expect(Date.now() - droppedAt, "the ICE window ended the recovery's WebRTC start").toBeLessThan(30_000);
+    expect(await viewerPage.evaluate(() => window.__nextraStall.hungPlays),
+        'the recovery reached video.play()').toBeGreaterThan(0);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    expect(await getOnlyRoom(request)).toMatchObject({ viewerCount: 1, relayViewerCount: 1, mediasoupConsumerCount: 0 });
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json()).toMatchObject({
+        rooms: { active: 0, totalRelayViewers: 0, totalMediasoupConsumers: 0 },
+    });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// A reconnect rejoins the room and resumes playback while the joined view, Leave
+// Room included, stays usable. A Leave Room pressed during that wait used to be
+// undone when the rejoin finished: it put the viewer back in the joined view and
+// started playback again.
+const PLAYBACK_REQUESTS = ['get-rtp-capabilities', 'create-recv-transport', 'consume', 'relay-consume-start', 'fallback-consume-start'];
+
+test('Leave Room pressed while a reconnect is rejoining the room stays left, starts no playback and leaves no viewer behind', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerRequestControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+    await dropWatchingViewerWithRejoinHeld(viewerPage);
+
+    // The joined view is still up while the rejoin waits.
+    const leaveButton = viewerPage.getByRole('button', { name: 'Leave Room' });
+    await expect(leaveButton).toBeVisible();
+    await leaveButton.click();
+    const joinButton = viewerPage.getByRole('button', { name: 'Join Room' });
+    await expect(joinButton).toBeVisible();
+    // The leave reached the server ahead of the held join-room.
+    expect(await getOnlyRoom(request)).toMatchObject({ viewerCount: 0 });
+
+    // The join-room now reaches the server, which puts the viewer back in the
+    // room (it came after the leave) and answers the rejoin that was left behind.
+    const sentBeforeRelease = await viewerPage.evaluate(() => window.__nextraRequestControl.sent.length);
+    expect(await viewerPage.evaluate(() => window.__nextraRequestControl.releaseHeld())).toBe(1);
+
+    // The answer is stale: the client asks the server to drop that viewer again.
+    await expect.poll(() => viewerPage.evaluate(
+        (from) => window.__nextraRequestControl.sent.slice(from),
+        sentBeforeRelease,
+    )).toContain('leave-room');
+    await expect.poll(async () => (await getOnlyRoom(request))?.viewerCount).toBe(0);
+    await viewerPage.waitForTimeout(1500);
+
+    // The viewer stays on the join form, with no error and no playback of any kind.
+    await expect(joinButton).toBeVisible();
+    await expect(leaveButton).toHaveCount(0);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect(viewerPage.getByText(/WebRTC mode active|relay mode active/i)).toHaveCount(0);
+    const sentAfterRelease = await viewerPage.evaluate(
+        (from) => window.__nextraRequestControl.sent.slice(from),
+        sentBeforeRelease,
+    );
+    for (const requestName of PLAYBACK_REQUESTS) {
+        expect(sentAfterRelease, `${requestName} was not sent after the leave`).not.toContain(requestName);
+    }
+    expect(await getOnlyRoom(request)).toMatchObject({ viewerCount: 0, relayViewerCount: 0, mediasoupConsumerCount: 0 });
+
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The server keeps one room per socket, so a leave sent for the rejoin that was
+// left behind would remove the viewer from the room it joined afterwards.
+test('a rejoin left behind by Leave Room finishes without undoing the join made after it', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerRequestControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+    await dropWatchingViewerWithRejoinHeld(viewerPage);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    const joinButton = viewerPage.getByRole('button', { name: 'Join Room' });
+    await expect(joinButton).toBeVisible();
+
+    // Join again while the first rejoin's join-room is still held back.
+    await joinButton.click();
+    const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
+    await expect(watchButton).toBeEnabled();
+    await expect.poll(async () => (await getOnlyRoom(request))?.viewerCount).toBe(1);
+
+    // The held join-room reaches the server (which already has this viewer in the room) and is answered.
+    expect(await viewerPage.evaluate(() => window.__nextraRequestControl.releaseHeld())).toBe(1);
+    const sentAtRelease = await viewerPage.evaluate(() => window.__nextraRequestControl.sent.length);
+    await viewerPage.waitForTimeout(2000);
+
+    // The old rejoin ended without a word: the newer join is untouched.
+    await expect(viewerPage.getByRole('button', { name: 'Leave Room' })).toBeVisible();
+    await expect(watchButton).toBeEnabled();
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect(viewerPage.getByText(/WebRTC mode active|relay mode active/i)).toHaveCount(0);
+    const sentAfterRelease = await viewerPage.evaluate(
+        (from) => window.__nextraRequestControl.sent.slice(from).filter((event) => event !== 'heartbeat'),
+        sentAtRelease,
+    );
+    expect(sentAfterRelease, 'the old rejoin sent nothing more').toEqual([]);
+    expect(await getOnlyRoom(request)).toMatchObject({ viewerCount: 1, relayViewerCount: 0, mediasoupConsumerCount: 0 });
+
+    // The newer join works.
+    await watchButton.click();
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// Leave Room ends the viewer session at once, then waits up to 5 s for the
+// server's answer (held back here). A Watch Stream start that failed in that
+// wait used to fall back to the relay, a relay-consume-start sent after the
+// leave-room, and Watch Stream pressed in the wait started playback again.
+test('a Watch Stream start that fails while Leave Room waits for the server starts no relay, and Watch Stream then starts nothing', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerRequestControl(viewerPage);
+    await installAnswerControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
+    await expect(watchButton).toBeEnabled();
+
+    // The WebRTC start waits for its transport.
+    await viewerPage.evaluate(() => { window.__nextraAnswerControl.holdAnswerOf = 'create-recv-transport'; });
+    await watchButton.click();
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraAnswerControl.held.length)).toBe(1);
+
+    await viewerPage.evaluate(() => { window.__nextraRequestControl.holdNext = 'leave-room'; });
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraRequestControl.held.length)).toBe(1);
+    const sentAtLeave = await viewerPage.evaluate(() => window.__nextraRequestControl.sent.length);
+    const sentSinceLeave = () => viewerPage.evaluate(
+        (from) => window.__nextraRequestControl.sent.slice(from),
+        sentAtLeave,
+    );
+
+    // The transport request fails while the leave is on its way: no relay instead.
+    expect(await viewerPage.evaluate(
+        () => window.__nextraAnswerControl.releaseHeld({ success: false, error: 'Injected transport failure' }),
+    )).toBe(1);
+    await viewerPage.waitForTimeout(1000);
+    for (const requestName of PLAYBACK_REQUESTS) {
+        expect(await sentSinceLeave(), `${requestName} was not sent after Leave Room`).not.toContain(requestName);
+    }
+
+    // Watch Stream is still on screen until the leave is answered; it starts nothing.
+    await expect(watchButton).toBeEnabled();
+    await watchButton.click();
+    await viewerPage.waitForTimeout(1000);
+    for (const requestName of PLAYBACK_REQUESTS) {
+        expect(await sentSinceLeave(), `${requestName} was not sent after Leave Room`).not.toContain(requestName);
+    }
+
+    expect(await viewerPage.evaluate(() => window.__nextraRequestControl.releaseHeld())).toBe(1);
+    await expect(viewerPage.getByRole('button', { name: 'Join Room' })).toBeVisible();
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    expect(await getRoomByCode(request, code)).toMatchObject({ viewerCount: 0, relayViewerCount: 0, mediasoupConsumerCount: 0 });
+
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The same wait: a transport-failed that arrives in it used to run the
+// recovery, which started WebRTC playback again in the room being left.
+test('a transport failure while Leave Room waits for the server starts no recovery', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerRequestControl(viewerPage);
+    await installAnswerControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+
+    await viewerPage.evaluate(() => { window.__nextraRequestControl.holdNext = 'leave-room'; });
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraRequestControl.held.length)).toBe(1);
+    const sentAtLeave = await viewerPage.evaluate(() => window.__nextraRequestControl.sent.length);
+
+    await viewerPage.evaluate(
+        (failure) => window.__nextraAnswerControl.deliver('transport-failed', failure),
+        RECOVERABLE_TRANSPORT_FAILURE,
+    );
+    await viewerPage.waitForTimeout(1500);
+    const sentInWait = await viewerPage.evaluate(
+        (from) => window.__nextraRequestControl.sent.slice(from),
+        sentAtLeave,
+    );
+    for (const requestName of PLAYBACK_REQUESTS) {
+        expect(sentInWait, `${requestName} was not sent after Leave Room`).not.toContain(requestName);
+    }
+
+    expect(await viewerPage.evaluate(() => window.__nextraRequestControl.releaseHeld())).toBe(1);
+    await expect(viewerPage.getByRole('button', { name: 'Join Room' })).toBeVisible();
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect(viewerPage.getByText(/WebRTC mode active|relay mode active/i)).toHaveCount(0);
+    expect(await getRoomByCode(request, code)).toMatchObject({ viewerCount: 0, relayViewerCount: 0, mediasoupConsumerCount: 0 });
+
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code)).toBeNull();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The relay-first path of an OBS room asks the server for the fMP4 relay on its
+// own (fallback-consume-start). The start was sent with an un-timed
+// acknowledgement, so an answer that never came left the viewer on
+// "Relay Mode - connecting" for good and blocked every later start.
+test('a relay start the server never answers ends its connecting state with a reason and is stopped once, not retried in a loop', async ({ browser }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installFallbackStartControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await viewerPage.evaluate(() => { window.__nextraFallbackControl.answer = 'drop'; });
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+
+    const connecting = viewerPage.getByText(/Relay Mode \(.*\) - connecting/);
+    await expect(connecting).toBeVisible();
+    expect(await fallbackStartsSent(viewerPage)).toBe(1);
+
+    // The acknowledgement times out after 10 s: the connecting state ends and says why.
+    await expect(connecting).toHaveCount(0, { timeout: 20_000 });
+    await expect(viewerPage.getByRole('alert')).toContainText(/did not respond/i);
+    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toBeEnabled();
+
+    // The server may still have processed the start, so one stop follows it on the same
+    // connection; nothing asks again by itself.
+    await viewerPage.waitForTimeout(2000);
+    expect(await fallbackStartsSent(viewerPage)).toBe(1);
+    expect(await viewerPage.evaluate(
+        () => window.__nextraFallbackControl.sent.filter((event) => event === 'fallback-consume-stop').length,
+    )).toBe(1);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+test('a connection that drops while the relay start is unanswered starts it again on the new connection', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installFallbackStartControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await viewerPage.evaluate(() => { window.__nextraFallbackControl.answer = 'drop'; });
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    await expect(viewerPage.getByText(/Relay Mode \(.*\) - connecting/)).toBeVisible();
+    expect(await fallbackStartsSent(viewerPage)).toBe(1);
+
+    // The connection drops with the start unanswered; the reconnect rejoins the room
+    // and asks for the relay again, this time on the new socket.id.
+    await viewerPage.evaluate(() => {
+        window.__nextraFallbackControl.answer = 'ok';
+        window.__nextraFallbackControl.sockets.at(-1).close();
+    });
+    await expect.poll(() => fallbackStartsSent(viewerPage)).toBe(2);
+    await expect(viewerPage.getByText(/Relay Mode \(.*\) - (connecting|buffering)/)).toBeVisible();
+    await expect.poll(async () => (await getOnlyRoom(request))?.viewerCount).toBe(1);
+
+    // The old connection's start is never stopped from the new one.
+    expect(await viewerPage.evaluate(
+        () => window.__nextraFallbackControl.sent.filter((event) => event === 'fallback-consume-stop').length,
+    )).toBe(0);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// The answer of a start made before Leave Room arrives after the viewer joined
+// again and its own start was answered. It belongs to a viewer that is gone: it
+// must not touch the new session, and its stop would remove the new
+// subscription (fallback-consume-stop is socket-wide on the server).
+test('a relay start answered after Leave Room and a new join leaves the new session alone and sends no stop', async ({ browser }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installFallbackStartControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await viewerPage.evaluate(() => { window.__nextraFallbackControl.answer = 'hold'; });
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    await expect(viewerPage.getByText(/Relay Mode \(.*\) - connecting/)).toBeVisible();
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraFallbackControl.held.length)).toBe(1);
+
+    // Leave Room with the answer still on its way.
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    const joinButton = viewerPage.getByRole('button', { name: 'Join Room' });
+    await expect(joinButton).toBeVisible();
+
+    // Join again: a new start, answered at once.
+    await viewerPage.evaluate(() => { window.__nextraFallbackControl.answer = 'ok'; });
+    await joinButton.click();
+    await expect(viewerPage.getByText(/Relay Mode (.*) - (connecting|buffering)/)).toBeVisible();
+    await expect.poll(() => fallbackStartsSent(viewerPage)).toBe(2);
+
+    // Only now does the first start's answer arrive. Nothing is stopped, and the new
+    // session is still in relay mode.
+    expect(await viewerPage.evaluate(() => window.__nextraFallbackControl.releaseHeld())).toBe(1);
+    await viewerPage.waitForTimeout(1000);
+    expect(await viewerPage.evaluate(
+        () => window.__nextraFallbackControl.sent.filter((event) => event === 'fallback-consume-stop').length,
+    )).toBe(0);
+    await expect(viewerPage.getByText(/Relay Mode (.*)/)).toBeVisible();
+    await expect(viewerPage.getByRole('button', { name: 'Try WebRTC' })).toBeVisible();
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// A recoverable transport failure (the WebRTC transport the server kept for the
+// viewer failed) used to reset the relay mode the viewer was entering without
+// giving that start up: its claim and its entering flag stayed, so nothing asked
+// for the relay again and the viewer saw Watch Stream and an error, and the late
+// answer then started a player nothing on screen belonged to. A recovery now
+// gives the fMP4 relay up through the ledger, one stop, and asks for it again.
+test('a transport failure while the relay start is unanswered gives that start up and asks again, and the late answer starts nothing', async ({ browser }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installFallbackStartControl(viewerPage);
+    await installAnswerControl(viewerPage);
+    const fallbackStopsSent = () => viewerPage.evaluate(
+        () => window.__nextraFallbackControl.sent.filter((event) => event === 'fallback-consume-stop').length,
+    );
+    const failTransport = () => viewerPage.evaluate(
+        (failure) => window.__nextraAnswerControl.deliver('transport-failed', failure),
+        RECOVERABLE_TRANSPORT_FAILURE,
+    );
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await viewerPage.evaluate(() => { window.__nextraFallbackControl.answer = 'hold'; });
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    const relayStatus = viewerPage.getByText(/Relay Mode \(.*\) - (connecting|buffering)/);
+    await expect(relayStatus).toBeVisible();
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraFallbackControl.held.length)).toBe(1);
+
+    // The transport fails with the start unanswered; the next start is answered at once.
+    // Both happen at once, well before the start's own 10 s answer timeout would stop it.
+    await viewerPage.evaluate(() => { window.__nextraFallbackControl.answer = 'ok'; });
+    await failTransport();
+    await expect.poll(fallbackStopsSent, { message: 'the start given up is stopped once', timeout: 3_000 }).toBe(1);
+    await expect.poll(() => fallbackStartsSent(viewerPage), { message: 'and asked for again', timeout: 3_000 }).toBe(2);
+    await expect(relayStatus).toBeVisible();
+    await expect(viewerPage.getByRole('button', { name: 'Try WebRTC' })).toBeVisible();
+    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toHaveCount(0);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+
+    // The first start's answer arrives at last: nothing starts or stops for it.
+    expect(await viewerPage.evaluate(() => window.__nextraFallbackControl.releaseHeld())).toBe(1);
+    await viewerPage.waitForTimeout(1000);
+    expect(await fallbackStopsSent()).toBe(1);
+    expect(await fallbackStartsSent(viewerPage)).toBe(2);
+    await expect(relayStatus).toBeVisible();
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+
+    // With the relay player running, a transport failure stops its subscription and starts it again.
+    await failTransport();
+    await expect.poll(fallbackStopsSent, { timeout: 3_000 }).toBe(2);
+    await expect.poll(() => fallbackStartsSent(viewerPage), { timeout: 3_000 }).toBe(3);
+    await expect(relayStatus).toBeVisible();
+    await expect(viewerPage.getByRole('button', { name: 'Try WebRTC' })).toBeVisible();
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+// Leave Room ends the viewer session at once, then waits up to 5 s for the
+// server's answer. Try WebRTC, still on screen in that wait, used to start
+// WebRTC playback in the room being left.
+test('Try WebRTC pressed while Leave Room waits for the server starts nothing', async ({ browser, request }, testInfo) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    await installViewerRequestControl(viewerPage);
+    await installFallbackStartControl(viewerPage);
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    await expect(viewerPage.getByText(/Relay Mode \(.*\) - (connecting|buffering)/)).toBeVisible();
+    const tryWebRtc = viewerPage.getByRole('button', { name: 'Try WebRTC' });
+    await expect(tryWebRtc).toBeEnabled();
+
+    await viewerPage.evaluate(() => { window.__nextraRequestControl.holdNext = 'leave-room'; });
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await expect.poll(() => viewerPage.evaluate(() => window.__nextraRequestControl.held.length)).toBe(1);
+    const sentAtLeave = await viewerPage.evaluate(() => window.__nextraRequestControl.sent.length);
+
+    await tryWebRtc.click();
+    await viewerPage.waitForTimeout(1500);
+    const sentInWait = await viewerPage.evaluate(
+        (from) => window.__nextraRequestControl.sent.slice(from),
+        sentAtLeave,
+    );
+    for (const requestName of PLAYBACK_REQUESTS) {
+        expect(sentInWait, `${requestName} was not sent after Leave Room`).not.toContain(requestName);
+    }
+
+    expect(await viewerPage.evaluate(() => window.__nextraRequestControl.releaseHeld())).toBe(1);
+    await expect(viewerPage.getByRole('button', { name: 'Join Room' })).toBeVisible();
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+    await expect.poll(async () => getRoomByCode(request, code)).toMatchObject({
+        viewerCount: 0,
+        relayViewerCount: 0,
+        mediasoupConsumerCount: 0,
+    });
+
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await viewerContext.close();
     await hostContext.close();
 });
 
@@ -505,35 +1993,32 @@ test('autoplay denial falls back to muted playback and unmuting control succeeds
 
 let loopbackProxySequence = 0;
 let loopbackProxyState = null;
+// The running test's claim on the lock, kept from the first line of beforeEach.
+// When the test timeout fires inside beforeEach, Playwright stops waiting for the
+// hook without throwing into it, so the hook's own catch never runs: afterEach
+// then cancels a wait that is still going on and gives back a lock that was
+// taken, instead of leaving it to block every later test.
+let mediaFlowLockSession = null;
 
 test.beforeEach(async ({ browser }, testInfo) => {
-    const [fs, http, net, path] = await Promise.all([
-        import('node:fs/promises'),
+    // One media-flow test at a time may use the shared server and room, across
+    // workers (see support/exclusiveFileLock.mjs). The folder is under the project's
+    // outputDir, which Playwright clears when a run starts, so a lock left by a
+    // killed run does not block the next run.
+    const lockSession = createLockSession({
+        directory: path.join(testInfo.project.outputDir, '.media-flow-lock'),
+        workerIndex: testInfo.workerIndex,
+    });
+    mediaFlowLockSession = lockSession;
+    const [http, net] = await Promise.all([
         import('node:http'),
         import('node:net'),
-        import('node:path'),
     ]);
     loopbackProxySequence += 1;
-    const lockDirectory = path.join(process.cwd(), 'test-results', '.media-flow-lock');
-    const ticketName = `${[
-        String(Date.now()).padStart(13, '0'),
-        String(testInfo.workerIndex).padStart(4, '0'),
-        String(process.pid).padStart(8, '0'),
-        String(loopbackProxySequence).padStart(4, '0'),
-    ].join('-')}.ticket`;
-    const ticketPath = path.join(lockDirectory, ticketName);
-    await fs.mkdir(lockDirectory, { recursive: true });
-    await fs.writeFile(ticketPath, '', { flag: 'wx' });
+    await lockSession.acquire();
 
     try {
-        for (;;) {
-            const tickets = (await fs.readdir(lockDirectory))
-                .filter((entry) => entry.endsWith('.ticket'))
-                .sort();
-            if (tickets[0] === ticketName) break;
-            await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-
+        const port = serverPort(testInfo);
         const workerOctet = (testInfo.workerIndex % 250) + 1;
         const testOctet = (loopbackProxySequence % 250) + 2;
         const sourceAddress = `127.0.${workerOctet}.${testOctet}`;
@@ -544,14 +2029,14 @@ test.beforeEach(async ({ browser }, testInfo) => {
             response.end();
         });
         proxy.on('connect', (request, downstream, head) => {
-            if (!['localhost:3210', 'nextra.cloudflare.test:3210'].includes(request.url)) {
+            if (![`localhost:${port}`, `nextra.cloudflare.test:${port}`].includes(request.url)) {
                 downstream.end('HTTP/1.1 403 Forbidden\r\n\r\n');
                 return;
             }
 
             const upstream = net.connect({
                 host: '127.0.0.1',
-                port: 3210,
+                port,
                 localAddress: sourceAddress,
             }, () => {
                 downstream.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -574,44 +2059,52 @@ test.beforeEach(async ({ browser }, testInfo) => {
             proxy.once('error', reject);
             proxy.listen(0, '127.0.0.1', resolve);
         });
+        if (lockSession.cancelled) {
+            proxy.close();
+            throw new Error('beforeEach timed out while starting the loopback proxy');
+        }
         const proxyPort = proxy.address().port;
 
         const originalNewContext = browser.newContext;
         browser.newContext = function newContext(options = {}) {
             return Reflect.apply(originalNewContext, browser, [{
                 ...options,
-                baseURL: 'https://localhost:3210',
+                baseURL: `https://localhost:${port}`,
                 proxy: { server: `http://127.0.0.1:${proxyPort}` },
             }]);
         };
         loopbackProxyState = {
             browser,
-            fs,
             originalNewContext,
             proxy,
             sockets,
-            ticketPath,
         };
     } catch (error) {
-        await fs.rm(ticketPath, { force: true });
+        // afterEach releases it again and reports a failure to do so.
+        await lockSession.release().catch(() => {});
         throw error;
     }
 });
 
 test.afterEach(async () => {
-    if (!loopbackProxyState) return;
+    const lockSession = mediaFlowLockSession;
+    mediaFlowLockSession = null;
+    // First, so an abandoned beforeEach cannot take the lock while this hook runs.
+    lockSession?.cancel();
 
-    const {
-        browser,
-        fs,
-        originalNewContext,
-        proxy,
-        sockets,
-        ticketPath,
-    } = loopbackProxyState;
-    loopbackProxyState = null;
-    browser.newContext = originalNewContext;
-    for (const socket of sockets) socket.destroy();
-    await new Promise((resolve) => proxy.close(resolve));
-    await fs.rm(ticketPath, { force: true });
+    if (loopbackProxyState) {
+        const {
+            browser,
+            originalNewContext,
+            proxy,
+            sockets,
+        } = loopbackProxyState;
+        loopbackProxyState = null;
+        browser.newContext = originalNewContext;
+        for (const socket of sockets) socket.destroy();
+        await new Promise((resolve) => proxy.close(resolve));
+    }
+    // After the proxy is closed, so the next test starts on a quiet server. A lock that
+    // someone else took meanwhile fails this test here.
+    await lockSession?.release();
 });

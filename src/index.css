@@ -66,9 +66,16 @@
   --row-gap: clamp(0.3rem, 0.7vh, 0.55rem);
   /* Everything above the video stage on the host page: nav, page padding, page
      header, the start controls, the capture rows, and the footer. The stage is
-     bounded by whatever height is left over, so it never pushes the page into a
-     scrollbar on a short viewport. Measured, not guessed - see the card. */
+     bounded by whatever height is left over, so on a laptop-height viewport it
+     does not push the page into a scrollbar. On a viewport shorter than this
+     budget plus --stage-min-width of video (a landscape phone) nothing is left
+     over, so the stage stops shrinking at the floor below and the page scrolls
+     instead. Measured, not guessed - see the card. */
   --stage-chrome: 24rem;
+  /* The narrowest the height-bounded stage gets. Without it the height term of
+     .video-container is zero or a sliver once the viewport is no taller than
+     the chrome budget. The container's own width still caps it. */
+  --stage-min-width: 18rem;
   --article-measure: 40rem;
 
   /* Shape + motion */
@@ -790,6 +797,19 @@ input.select-input {
   background: rgba(255, 255, 255, 0.035);
 }
 
+/* Three 6.4rem cells (the OBS tuning profiles, or the live resolution toggle)
+   are 315.5px wide, which the 1rem page padding leaves room for from 347.5px
+   up. The host column is as wide as its widest content, so on a narrower
+   viewport the toggle dragged the stage, the start button and the capture rows
+   past the right edge: 12px of sideways scroll at 320px. Below that width the
+   cells size to their labels instead. em in a media query follows the browser's
+   default font size, as the rem cell width and padding do. */
+@media (max-width: 21.7em) {
+  .controls .mode-toggle button {
+    min-width: 0;
+  }
+}
+
 /* ========== ALERTS, PILLS, CALLOUTS ========== */
 .alert {
   display: flex;
@@ -1266,10 +1286,18 @@ input.select-input {
 /* ========== VIDEO STAGE ========== */
 /* The third term bounds the 16:9 stage by the height left over after the page
    chrome, so a short viewport shrinks the stage instead of growing a scrollbar.
-   It is inert whenever width is the binding constraint, which is every phone. */
+   It is inert while width is the binding constraint, which is a phone held
+   upright; held sideways, height is the tight side and the term would reach
+   zero, so it is floored at --stage-min-width. The floor sits inside the outer
+   min(), so the stage never outgrows its container, and below the floor the
+   page scrolls instead. */
 .video-container {
   position: relative;
-  width: min(100%, var(--media-stage-max-width), (100svh - var(--stage-chrome)) * 16 / 9);
+  width: min(
+    100%,
+    var(--media-stage-max-width),
+    max(var(--stage-min-width), (100svh - var(--stage-chrome)) * 16 / 9)
+  );
   margin: 0 auto 0.5rem;
   aspect-ratio: 16 / 9;
   background: var(--bg-2);
@@ -1288,7 +1316,9 @@ input.select-input {
 /* The viewer page carries less below the stage than the host page does - no
    capture rows, no start controls - so it can afford a taller stage before the
    page would scroll. Without its own value it would inherit the host's budget
-   and shrink the video for chrome that is not there. */
+   and shrink the video for chrome that is not there. On a landscape phone this
+   budget is still larger than the viewport is tall, and --stage-min-width keeps
+   the stage from collapsing. */
 .watch-video {
   max-width: 60%;
   --stage-chrome: 19rem;
@@ -1361,6 +1391,22 @@ input.select-input {
 /* Short labels ("1080p", "60 fps") do not need the tuning toggle's wider cells. */
 .capture-settings .mode-toggle button {
   min-width: 5.25rem;
+}
+
+/* A toggle clips its own cells (overflow: hidden), and as a grid item it shrinks
+   below its content instead of pushing the row wider. The Resolution toggle
+   (three 5.25rem cells, 260px) beside its label needs 332px plus the 1rem page
+   padding, so on a viewport narrower than about 365px it was squeezed and the
+   1080p cell was cut off with no way to scroll to it (about half of it at 320px).
+   Below 23em (368px: a few pixels over the exact fit, for labels that render
+   wider in a platform's system font, and under the 375px phones) the label sits
+   above its toggle, which then has the row's full width. em in a media query
+   follows the browser's default font size, as the rem cell widths do. */
+@media (max-width: 23em) {
+  .capture-settings .setting-row-inline {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.35rem;
+  }
 }
 
 .status-bar {
@@ -2046,9 +2092,11 @@ input.select-input {
   :root {
     /* The stage gives up height in step with everything else, otherwise it
        becomes the tallest column and undoes the savings. Because the stage is
-       16:9, this token is literally "viewport height minus stage height", so it
-       only needs to be large enough to keep the stage shorter than the settings
-       column beside it - going further just shrinks the preview for nothing. */
+       16:9, this token is "viewport height minus stage height" for as long as
+       the stage is above --stage-min-width, so it only needs to be large enough
+       to keep the stage shorter than the settings column beside it - going
+       further just shrinks the preview for nothing. Below the floor the stage
+       stops shrinking, which is a viewport under about 36rem tall. */
     --stage-chrome: 26rem;
     --shell-pad-block: clamp(1rem, 3vh, 2.5rem);
   }

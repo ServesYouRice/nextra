@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-1a0aeac94ce4",
+    "title": "Probe endpoint test never sends a wrong token while a probe is armed",
+    "severity": "medium",
+    "task": "TASK-097",
+    "result": "fixed",
+    "failedBefore": false,
+    "test": "tests/relayCapacityProbe.test.js: 'the probe endpoint serves one armed download and nothing else'",
+    "proof": "The production handler is correct, so the unchanged code passes both versions of the test. The gap is in the test: with a mutant handler that serves any token while armed (token comparison removed), the original test still passed, because its only wrong-token request ran before measure() armed a probe. The updated test sends a one-character-off token and a shorter token from inside fetchImpl while the probe is armed; against the mutant it fails with the wrong-token assertion (deepEqual on the 404 statuses), and on the real handler all 10 tests in the file pass."
+  }
+]

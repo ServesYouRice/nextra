@@ -11,7 +11,40 @@ const {
     SKIP_GIVE_UP_MS,
 } = require('../lib/relayMp4');
 
-const { NON_SYNC, box, fragment, initSegment, traf, trak } = require('./mp4Boxes');
+const { NON_SYNC, box, fragment, fullBox, initSegment, traf, trak, u32 } = require('./mp4Boxes');
+
+// An init segment whose video mdhd is a bare 8-byte header, placed last so the
+// header ends the buffer. Also used with a truncated version-1 mdhd below.
+function initWithMdhd(mdhd) {
+    const tkhd = fullBox('tkhd', 0, u32(0, 0, 2), Buffer.alloc(68));
+    const hdlr = fullBox('hdlr', 0, u32(0), Buffer.from('vide', 'ascii'), Buffer.alloc(13));
+    const vide = box('trak', tkhd, box('mdia', hdlr, mdhd));
+    return Buffer.concat([box('ftyp', Buffer.from('isom\0\0\0\0', 'binary')), box('moov', trak(1, 'soun'), vide)]);
+}
+
+test('a header-only mdhd at the end of the init segment does not throw', () => {
+    const init = initWithMdhd(box('mdhd'));
+    assert.deepEqual(readVideoTrackInfo(init), { videoTrackId: 2, videoTimescale: null, defaultSampleFlags: null });
+});
+
+test('a truncated version-1 mdhd yields a null timescale without throwing', () => {
+    // Version 1 header (version byte 1) with no room for the 32-bit timescale.
+    const init = initWithMdhd(box('mdhd', Buffer.from([1, 0, 0, 0]), u32(0)));
+    assert.deepEqual(readVideoTrackInfo(init), { videoTrackId: 2, videoTimescale: null, defaultSampleFlags: null });
+});
+
+test('a malformed mdhd in the init segment does not throw out of push()', () => {
+    const init = initWithMdhd(box('mdhd'));
+    const inits = [];
+    const stream = createMp4RelayStream({
+        onInit: (segment) => inits.push(segment),
+        onFragment: () => assert.fail('no fragments were pushed'),
+        onError: () => {},
+    });
+
+    assert.doesNotThrow(() => stream.push(init));
+    assert.deepEqual(inits, [init]);
+});
 
 test('video track info comes from the vide handler and its trex defaults', () => {
     assert.deepEqual(readVideoTrackInfo(initSegment()), { videoTrackId: 2, videoTimescale: 15360, defaultSampleFlags: NON_SYNC });

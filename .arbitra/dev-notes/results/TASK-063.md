@@ -1,0 +1,10 @@
+TASK-063 (host lane, branch lane/host, commit 4b46255): start-sharing operations guarded against teardown and supersession (src/lib/startOperationGuard.mjs, one guard per socket; HostView invalidates on cleanup, terminate, stop, unmount and pagehide, 'reload-preserve' when the room is kept for recovery). Proof: new browser test failed on the unchanged client (room created and published after leaving #host during the capture picker, track live); passes after. Suite: lint and typecheck clean, npm test 512/512; the new browser spec and all 12 media-flow scenarios pass on a private port.
+
+Left open / for the owner:
+- The prompt cites VAL-145, which is a network-header check (TASK-005/094); the start-operation assertion it means is VAL-151. Implemented against VAL-090 and VAL-151.
+- VAL-151 says the earlier start sends no host-stopped "after the newer operation has begun". Implemented as step 1 defines mayCompensateShared: only while no start owns the session. If the newer start was itself torn down, the earlier one still removes its room, which nothing else would.
+- Step 4's "otherwise log and escalate" fires only in the branch the ordering rules out (a stale start's ack arriving after a newer start already sent its room request, possible only when the 65 s bound ran out); a stale start whose successor is still waiting is the normal path and logs nothing.
+- The guard is per socket (module WeakMap), not per HostView instance as step 2 says: a start left pending by an unmounted view shares the socket with the next view's start. TASK-071's module-scope OBS queue can use the same op ids.
+- establishObsControlChannel already drops (and closes) a channel whose ready fails, as step 5 asks; TASK-064 only has to call it from Retry.
+- tests/browser/media-flow.spec.mjs was not run on port 3210 (another lane's server held it, and its build writes the shared dist); it ran as a port-shifted copy against a scratch build. Worth one normal `npm run test:e2e` on dev after the merge.
+- The mount reclaim effect and the reconnect reclaim-host are not ordered behind pending starts (out of this task's scope; TASK-069/070 own reclaim).

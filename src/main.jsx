@@ -2,15 +2,32 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
+import { createChunkReloadGuard } from './lib/chunkReloadGuard.mjs'
+
+function getSessionStorage() {
+  try {
+    return window.sessionStorage
+  } catch {
+    return null
+  }
+}
 
 function installChunkLoadRecovery() {
   if (typeof window === 'undefined') return
 
+  const reloadGuard = createChunkReloadGuard({
+    storage: getSessionStorage(),
+    now: () => Date.now(),
+  })
   let reloadScheduled = false
+  // Returns true when a reload is scheduled for this page load (now or earlier). Once the persisted
+  // budget is spent, returns false and the error is left to propagate to the app's error handling.
   const scheduleReload = () => {
-    if (reloadScheduled) return
+    if (reloadScheduled) return true
+    if (!reloadGuard.tryConsumeReload()) return false
     reloadScheduled = true
     window.location.reload()
+    return true
   }
 
   const isChunkLoadError = (message) => (
@@ -21,8 +38,7 @@ function installChunkLoadRecovery() {
   )
 
   window.addEventListener('vite:preloadError', (event) => {
-    event.preventDefault()
-    scheduleReload()
+    if (scheduleReload()) event.preventDefault()
   })
 
   window.addEventListener('error', (event) => {
@@ -35,9 +51,8 @@ function installChunkLoadRecovery() {
   window.addEventListener('unhandledrejection', (event) => {
     const reason = event?.reason
     const message = typeof reason === 'string' ? reason : reason?.message || ''
-    if (isChunkLoadError(message)) {
+    if (isChunkLoadError(message) && scheduleReload()) {
       event.preventDefault?.()
-      scheduleReload()
     }
   })
 }

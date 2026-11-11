@@ -39,8 +39,11 @@ const forbiddenTracked = new Set([
     'ffmpeg',
 ]);
 
+// The only tracked .env-style file that is allowed, by basename, at any depth.
+const allowedEnvTemplate = '.env.example';
+
 const forbiddenPathRegexes = [
-    /^\.env(?:\..+)?$/i,
+    /(?:^|\/)\.env(?:\..+)?$/i,
     /(?:^|\/)certs\/.+\.(?:key|crt|pem|p12|pfx)$/i,
     /(?:^|\/)(?:Nextra|cloudflared|ffmpeg)\.exe$/i,
     /(?:^|\/)Nextra-macos-(?:arm64|x64)$/i,
@@ -56,51 +59,78 @@ const sensitiveRegexes = [
     { name: 'Hardcoded Google API key pattern', regex: /\bAIza[0-9A-Za-z_-]{35}\b/ },
 ];
 
-function getTrackedFiles() {
+// Splits the output of `git ls-files -z`. Entries are NUL-terminated and are the
+// exact on-disk names (no quoting, no escaping), so they must not be trimmed.
+function parseTrackedFileList(output) {
+    const text = Buffer.isBuffer(output) ? output.toString('utf-8') : String(output);
+    return text.split('\0').filter((entry) => entry.length > 0);
+}
+
+function getTrackedFiles(cwd = root) {
     try {
-        const output = execSync('git ls-files', { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] }).toString('utf-8');
-        return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        const output = execSync('git ls-files -z', {
+            cwd,
+            stdio: ['ignore', 'pipe', 'ignore'],
+            maxBuffer: 256 * 1024 * 1024,
+        });
+        return parseTrackedFileList(output);
     } catch {
         return null;
     }
 }
 
-function isTextFile(filePath) {
-    try {
-        const buffer = fs.readFileSync(filePath);
-        const sample = buffer.subarray(0, Math.min(buffer.length, 1024));
-        return !sample.includes(0);
-    } catch {
-        return false;
-    }
+// Returns 'forbidden-file' (an exact forbidden name), 'forbidden-pattern' (a forbidden
+// path pattern at any depth) or 'allowed'. A .env.example template is allowed at any depth.
+function classifyTrackedPath(relPath) {
+    const normalized = relPath.replace(/\\/g, '/');
+    if (forbiddenTracked.has(normalized)) return 'forbidden-file';
+    if (normalized.slice(normalized.lastIndexOf('/') + 1) === allowedEnvTemplate) return 'allowed';
+    if (forbiddenPathRegexes.some((regex) => regex.test(normalized))) return 'forbidden-pattern';
+    return 'allowed';
 }
 
-function scanTrackedFiles(trackedFiles) {
+// Classifies what is on disk at a tracked path:
+//   { kind: 'text', text }        readable, scanned for secrets
+//   { kind: 'binary' }            NUL in the first 1024 bytes, not content-scanned
+//   { kind: 'directory' }         a gitlink (submodule) checkout, not scanned
+//   { kind: 'unreadable', code }  missing or unreadable, which must fail the gate
+function classifyTrackedFile(absPath) {
+    let buffer;
+    try {
+        if (fs.statSync(absPath).isDirectory()) return { kind: 'directory' };
+        buffer = fs.readFileSync(absPath);
+    } catch (err) {
+        return { kind: 'unreadable', code: err?.code || 'UNKNOWN' };
+    }
+
+    const sample = buffer.subarray(0, Math.min(buffer.length, 1024));
+    if (sample.includes(0)) return { kind: 'binary' };
+    return { kind: 'text', text: buffer.toString('utf-8') };
+}
+
+function scanTrackedFiles(trackedFiles, scanRoot = root) {
     const violations = [];
 
     for (const relPath of trackedFiles) {
-        const normalized = relPath.replace(/\\/g, '/');
-        if (forbiddenTracked.has(normalized)) {
+        const pathClass = classifyTrackedPath(relPath);
+        if (pathClass === 'forbidden-file') {
             violations.push(`Forbidden tracked file: ${relPath}`);
             continue;
         }
-        if (normalized !== '.env.example' && forbiddenPathRegexes.some((regex) => regex.test(normalized))) {
+        if (pathClass === 'forbidden-pattern') {
             violations.push(`Forbidden tracked path pattern: ${relPath}`);
             continue;
         }
 
-        const absPath = path.join(root, relPath);
-        if (!isTextFile(absPath)) continue;
-
-        let text;
-        try {
-            text = fs.readFileSync(absPath, 'utf-8');
-        } catch {
+        const file = classifyTrackedFile(path.join(scanRoot, relPath));
+        if (file.kind === 'unreadable') {
+            violations.push(`Cannot read tracked file: ${relPath} (${file.code})`);
             continue;
         }
+        if (file.kind !== 'text') continue;
 
         for (const { name, regex } of sensitiveRegexes) {
-            if (regex.test(text)) {
+            if (regex.test(file.text)) {
                 violations.push(`${name} found in tracked file: ${relPath}`);
             }
         }
@@ -174,6 +204,10 @@ function main() {
 if (require.main === module) main();
 
 module.exports = {
+    classifyTrackedFile,
+    classifyTrackedPath,
     findDependencyLicenseViolations,
+    parseTrackedFileList,
     reviewedDependencyLicenses,
+    scanTrackedFiles,
 };

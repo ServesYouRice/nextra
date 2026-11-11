@@ -1,0 +1,331 @@
+TAP version 13
+# Subtest: the retention count is still ten sessions
+ok 1 - the retention count is still ten sessions
+  ---
+  duration_ms: 0.7037
+  ...
+# Subtest: pruning removes the .log, .log.1 and .log.2 of every session beyond the newest ten
+not ok 2 - pruning removes the .log, .log.1 and .log.2 of every session beyond the newest ten
+  ---
+  duration_ms: 46.3472
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupLogRetention.test.js:51:1'
+  failureType: 'testCodeFailure'
+  error: 'startup-20200101-120000-4001.log.1 should have been pruned with its session'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupLogRetention.test.js:61:20)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+# Subtest: the newest ten sessions keep every generation
+ok 3 - the newest ten sessions keep every generation
+  ---
+  duration_ms: 29.1071
+  ...
+# Subtest: a pruned session whose primary file is already gone loses its leftover generations
+not ok 4 - a pruned session whose primary file is already gone loses its leftover generations
+  ---
+  duration_ms: 33.8254
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupLogRetention.test.js:82:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The expression evaluated to a falsy value:
+    
+      assert.ok(!left.includes(`${sessionStem(1)}.log.1`))
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupLogRetention.test.js:92:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: sessions that rotated a different number of times are grouped by their stem
+not ok 5 - sessions that rotated a different number of times are grouped by their stem
+  ---
+  duration_ms: 15.0146
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupLogRetention.test.js:97:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+      [
+    +   'startup-20200101-120000-4001.log.1',
+    +   'startup-20200101-120000-4001.log.2',
+    +   'startup-20200101-120000-4001.log.3',
+    +   'startup-20200101-120000-4001.log.4',
+    +   'startup-20200101-120000-4001.log.5',
+    +   'startup-20200103-120000-4003.log.1',
+        'startup-20200104-120000-4004.log',
+        'startup-20200105-120000-4005.log',
+        'startup-20200106-120000-4006.log',
+        'startup-20200107-120000-4007.log',
+        'startup-20200108-120000-4008.log',
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0: 'startup-20200104-120000-4004.log'
+    1: 'startup-20200105-120000-4005.log'
+    2: 'startup-20200106-120000-4006.log'
+    3: 'startup-20200107-120000-4007.log'
+    4: 'startup-20200108-120000-4008.log'
+    5: 'startup-20200109-120000-4009.log'
+    6: 'startup-20200110-120000-4010.log'
+    7: 'startup-20200111-120000-4011.log'
+    8: 'startup-20200112-120000-4012.log'
+    9: 'startup-20200113-120000-4013.log'
+  actual:
+    0: 'startup-20200101-120000-4001.log.1'
+    1: 'startup-20200101-120000-4001.log.2'
+    2: 'startup-20200101-120000-4001.log.3'
+    3: 'startup-20200101-120000-4001.log.4'
+    4: 'startup-20200101-120000-4001.log.5'
+    5: 'startup-20200103-120000-4003.log.1'
+    6: 'startup-20200104-120000-4004.log'
+    7: 'startup-20200105-120000-4005.log'
+    8: 'startup-20200106-120000-4006.log'
+    9: 'startup-20200107-120000-4007.log'
+    10: 'startup-20200108-120000-4008.log'
+    11: 'startup-20200109-120000-4009.log'
+    12: 'startup-20200110-120000-4010.log'
+    13: 'startup-20200111-120000-4011.log'
+    14: 'startup-20200112-120000-4012.log'
+    15: 'startup-20200113-120000-4013.log'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupLogRetention.test.js:106:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: startup-latest.log, its generations and unrelated files are never pruned
+not ok 6 - startup-latest.log, its generations and unrelated files are never pruned
+  ---
+  duration_ms: 75.9819
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupLogRetention.test.js:109:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    The expression evaluated to a falsy value:
+    
+      assert.ok(!left.includes(`${sessionStem(1)}.log.2`))
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupLogRetention.test.js:131:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: ten sessions or fewer, including rotated ones, are all kept
+not ok 7 - ten sessions or fewer, including rotated ones, are all kept
+  ---
+  duration_ms: 38.6098
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupLogRetention.test.js:135:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    
+    undefined !== []
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupLogRetention.test.js:143:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: the keep option sets how many sessions stay
+not ok 8 - the keep option sets how many sessions stay
+  ---
+  duration_ms: 11.6065
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupLogRetention.test.js:146:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+      [
+    +   'startup-20200101-120000-4001.log',
+    +   'startup-20200101-120000-4001.log.1',
+    +   'startup-20200101-120000-4001.log.2',
+    +   'startup-20200102-120000-4002.log',
+    +   'startup-20200102-120000-4002.log.1',
+    +   'startup-20200102-120000-4002.log.2',
+    +   'startup-20200103-120000-4003.log',
+    +   'startup-20200103-120000-4003.log.1',
+    +   'startup-20200103-120000-4003.log.2',
+        'startup-20200104-120000-4004.log',
+        'startup-20200104-120000-4004.log.1',
+        'startup-20200104-120000-4004.log.2',
+        'startup-20200105-120000-4005.log',
+        'startup-20200105-120000-4005.log.1',
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0: 'startup-20200104-120000-4004.log'
+    1: 'startup-20200104-120000-4004.log.1'
+    2: 'startup-20200104-120000-4004.log.2'
+    3: 'startup-20200105-120000-4005.log'
+    4: 'startup-20200105-120000-4005.log.1'
+    5: 'startup-20200105-120000-4005.log.2'
+  actual:
+    0: 'startup-20200101-120000-4001.log'
+    1: 'startup-20200101-120000-4001.log.1'
+    2: 'startup-20200101-120000-4001.log.2'
+    3: 'startup-20200102-120000-4002.log'
+    4: 'startup-20200102-120000-4002.log.1'
+    5: 'startup-20200102-120000-4002.log.2'
+    6: 'startup-20200103-120000-4003.log'
+    7: 'startup-20200103-120000-4003.log.1'
+    8: 'startup-20200103-120000-4003.log.2'
+    9: 'startup-20200104-120000-4004.log'
+    10: 'startup-20200104-120000-4004.log.1'
+    11: 'startup-20200104-120000-4004.log.2'
+    12: 'startup-20200105-120000-4005.log'
+    13: 'startup-20200105-120000-4005.log.1'
+    14: 'startup-20200105-120000-4005.log.2'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupLogRetention.test.js:152:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: the session pattern captures the stem and an optional numeric generation
+ok 9 - the session pattern captures the stem and an optional numeric generation
+  ---
+  duration_ms: 0.2435
+  ...
+# Subtest: an empty or missing log directory is a no-op
+not ok 10 - an empty or missing log directory is a no-op
+  ---
+  duration_ms: 1.3254
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupLogRetention.test.js:169:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    
+    undefined !== []
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupLogRetention.test.js:171:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: pruning failures are swallowed and the other files are still removed
+not ok 11 - pruning failures are swallowed and the other files are still removed
+  ---
+  duration_ms: 0.437
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupLogRetention.test.js:176:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+      [
+        'startup-20200101-120000-4001.log',
+    -   'startup-20200101-120000-4001.log.1',
+        'startup-20200102-120000-4002.log',
+    -   'startup-20200102-120000-4002.log.1'
+      ]
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0: 'startup-20200101-120000-4001.log'
+    1: 'startup-20200101-120000-4001.log.1'
+    2: 'startup-20200102-120000-4002.log'
+    3: 'startup-20200102-120000-4002.log.1'
+  actual:
+    0: 'startup-20200101-120000-4001.log'
+    1: 'startup-20200102-120000-4002.log'
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupLogRetention.test.js:193:12)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: lib/startupRuntime.js prunes with the helper when it starts
+not ok 12 - lib/startupRuntime.js prunes with the helper when it starts
+  ---
+  duration_ms: 138.5168
+  location: 'C:\\Users\\V\\nextra-lanes\\netcheck\\tests\\startupLogRetention.test.js:209:1'
+  failureType: 'testCodeFailure'
+  error: 'startup-20200101-120000-4001.log.1 should be pruned'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (C:\Users\V\nextra-lanes\netcheck\tests\startupLogRetention.test.js:231:20)
+    Test.runInAsyncScope (node:async_hooks:211:14)
+    Test.run (node:internal/test_runner/test:979:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:677:18)
+    Test.postRun (node:internal/test_runner/test:1090:19)
+    Test.run (node:internal/test_runner/test:1018:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:677:7)
+  ...
+# Subtest: the helper ships with the packaged app: it sits in lib/, which the packager copies whole, and needs only Node
+ok 13 - the helper ships with the packaged app: it sits in lib/, which the packager copies whole, and needs only Node
+  ---
+  duration_ms: 1.148
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 4
+# fail 9
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 511.2335

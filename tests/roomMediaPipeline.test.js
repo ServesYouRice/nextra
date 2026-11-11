@@ -174,3 +174,139 @@ test('the relay publishes its init segment when no Socket.IO server is attached'
 
     room._mediaPipeline.close();
 });
+
+test('RoomMediaPipeline.close() closes a resource and a timer owned while the pipeline was idle', () => {
+    const room = { fallbackStarting: false };
+    const closed = [];
+    let closeNotifications = 0;
+    const pipeline = new RoomMediaPipeline(room, {
+        onClose: () => { closeNotifications += 1; },
+    });
+
+    assert.equal(pipeline.state, 'idle');
+    pipeline.own('worker', {}, () => closed.push('worker'));
+    pipeline.setTimer('restart', 7, (timer) => closed.push(`timer:${timer}`));
+
+    assert.equal(pipeline.close(), true);
+    assert.deepEqual(closed, ['timer:7', 'worker']);
+    assert.equal(closeNotifications, 0, 'no fallback was started, so none is reported closed');
+    assert.equal(pipeline.state, 'closed');
+});
+
+test('RoomMediaPipeline.closeFallback() drains a resource owned after a cancelling closeFallback()', () => {
+    const room = { fallbackStarting: false };
+    const closed = [];
+    let closeNotifications = 0;
+    const pipeline = new RoomMediaPipeline(room);
+
+    pipeline.beginStart({ onClose: () => { closeNotifications += 1; } });
+    pipeline.own('transport', {}, () => closed.push('transport'));
+    assert.equal(pipeline.closeFallback(), true);
+    assert.deepEqual(closed, ['transport']);
+    assert.equal(closeNotifications, 1);
+
+    // The cancelled startup continuation registers its allocation after the cancel.
+    const generationAfterCancel = pipeline.generation;
+    pipeline.own('worker', {}, () => closed.push('worker'));
+    pipeline.setTimer('restart', 9, (timer) => closed.push(`timer:${timer}`));
+    assert.equal(pipeline.state, 'idle');
+
+    assert.equal(pipeline.closeFallback(), false, 'no started fallback was closed');
+    assert.deepEqual(closed, ['transport', 'timer:9', 'worker']);
+    assert.equal(closeNotifications, 1, 'onClose stays at one per started fallback');
+    assert.equal(pipeline.generation, generationAfterCancel, 'an idle drain does not advance the generation');
+    assert.equal(pipeline.state, 'idle');
+    assert.equal(pipeline.closed, false);
+
+    // Nothing is closed twice by the later teardown.
+    assert.equal(pipeline.close(), true);
+    assert.deepEqual(closed, ['transport', 'timer:9', 'worker']);
+    assert.equal(closeNotifications, 1);
+});
+
+test('RoomMediaPipeline.close() closes a resource owned after a cancelling closeFallback() exactly once', () => {
+    const room = { fallbackStarting: false };
+    let workerCloses = 0;
+    let closeNotifications = 0;
+    const pipeline = new RoomMediaPipeline(room);
+
+    pipeline.beginStart({ onClose: () => { closeNotifications += 1; } });
+    assert.equal(pipeline.closeFallback(), true);
+    pipeline.own('worker', {}, () => { workerCloses += 1; });
+
+    assert.equal(pipeline.close(), true);
+    assert.equal(workerCloses, 1);
+    assert.equal(closeNotifications, 1);
+    assert.equal(pipeline.close(), false);
+    assert.equal(workerCloses, 1);
+});
+
+test('RoomMediaPipeline idle drains keep WHIP ownership and reverse registration order', () => {
+    const room = { fallbackStarting: false };
+    const closed = [];
+    const pipeline = new RoomMediaPipeline(room);
+
+    pipeline.ownWhip('transport', {}, () => closed.push('whip-transport'));
+    pipeline.own('first', {}, () => closed.push('first'));
+    pipeline.own('second', {}, () => closed.push('second'));
+    pipeline.own('third', {}, () => closed.push('third'));
+
+    assert.equal(pipeline.closeFallback(), false);
+    assert.deepEqual(closed, ['third', 'second', 'first'], 'fallback resources close newest first and WHIP stays open');
+
+    pipeline.own('late', {}, () => closed.push('late'));
+    assert.equal(pipeline.close(), true);
+    assert.deepEqual(closed, ['third', 'second', 'first', 'late', 'whip-transport']);
+});
+
+test('RoomMediaPipeline reports a fallback closed once per beginStart across restarts', () => {
+    const room = { fallbackStarting: false };
+    let closeNotifications = 0;
+    const pipeline = new RoomMediaPipeline(room);
+    const onClose = () => { closeNotifications += 1; };
+
+    pipeline.beginStart({ onClose });
+    assert.equal(pipeline.closeFallback(), true);
+    pipeline.own('worker', {}, () => {});
+    assert.equal(pipeline.closeFallback(), false);
+    assert.equal(pipeline.closeFallback(), false);
+    assert.equal(closeNotifications, 1);
+
+    pipeline.beginStart({ onClose });
+    assert.equal(pipeline.closeFallback(), true);
+    assert.equal(closeNotifications, 2);
+    assert.equal(pipeline.close(), true);
+    assert.equal(closeNotifications, 2);
+});
+
+test('a startup cancelled by closeFallback() still closes the transport its continuation owns after the cancel', { concurrency: false }, async () => {
+    const closed = [];
+    const room = createFallbackRoom();
+    const activeBefore = getSocketRuntimeMetrics().counters.activeFallbackPipelines;
+    let resolveTransport;
+    const router = {
+        rtpCapabilities: {},
+        createDirectTransport() {
+            return new Promise((resolve) => { resolveTransport = resolve; });
+        },
+    };
+
+    const starting = startFallbackRelay(room, router, null, { FFmpegRelay: EventEmitter });
+    const pipeline = room._mediaPipeline;
+    assert.equal(pipeline.state, 'starting');
+    assert.equal(getSocketRuntimeMetrics().counters.activeFallbackPipelines, activeBefore + 1);
+
+    // The fallback is torn down while the router is still creating the transport.
+    assert.equal(pipeline.closeFallback(), true);
+    assert.equal(pipeline.state, 'idle');
+    assert.equal(getSocketRuntimeMetrics().counters.activeFallbackPipelines, activeBefore);
+
+    resolveTransport({ close: () => closed.push('video-transport') });
+    await starting;
+
+    assert.deepEqual(closed, ['video-transport'], 'the transport created after the cancel is closed once');
+    assert.equal(pipeline.state, 'idle');
+    assert.equal(getSocketRuntimeMetrics().counters.activeFallbackPipelines, activeBefore);
+    pipeline.close();
+    assert.deepEqual(closed, ['video-transport']);
+});

@@ -8,6 +8,7 @@ const config = require('../config');
 const {
     prepareRoom,
     findRoomBySocket,
+    findRoomByCode,
     getRoomCount,
     destroyRoom,
 } = require('../lib/rooms');
@@ -43,7 +44,10 @@ test('pending room reservations bound capacity, duplicates, failure, disconnect,
     let releaseDeferred = null;
     let enteredDeferred = null;
     const deferredEntered = () => new Promise((resolve) => { enteredDeferred = resolve; });
-    const prepareForTest = async (hostSocketId, options) => {
+    // Every deferred prepareRoom call, so the test can wait for the real scrypt hash to finish
+    // and teardown can wait for any creation still in flight.
+    const inFlightCreations = [];
+    const prepareForTest = (hostSocketId, options) => {
         if (mode === 'fail') {
             return prepareRoom(hostSocketId, {
                 ...options,
@@ -54,9 +58,14 @@ test('pending room reservations bound capacity, duplicates, failure, disconnect,
             });
         }
         if (mode === 'defer') {
-            enteredDeferred?.();
-            enteredDeferred = null;
-            await new Promise((resolve) => { releaseDeferred = resolve; });
+            const creation = (async () => {
+                enteredDeferred?.();
+                enteredDeferred = null;
+                await new Promise((resolve) => { releaseDeferred = resolve; });
+                return prepareRoom(hostSocketId, options);
+            })();
+            inFlightCreations.push(creation);
+            return creation;
         }
         return prepareRoom(hostSocketId, options);
     };
@@ -112,13 +121,24 @@ test('pending room reservations bound capacity, duplicates, failure, disconnect,
         assert.equal(__testing.getPendingRoomCreationCount(), 1);
         second.close();
         await waitFor(() => __testing.getPendingRoomCreationCount() === 0);
+        const disconnectCreation = inFlightCreations[inFlightCreations.length - 1];
         releaseDeferred();
-        await new Promise((resolve) => setTimeout(resolve, 25));
+        // Once the released prepareRoom settles its real scrypt hash is done. The handler's
+        // continuation after it (the cancelled-reservation check) has no further awaits, so
+        // one macrotask is enough for it to have run.
+        const abandoned = await disconnectCreation;
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.ok(abandoned.passphraseHash, 'the released prepareRoom finished its scrypt hash');
+        assert.equal(findRoomBySocket(second.id), null);
+        assert.equal(findRoomByCode(abandoned.code), null);
         assert.equal(getRoomCount(), baselineRooms);
+        assert.equal(__testing.getPendingRoomCreationCount(), 0);
     } finally {
         releaseDeferred?.();
         first.close();
         second.close();
+        await Promise.allSettled(inFlightCreations);
+        await new Promise((resolve) => setImmediate(resolve));
         if (room) destroyRoom(room.code);
         config.MAX_ACTIVE_ROOMS = previousMaxRooms;
         stopJoinCleanup();

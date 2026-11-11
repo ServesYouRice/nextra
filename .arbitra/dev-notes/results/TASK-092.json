@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-5483ef840d06",
+    "title": "Sorted ticket files do not guarantee mutual exclusion",
+    "severity": "medium",
+    "task": "TASK-092",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/exclusiveFileLock.test.js: 'workers that arrive together never hold the lock at the same time' (4 child processes, 20 rounds, random 8-20 ms holds, max concurrent holders must be 1); also 'a live holder keeps the lock however old it looks, and a waiter is admitted only after the release', 'a lock whose owner process has exited is reclaimed', 'a lock left behind by a killed holder process is reclaimed', 'a reclaimer that paused after reading a stale lock does not remove the replacement owner's lock', 'two reclaimers of the same dead owner's lock produce one marker winner and one removal', 'processes that race to reclaim one dead owner's lock are admitted one at a time', 'release with a token the lock does not hold throws and leaves the lock alone', 'a record from another host or one that cannot be read is never reclaimed', 'when the reclaimer of a dead owner's lock died too, acquisition fails closed and names both files', and the abort/session tests for the beforeEach-timeout path",
+    "proof": "The old ticket logic, moved unchanged behind the same acquire({ directory, workerIndex }) interface, failed the concurrency test in 3 of 3 runs with 'two holders at once; the second entered at {\"event\":\"enter\",\"round\":1,\"workerIndex\":0,...}' (2 !== 1): a worker whose Date.now() key was taken first published its ticket after another worker had already seen itself first and entered, then also saw itself first (outputs kept in the scratchpad as lane-fmp4 TASK-092 before-1/2/3 files; a debug run overlapped in 22-27 of 40 rounds). With the new lock (one file published whole by fs.link, EEXIST while held) the same test passes (also 6 of 6 repeated runs and in npm test); a live owner is never displaced whatever the lock's mtime (set 24 h back in the test), a dead owner (ESRCH, same host) is reclaimed through the exclusive reclaim-<token> marker with a re-read before the only unlink, a paused reclaimer that resumes after a replacement owner took the lock removes nothing, and an unreadable record, another host, or a dead reclaimer's marker fails closed with a diagnostic. The helper has no rename of the lock path and no age, mtime or staleMs condition; both unlinks of the lock path (release and reclaim) follow a fresh read and token comparison."
+  }
+]

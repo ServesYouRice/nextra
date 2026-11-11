@@ -1,0 +1,17 @@
+
+Running 12 tests using 1 worker
+
+  ok  1 [chromium] › tests\browser\media-flow.spec.mjs:139:1 › Host preflight blocks an unavailable Browser capture path before room allocation (701ms)
+  ok  2 [chromium] › tests\browser\media-flow.spec.mjs:154:1 › host and viewer receive decoded frames through direct WebRTC and can rejoin (5.5s)
+  ok  3 [chromium] › tests\browser\media-flow.spec.mjs:188:1 › a mobile Chrome viewer joins and receives decoded frames (1.7s)
+  ok  4 [chromium] › tests\browser\media-flow.spec.mjs:211:1 › a protected room asks for its passphrase as a focused second step and keeps the code (1.7s)
+  ok  5 [chromium] › tests\browser\media-flow.spec.mjs:243:1 › fullscreen control exposes pressed state and exits fullscreen (1.8s)
+  ok  6 [chromium] › tests\browser\media-flow.spec.mjs:269:1 › the streaming frame-rate control is a labelled group with programmatic selection (1.2s)
+  ok  7 [chromium] › tests\browser\media-flow.spec.mjs:302:1 › capture-track end and host route unmount reclaim the room (1.7s)
+  ok  8 [chromium] › tests\browser\media-flow.spec.mjs:330:1 › leaving the host route while sharing is warned and can be cancelled (1.8s)
+  ok  9 [chromium] › tests\browser\media-flow.spec.mjs:354:1 › reload recovery keeps the room code and concurrent stop/unmount is idempotent (2.2s)
+  ok 10 [chromium] › tests\browser\media-flow.spec.mjs:390:1 › delayed relay-first viewers select one fresh recorder generation and clean up after rejoin (10.9s)
+  ok 11 [chromium] › tests\browser\media-flow.spec.mjs:439:1 › capture denial shows alert copy, re-enables Start Sharing, and leaves zero active rooms (603ms)
+  ok 12 [chromium] › tests\browser\media-flow.spec.mjs:464:1 › autoplay denial falls back to muted playback and unmuting control succeeds (1.6s)
+
+  12 passed (33.0s)

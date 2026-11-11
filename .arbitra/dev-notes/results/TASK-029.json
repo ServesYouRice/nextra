@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-7a074ed76e89",
+    "title": "Tunnel URL detection assumes pipe chunks contain complete URLs",
+    "severity": "medium",
+    "task": "TASK-029",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/tunnel.test.js: 'a trycloudflare URL split across two stdout chunks is recognized', 'a trycloudflare URL split across two stderr chunks is recognized', 'a URL cut at the domain suffix resolves only once it is complete', 'a URL spread over many one-character chunks is recognized', 'a split URL resolves to the lowercase URL', 'a URL is found after a large amount of earlier output', 'the timeout does not fire after a split URL was recognized', 'output after the URL is only logged, and only when DEBUG_TUNNEL is set'; also 'the scanned text is kept per stream: stdout and stderr halves never join' and 'the scanned tail is bounded: a prefix older than the bound is forgotten' for the new behaviour's limits",
+    "proof": "The tests needed the spawn seam, so the first run was on the unchanged scanning code with only the optional spawn option and the __testing export added. With a fake child (EventEmitter, PassThrough stdout and stderr) writing 'https://abc-' and then 'def.trycloudflare.com', the launch never resolved and 8 tests failed with 'the launch is still waiting for a public URL' (split over stdout, over stderr, cut at the domain suffix, one-character chunks, lowercase variant, URL after a large log, timeout-cleared test, debug-logging test). The bound test failed because URL_SCAN_TAIL_CHARS did not exist yet; the single-chunk, per-stream, timeout and early-exit tests passed because they already held. After the fix all 13 pass. launchCloudflaredCandidate now keeps a tail string per stream (stdout and stderr separately), searches tail + chunk, and keeps only the last 512 characters (URL_SCAN_TAIL_CHARS). A mutation check (tail left unbounded) fails the bound test; a tail shared by both streams fails the per-stream test."
+  }
+]

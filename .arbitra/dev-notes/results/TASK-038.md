@@ -1,0 +1,2 @@
+TASK-038 (lane whip, branch lane/whip, on dev 73a9b31): issue C-7eca647136d1 fixed. Files: lib/whipRoutes.js, tests/whipRoutes.test.js (3 new tests; createWhipRouter now takes the harness's mediasoupRouter as an optional third argument of startWhipHarness, default {}, so existing tests are unchanged). Relay prewarm timing and reinjection are untouched.
+Notes: the prompt's line numbers were stale; the capture's producer was already captured at start, so only the rtp handler needed the identity check. npm test 1266/1266, lint and typecheck pass.

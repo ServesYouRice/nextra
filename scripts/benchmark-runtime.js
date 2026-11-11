@@ -2,12 +2,20 @@
 
 const os = require('node:os');
 const { io } = require('socket.io-client');
+const { createMetricsFetcher } = require('./runtime-metrics-client');
 const {
     minimumRequirementsForScenario,
     validateBenchmarkDefinition,
     buildThresholdHeadroom,
-    evaluateTopology,
+    observeTopology,
+    evaluateTopologySamples,
+    sumCpuComponents,
+    cpuPercent,
+    growthPercent,
+    maxOrNull,
+    evaluateResourceThresholds,
 } = require('./runtime-benchmark-model');
+const { closeSockets, settleWithin } = require('./runtime-harness-cleanup');
 
 function numberArg(name, fallback) {
     const prefix = `--${name}=`;
@@ -37,6 +45,7 @@ const durationMs = numberArg('duration-ms', 60_000);
 const sampleIntervalMs = numberArg('sample-ms', 1_000);
 const clients = Math.floor(numberArg('clients', 10));
 const ackIntervalMs = numberArg('ack-interval-ms', 250);
+const ackTimeoutMs = 5_000;
 const minimumRequirements = minimumRequirementsForScenario(scenario);
 const requirements = {
     rooms: nonNegativeIntegerArg('require-rooms', minimumRequirements.rooms),
@@ -55,6 +64,7 @@ const thresholds = {
     memoryGrowthPercent: numberArg('max-memory-growth-percent', 20),
 };
 const metricsToken = process.env.METRICS_TOKEN || '';
+const fetchMetrics = createMetricsFetcher({ baseUrl, allowInsecureTls, token: metricsToken });
 
 function percentile(values, percentileValue) {
     if (values.length === 0) return 0;
@@ -62,14 +72,9 @@ function percentile(values, percentileValue) {
     return sorted[Math.min(sorted.length - 1, Math.ceil((percentileValue / 100) * sorted.length) - 1)];
 }
 
-async function fetchMetrics() {
-    const headers = metricsToken ? { Authorization: `Bearer ${metricsToken}` } : {};
-    const response = await fetch(`${baseUrl}/api/metrics?resetEventLoopDelay=true`, { headers });
-    if (!response.ok) throw new Error(`/api/metrics returned ${response.status}`);
-    return response.json();
-}
-
-function connectClient() {
+// Every socket is added to `sockets` as soon as it is created, so a run that fails
+// part-way can still close the ones that did connect.
+function connectClient(sockets) {
     return new Promise((resolve, reject) => {
         const socket = io(baseUrl, {
             transports: ['websocket'],
@@ -77,25 +82,24 @@ function connectClient() {
             timeout: 5_000,
             rejectUnauthorized: !allowInsecureTls,
         });
+        sockets.push(socket);
         socket.once('connect', () => resolve(socket));
-        socket.once('connect_error', reject);
+        socket.once('connect_error', (err) => {
+            socket.close();
+            reject(err);
+        });
     });
 }
 
 function measureAck(socket) {
     return new Promise((resolve, reject) => {
         const started = performance.now();
-        socket.timeout(5_000).emit('get-rtp-capabilities', {}, (err, response) => {
+        socket.timeout(ackTimeoutMs).emit('get-rtp-capabilities', {}, (err, response) => {
             if (err) return reject(err);
             if (!response?.success) return reject(new Error(response?.error || 'Signaling acknowledgement failed'));
             resolve(performance.now() - started);
         });
     });
-}
-
-function cpuPercent(first, last, elapsedMs, scale) {
-    if (!Number.isFinite(first) || !Number.isFinite(last) || elapsedMs <= 0) return null;
-    return ((last - first) / scale / elapsedMs) * 100;
 }
 
 function relayBytesForwarded(metrics) {
@@ -107,73 +111,91 @@ async function main() {
     if (definitionFailures.length > 0) {
         throw new Error(`Invalid benchmark definition: ${definitionFailures.join('; ')}`);
     }
-    const sockets = await Promise.all(Array.from({ length: clients }, () => connectClient()));
+    const sockets = [];
+    const ackLoops = [];
     const ackLatencies = [];
     const errors = [];
     const samples = [];
     let running = true;
 
-    // Discard process-startup history so event-loop histogram values represent
-    // only the measured steady-state intervals.
-    await fetchMetrics();
-    await new Promise((resolve) => setTimeout(resolve, sampleIntervalMs));
+    // Whatever ends the measurement, including a failed connect or metrics request,
+    // the acknowledgement loops are stopped and every socket is closed; otherwise the
+    // open sockets keep the process alive after it has failed.
+    try {
+        // Wait for every connect attempt to settle before failing, so no socket that
+        // connects after the first refusal is left out of `sockets`.
+        const connections = await Promise.allSettled(Array.from({ length: clients }, () => connectClient(sockets)));
+        const refused = connections.find((connection) => connection.status === 'rejected');
+        if (refused) throw refused.reason;
 
-    const ackLoops = sockets.map(async (socket) => {
-        while (running) {
-            try {
-                ackLatencies.push(await measureAck(socket));
-            } catch (err) {
-                errors.push(err.message);
-            }
-            await new Promise((resolve) => setTimeout(resolve, ackIntervalMs));
-        }
-    });
-
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < durationMs) {
-        samples.push({ at: Date.now(), metrics: await fetchMetrics() });
+        // Discard process-startup history so event-loop histogram values represent
+        // only the measured steady-state intervals.
+        await fetchMetrics();
         await new Promise((resolve) => setTimeout(resolve, sampleIntervalMs));
+
+        for (const socket of sockets) {
+            ackLoops.push((async () => {
+                while (running) {
+                    try {
+                        ackLatencies.push(await measureAck(socket));
+                    } catch (err) {
+                        errors.push(err.message);
+                    }
+                    await new Promise((resolve) => setTimeout(resolve, ackIntervalMs));
+                }
+            })());
+        }
+
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < durationMs) {
+            samples.push({ at: Date.now(), metrics: await fetchMetrics() });
+            await new Promise((resolve) => setTimeout(resolve, sampleIntervalMs));
+        }
+    } finally {
+        running = false;
+        // An acknowledgement in flight ends within ackTimeoutMs, and a loop then ends
+        // after one more interval; the bound only guards against one that never does.
+        await settleWithin(ackLoops, ackTimeoutMs + ackIntervalMs + 1_000);
+        closeSockets(sockets);
     }
-    running = false;
-    await Promise.all(ackLoops);
-    sockets.forEach((socket) => socket.close());
 
     const first = samples[0];
     const last = samples[samples.length - 1];
     if (!first || !last) throw new Error('No metric samples collected');
     const elapsedMs = Math.max(1, last.at - first.at);
-    const firstWorker = first.metrics.mediaWorker?.resourceUsage;
-    const lastWorker = last.metrics.mediaWorker?.resourceUsage;
+    // A metric the server did not report stays null (unavailable) and fails the
+    // run below; it is never counted as 0.
+    const workerCpuFields = ['ru_utime', 'ru_stime'];
+    const processCpuFields = ['user', 'system'];
     const workerCpu = cpuPercent(
-        (firstWorker?.ru_utime || 0) + (firstWorker?.ru_stime || 0),
-        (lastWorker?.ru_utime || 0) + (lastWorker?.ru_stime || 0),
+        sumCpuComponents(first.metrics.mediaWorker?.resourceUsage, workerCpuFields),
+        sumCpuComponents(last.metrics.mediaWorker?.resourceUsage, workerCpuFields),
         elapsedMs,
         1,
     );
-    const firstProcess = first.metrics.process?.cpuUsageMicroseconds;
-    const lastProcess = last.metrics.process?.cpuUsageMicroseconds;
     const processCpu = cpuPercent(
-        (firstProcess?.user || 0) + (firstProcess?.system || 0),
-        (lastProcess?.user || 0) + (lastProcess?.system || 0),
+        sumCpuComponents(first.metrics.process?.cpuUsageMicroseconds, processCpuFields),
+        sumCpuComponents(last.metrics.process?.cpuUsageMicroseconds, processCpuFields),
         elapsedMs,
         1_000,
     );
-    const firstRss = first.metrics.process?.memory?.rss || 0;
-    const lastRss = last.metrics.process?.memory?.rss || 0;
-    const memoryGrowth = firstRss > 0 ? ((lastRss - firstRss) / firstRss) * 100 : 0;
-    const eventLoopP95 = Math.max(...samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.p95 || 0));
-    const eventLoopMax = Math.max(...samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.max || 0));
+    const memoryGrowth = growthPercent(first.metrics.process?.memory?.rss, last.metrics.process?.memory?.rss);
+    const eventLoopP95 = maxOrNull(samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.p95));
+    const eventLoopMax = maxOrNull(samples.map(({ metrics }) => metrics.process?.eventLoopDelayMs?.max));
     const firstRelayBytes = relayBytesForwarded(first.metrics);
     const lastRelayBytes = relayBytesForwarded(last.metrics);
+    // `topology` keeps reporting the last sample (and the whole-window relay total); the
+    // requirements are checked against every sample, and the lowest value each one
+    // reached is reported as `topologyMinimums`.
     const observedTopology = {
-        rooms: last.metrics.rooms?.active || 0,
-        producers: last.metrics.sockets?.counters?.activeProducers || 0,
-        consumers: last.metrics.rooms?.totalMediasoupConsumers || 0,
-        viewers: last.metrics.rooms?.totalViewers || 0,
-        relayViewers: last.metrics.rooms?.totalRelayViewers || 0,
-        fallbackPipelines: last.metrics.sockets?.counters?.activeFallbackPipelines || 0,
+        ...observeTopology(last.metrics),
         relayBytesForwarded: Math.max(0, lastRelayBytes - firstRelayBytes),
     };
+    const topologyEvaluation = evaluateTopologySamples(
+        samples.map(({ at, metrics }) => ({ at, topology: observeTopology(metrics) })),
+        requirements,
+        { relayBytesForwarded: observedTopology.relayBytesForwarded },
+    );
     const observed = {
         ackP50Ms: percentile(ackLatencies, 50),
         ackP95Ms: percentile(ackLatencies, 95),
@@ -203,6 +225,7 @@ async function main() {
         },
         expectedTopology: requirements,
         topology: { clients, ...observedTopology },
+        topologyMinimums: topologyEvaluation.minimums,
         samples: samples.length,
         acknowledgements: ackLatencies.length,
         errors: errors.length,
@@ -210,14 +233,10 @@ async function main() {
         thresholds,
         headroomPercent: buildThresholdHeadroom(observed, thresholds),
     };
-    const failures = evaluateTopology(observedTopology, requirements);
+    const failures = [...topologyEvaluation.failures];
     if (errors.length > 0) failures.push(`${errors.length} signalling acknowledgements failed`);
     if (summary.observed.ackP95Ms > thresholds.ackP95Ms) failures.push('ack p95 exceeded');
-    if (eventLoopP95 > thresholds.eventLoopP95Ms) failures.push('event-loop p95 exceeded');
-    if (eventLoopMax > thresholds.eventLoopMaxMs) failures.push('event-loop max exceeded');
-    if (workerCpu !== null && workerCpu > thresholds.workerCpuPercent) failures.push('media-worker CPU exceeded');
-    if (processCpu !== null && processCpu > thresholds.processCpuPercent) failures.push('Node process CPU exceeded');
-    if (memoryGrowth > thresholds.memoryGrowthPercent) failures.push('RSS growth exceeded');
+    failures.push(...evaluateResourceThresholds(observed, thresholds));
     summary.pass = failures.length === 0;
     summary.failures = failures;
     process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);

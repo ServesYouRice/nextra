@@ -1,6 +1,11 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useReducer } from 'react';
 import StatusPill from './components/StatusPill';
 import { createVisibilityPoller } from './lib/visibilityPoller.mjs';
+import {
+    applyMetricsResult,
+    createMetricsFetcher,
+    INITIAL_METRICS_VIEW,
+} from './lib/metricsFetcher.mjs';
 import { formatBytes } from './lib/formatBytes.mjs';
 import { STATUS_ACCESS_RESTRICTED_COPY } from './lib/statusCopy.mjs';
 
@@ -32,44 +37,20 @@ function describeRoomMode(room) {
     return 'Browser';
 }
 
+function reduceMetricsView(state, { result, now }) {
+    return applyMetricsResult(state, result, now);
+}
+
 export default function StatusView() {
-    const [metrics, setMetrics] = useState(null);
-    const [error, setError] = useState('');
-    const [denied, setDenied] = useState(false);
-    const [lastUpdated, setLastUpdated] = useState(null);
-    const abortRef = useRef(null);
+    const [{ metrics, error, denied, lastUpdated }, dispatch] = useReducer(reduceMetricsView, INITIAL_METRICS_VIEW);
+    // One fetcher for the life of the view: a poll tick that finds a request still
+    // in flight joins it rather than cancelling it, and a slow one times out visibly.
+    const [fetcher] = useState(() => createMetricsFetcher());
 
-    const fetchMetrics = useCallback(async () => {
-        abortRef.current?.abort();
-        const controller = new AbortController();
-        abortRef.current = controller;
-
-        try {
-            const response = await fetch('/api/metrics', {
-                headers: { accept: 'application/json' },
-                credentials: 'same-origin',
-                signal: controller.signal,
-            });
-
-            if (response.status === 401 || response.status === 403) {
-                setDenied(true);
-                setError('');
-                return;
-            }
-            if (!response.ok) {
-                throw new Error(`Server responded with ${response.status}.`);
-            }
-
-            const payload = await response.json();
-            setMetrics(payload);
-            setDenied(false);
-            setError('');
-            setLastUpdated(new Date());
-        } catch (err) {
-            if (err?.name === 'AbortError') return;
-            setError(err.message || 'Failed to load server metrics.');
-        }
-    }, []);
+    const fetchMetrics = useCallback(async (options) => {
+        const result = await fetcher.load(options);
+        dispatch({ result, now: new Date() });
+    }, [fetcher]);
 
     useEffect(() => {
         const poller = createVisibilityPoller({
@@ -78,9 +59,9 @@ export default function StatusView() {
         });
         return () => {
             poller.close();
-            abortRef.current?.abort();
+            fetcher.abort();
         };
-    }, [fetchMetrics]);
+    }, [fetchMetrics, fetcher]);
 
     if (denied) {
         return (
@@ -100,7 +81,7 @@ export default function StatusView() {
                 <div className="status-error-card">
                     <StatusPill tone="err">Unavailable</StatusPill>
                     <p>{error}</p>
-                    <button className="btn btn-primary" onClick={fetchMetrics}>Retry</button>
+                    <button className="btn btn-primary" onClick={() => { void fetchMetrics({ restart: true }); }}>Retry</button>
                 </div>
             </div>
         );

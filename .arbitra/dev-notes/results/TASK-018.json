@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-c78bc8af0a2e",
+    "title": "Short HTTP 200 responses are misclassified as a fast public link",
+    "severity": "medium",
+    "task": "TASK-018",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/relayCapacityProbe.test.js · an empty 200 body is reported as failed, not as a fast link; a small 200 body is reported as failed, not as a fast link",
+    "proof": "On the unchanged code both short-body tests fail: expected failed, actual fast. The existing test of a download over before the ramp-up used a 10,000,000-byte body, below PROBE_BYTES (10,485,760), so it pinned the defect; the reviewer gave it a full PROBE_BYTES body (10 x 1,048,576), which keeps its intent: a whole probe delivered before the ramp-up is fast."
+  }
+]

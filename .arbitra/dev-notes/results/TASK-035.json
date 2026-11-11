@@ -1,0 +1,12 @@
+[
+  {
+    "issue": "C-1e6314bdf369",
+    "title": "SSRC-less offers lose all RTP stream identifiers",
+    "severity": "medium",
+    "task": "TASK-035",
+    "result": "fixed",
+    "failedBefore": true,
+    "test": "tests/whipRoutes.test.js: \"WHIP rejects an offer with no a=ssrc in its video section (400, no transport created)\", \"... in its audio section ...\", \"... in its video and audio sections ...\" and \"WHIP offers with a=ssrc for every produced section still reach the transport, and a rejected SSRC-less offer frees the public start slot\"; tests/whip.test.js: \"WHIP offer check names the video section that lacks a=ssrc\" and five more missingSsrcSections cases",
+    "proof": "Before the fix, node --test tests/whip.test.js tests/whipRoutes.test.js ran 51 tests with 10 failures. In the route tests an SSRC-less offer (video, audio, or both) went on to the injected createWebRtcTransport, which was called, and the request ended '500 !== 400' (the injected failure stood in for the real transport); the public-endpoint test failed the same way. The six whip.test.js cases failed with 'missingSsrcSections is not a function' (the helper did not exist). After the fix lib/whip.js has missingSsrcSections(parsed), which names the produced sections (selected codec present) with ssrc == null, and the POST handler returns 400 {error, sections} with CORS headers after the codec check and before createTransport. The tests assert 400, the error naming the sections, zero createWebRtcTransport calls, room.whipStarting false, no whipTransport/whipSessionId/whipResourceId, CORS headers on the response, the public start slot released (a following offer is not answered 503), OBS-style offers with a=ssrc still reaching the transport factory, and an audio section with no Opus and no a=ssrc not being rejected. The two delete-null-ssrc lines in whipRoutes.js are removed. tests/whip.test.js 44/44 and tests/whipRoutes.test.js 7/7 (51 together); full npm test 1004/1004; lint and typecheck pass."
+  }
+]
