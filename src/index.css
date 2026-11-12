@@ -3205,6 +3205,102 @@ input.select-input {
   font-size: 0.85rem;
 }
 
+.status-health {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0;
+  color: var(--text-2);
+}
+
+.status-updated {
+  margin-left: auto;
+  font-size: var(--fs-small);
+  color: var(--text-3);
+}
+
+.status-head h1 {
+  font-size: var(--fs-title);
+}
+
+.status-headline-stats {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.status-headline-stats .stat-value {
+  font-size: var(--fs-title);
+}
+
+.status-headline-stats .stat-label {
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.status-rooms {
+  list-style: none;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-glass-accent), var(--surface-glass);
+}
+
+.status-rooms li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.status-rooms li:last-child {
+  border-bottom: none;
+}
+
+.status-room-code {
+  color: var(--text-1);
+}
+
+.status-room-age {
+  margin-left: auto;
+}
+
+.status-more > summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+  color: var(--text-2);
+  margin-bottom: 0.75rem;
+}
+
+@media (max-width: 640px) {
+  .status-headline-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .status-headline-stats .stat-card {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+  }
+
+  .status-headline-stats .stat-label {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 639px) {
+  .status-rooms li > :nth-child(3) {
+    flex-basis: 100%;
+  }
+}
+
 .status-error-card {
   max-width: 480px;
   margin: 3rem auto;
