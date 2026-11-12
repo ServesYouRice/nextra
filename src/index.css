@@ -1810,6 +1810,16 @@ input.select-input {
   line-height: 1.3;
 }
 
+/* Picture rows while "Set OBS up for me" is off: OBS keeps its own settings, so
+   the buttons do nothing. The line under them says why. */
+.host-settings-panel .setting-row-off {
+  opacity: 0.45;
+}
+
+.host-settings-panel .capture-settings > .setting-note {
+  font-size: 13px;
+}
+
 /* Rarely used options: the last row, pinned to the bottom of the panel. */
 .host-more-options {
   margin-top: auto;
@@ -1847,6 +1857,12 @@ input.select-input {
 
 .host-more-options[open] > .settings-group {
   margin-top: 11px;
+}
+
+/* In OBS mode the room rows follow the three OBS switches, set off by a hairline. */
+.host-more-options .more-options-room {
+  padding-top: 11px;
+  border-top: var(--panel-hairline);
 }
 
 .streaming-info-row {
@@ -2434,6 +2450,17 @@ input.select-input {
 
   .view-header h1 {
     font-size: 1rem;
+  }
+
+  /* Tighter rows in the settings panel: 8px between rows, 4px between a label
+     and its control. */
+  .host-settings-panel .settings-group {
+    gap: 8px;
+  }
+
+  .host-settings-panel .setting-row,
+  .host-settings-panel .setting-row:hover {
+    gap: 4px;
   }
 }
 

@@ -2125,6 +2125,45 @@ export default function HostView() {
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
         : '';
     const totalViewers = viewerCount + whepViewerCount;
+    // With "Set OBS up for me" off, Nextra sends OBS no picture settings, so the
+    // three picture rows have nothing to change.
+    const picturesOff = ingestMode === 'obs' && !obsApplySettings;
+    // The room rows: visible rows of the panel in browser mode, inside "More
+    // options" in OBS mode.
+    const roomRows = (
+        <>
+            <div className="setting-row setting-row-inline">
+                <label
+                    htmlFor="roomPassphrase"
+                    className="setting-row-label"
+                    title="Viewers must enter it after the room code"
+                >
+                    Optional room passphrase
+                </label>
+                <input
+                    id="roomPassphrase"
+                    type="password"
+                    value={roomPassphrase}
+                    maxLength={128}
+                    autoComplete="new-password"
+                    placeholder="None"
+                    aria-describedby="roomPassphraseHint"
+                    onChange={(evt) => setRoomPassphrase(evt.target.value)}
+                    className="select-input"
+                />
+                <span className="visually-hidden" id="roomPassphraseHint">
+                    Viewers must enter it after the room code
+                </span>
+            </div>
+            <SettingSwitch
+                id="reloadRecoveryEnabled"
+                label="Allow recovery after reload"
+                hint="Keeps this room reclaimable for about 30 seconds; browser capture must be selected again"
+                checked={reloadRecoveryEnabled}
+                onChange={(evt) => setReloadRecoveryEnabled(evt.target.checked)}
+            />
+        </>
+    );
 
     return (
         <div className="view-container">
@@ -2288,15 +2327,21 @@ export default function HostView() {
                             <h2 className="visually-hidden">Settings</h2>
                             <div className="host-settings-body">
                                 <div className="settings-group capture-settings">
-                                    <div className="setting-row setting-row-inline">
+                                    <div className={`setting-row setting-row-inline${picturesOff ? ' setting-row-off' : ''}`}>
                                         <span className="setting-row-label">Resolution</span>
-                                        <div className="mode-toggle mode-toggle-small" role="group" aria-label="Resolution">
+                                        <div
+                                            className="mode-toggle mode-toggle-small"
+                                            role="group"
+                                            aria-label="Resolution"
+                                            aria-disabled={picturesOff || undefined}
+                                        >
                                             {Object.entries(QUALITY_PROFILES).reverse().map(([key, profile]) => (
                                                 <button
                                                     key={key}
                                                     type="button"
                                                     className={qualityProfile === key ? 'active' : ''}
                                                     aria-pressed={qualityProfile === key}
+                                                    disabled={picturesOff}
                                                     onClick={() => setQualityProfile(key)}
                                                 >
                                                     {profile.label}
@@ -2304,15 +2349,21 @@ export default function HostView() {
                                             ))}
                                         </div>
                                     </div>
-                                    <div className="setting-row setting-row-inline">
+                                    <div className={`setting-row setting-row-inline${picturesOff ? ' setting-row-off' : ''}`}>
                                         <span className="setting-row-label">Frame rate</span>
-                                        <div className="mode-toggle mode-toggle-small" role="group" aria-label="Frame rate">
+                                        <div
+                                            className="mode-toggle mode-toggle-small"
+                                            role="group"
+                                            aria-label="Frame rate"
+                                            aria-disabled={picturesOff || undefined}
+                                        >
                                             {[30, 60].map((fps) => (
                                                 <button
                                                     key={fps}
                                                     type="button"
                                                     className={frameRate === fps ? 'active' : ''}
                                                     aria-pressed={frameRate === fps}
+                                                    disabled={picturesOff}
                                                     onClick={() => setFrameRate(fps)}
                                                 >
                                                     {fps} fps
@@ -2320,16 +2371,22 @@ export default function HostView() {
                                             ))}
                                         </div>
                                     </div>
-                                    {ingestMode === 'obs' && obsApplySettings && (
-                                        <div className="setting-row setting-row-inline">
+                                    {ingestMode === 'obs' && (
+                                        <div className={`setting-row setting-row-inline${picturesOff ? ' setting-row-off' : ''}`}>
                                             <span className="setting-row-label">Picture preset</span>
-                                            <div className="mode-toggle mode-toggle-small" role="group" aria-label="Picture preset">
+                                            <div
+                                                className="mode-toggle mode-toggle-small"
+                                                role="group"
+                                                aria-label="Picture preset"
+                                                aria-disabled={picturesOff || undefined}
+                                            >
                                                 {Object.entries(OBS_TUNING_PROFILES).map(([key, tuning]) => (
                                                     <button
                                                         key={key}
                                                         type="button"
                                                         className={obsTuningProfile === key ? 'active' : ''}
                                                         aria-pressed={obsTuningProfile === key}
+                                                        disabled={picturesOff}
                                                         onClick={() => setObsTuningProfile(key)}
                                                     >
                                                         {tuning.label}
@@ -2338,90 +2395,73 @@ export default function HostView() {
                                             </div>
                                         </div>
                                     )}
-                                </div>
-                                <div className="settings-group">
-                                    <div className="setting-row setting-row-inline">
-                                        <label
-                                            htmlFor="roomPassphrase"
-                                            className="setting-row-label"
-                                            title="Viewers must enter it after the room code"
-                                        >
-                                            Optional room passphrase
-                                        </label>
-                                        <input
-                                            id="roomPassphrase"
-                                            type="password"
-                                            value={roomPassphrase}
-                                            maxLength={128}
-                                            autoComplete="new-password"
-                                            placeholder="None"
-                                            aria-describedby="roomPassphraseHint"
-                                            onChange={(evt) => setRoomPassphrase(evt.target.value)}
-                                            className="select-input"
-                                        />
-                                        <span className="visually-hidden" id="roomPassphraseHint">
-                                            Viewers must enter it after the room code
-                                        </span>
-                                    </div>
-                                    <SettingSwitch
-                                        id="reloadRecoveryEnabled"
-                                        label="Allow recovery after reload"
-                                        hint="Keeps this room reclaimable for about 30 seconds; browser capture must be selected again"
-                                        checked={reloadRecoveryEnabled}
-                                        onChange={(evt) => setReloadRecoveryEnabled(evt.target.checked)}
-                                    />
-                                </div>
-                                <div
-                                    className="settings-group obs-config-panel"
-                                    hidden={ingestMode !== 'obs'}
-                                    inert={ingestMode !== 'obs' || undefined}
-                                >
-                                    <SettingSwitch
-                                        id="obsApplySettings"
-                                        label="Apply recommended output settings"
-                                        hint={`${selectedProfile.capture.width}x${selectedProfile.capture.height} @ ${frameRate}fps, low-latency tuning`}
-                                        checked={obsApplySettings}
-                                        disabled={obsAv1Mode}
-                                        onChange={(e) => setObsApplySettings(e.target.checked)}
-                                    />
-                                    <SettingSwitch
-                                        id="obsTryAv1"
-                                        label="Use BYOK TURN (AV1)"
-                                        hint={[
-                                            'Open TURN setup in a modal and switch OBS rooms to AV1 WebRTC-only mode',
-                                            resumePending ? resumeModeLockHint : '',
-                                            (publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported
-                                                ? 'Disabled for public sharing: configure a reachable public media address first.'
-                                                : '',
-                                        ].filter(Boolean).join(' ')}
-                                        checked={obsTryAv1}
-                                        disabled={resumePending || ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported)}
-                                        onChange={(e) => handleObsTryAv1Change(e.target.checked)}
-                                    />
-                                    <SettingSwitch
-                                        id="obsAutoStart"
-                                        label="Auto-start streaming in OBS"
-                                        hint="Begin streaming immediately after configuration"
-                                        checked={obsAutoStart}
-                                        onChange={(e) => setObsAutoStart(e.target.checked)}
-                                    />
-                                    <div className="setting-row setting-row-inline">
-                                        <label htmlFor="obsPassword" className="setting-row-label">
-                                            WS password
-                                        </label>
-                                        <input
-                                            id="obsPassword"
-                                            type="password"
-                                            value={obsPassword}
-                                            onChange={(e) => setObsPassword(e.target.value)}
-                                            placeholder="(leave empty if no auth)"
-                                            className="select-input"
-                                        />
+                                    {picturesOff && (
+                                        <span className="setting-note">OBS keeps its own picture settings.</span>
+                                    )}
+                                    <div
+                                        className="obs-config-panel"
+                                        hidden={ingestMode !== 'obs'}
+                                        inert={ingestMode !== 'obs' || undefined}
+                                    >
+                                        <div className="setting-row setting-row-inline">
+                                            <label htmlFor="obsPassword" className="setting-row-label">
+                                                OBS password
+                                            </label>
+                                            <input
+                                                id="obsPassword"
+                                                type="password"
+                                                value={obsPassword}
+                                                onChange={(e) => setObsPassword(e.target.value)}
+                                                placeholder="Leave blank if none"
+                                                className="select-input"
+                                            />
+                                        </div>
                                     </div>
                                 </div>
-                                <details className="host-more-options">
-                                    <summary>More options</summary>
+                                {ingestMode !== 'obs' && (
                                     <div className="settings-group">
+                                        {roomRows}
+                                    </div>
+                                )}
+                                <details id="hostMoreOptions" className="host-more-options">
+                                    <summary>More options</summary>
+                                    <div
+                                        className="settings-group"
+                                        hidden={ingestMode !== 'obs'}
+                                        inert={ingestMode !== 'obs' || undefined}
+                                    >
+                                        <SettingSwitch
+                                            id="obsApplySettings"
+                                            label="Set OBS up for me"
+                                            hint={`${selectedProfile.capture.width}x${selectedProfile.capture.height} @ ${frameRate}fps, low-latency tuning`}
+                                            checked={obsApplySettings}
+                                            disabled={obsAv1Mode}
+                                            onChange={(e) => setObsApplySettings(e.target.checked)}
+                                        />
+                                        <SettingSwitch
+                                            id="obsAutoStart"
+                                            label="Start stream for me"
+                                            hint="Begin streaming immediately after configuration"
+                                            checked={obsAutoStart}
+                                            onChange={(e) => setObsAutoStart(e.target.checked)}
+                                        />
+                                        <SettingSwitch
+                                            id="obsTryAv1"
+                                            label="AV1 with my own TURN server"
+                                            hint={[
+                                                'Open TURN setup in a modal and switch OBS rooms to AV1 WebRTC-only mode',
+                                                resumePending ? resumeModeLockHint : '',
+                                                (publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported
+                                                    ? 'Disabled for public sharing: configure a reachable public media address first.'
+                                                    : '',
+                                            ].filter(Boolean).join(' ')}
+                                            checked={obsTryAv1}
+                                            disabled={resumePending || ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported)}
+                                            onChange={(e) => handleObsTryAv1Change(e.target.checked)}
+                                        />
+                                    </div>
+                                    <div className={`settings-group${ingestMode === 'obs' ? ' more-options-room' : ''}`}>
+                                        {ingestMode === 'obs' && roomRows}
                                         <SettingSwitch
                                             id="allowMediaControl"
                                             label="Allow viewers to pause/play media"

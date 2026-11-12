@@ -166,13 +166,20 @@ async function installObsStub(page) {
     return obs;
 }
 
+// "Set OBS up for me" sits inside the closed "More options" disclosure: open it,
+// then untick the switch.
+async function untickSetObsUp(page) {
+    await page.locator('#hostMoreOptions').evaluate((el) => { el.open = true; });
+    await page.locator('#obsApplySettings').uncheck();
+}
+
 // Starts sharing in OBS mode against the stub. Applying OBS settings is off so
 // that the configure is a short exchange. Resolves once the start's own
 // control channel attempt has been reported, the failure the next steps build on.
 async function startObsSharing(page, baseUrl) {
     await page.goto(`${baseUrl}/#host`);
     await page.locator('#obsMode').check();
-    await page.locator('#obsApplySettings').uncheck();
+    await untickSetObsUp(page);
     const channelFailed = page.waitForEvent('console', (message) => (
         message.text().includes('OBS control channel unavailable')
     ));
@@ -255,7 +262,7 @@ async function whipUrlOnPage(page) {
 // configure at its stream-service write. Connections opened later are answered.
 async function startHeldObsConfigure(page, obs) {
     await page.locator('#obsMode').check();
-    await page.locator('#obsApplySettings').uncheck();
+    await untickSetObsUp(page);
     obs.mode = 'hold';
     await page.getByRole('button', { name: 'Start Sharing' }).click();
     await expect.poll(() => obs.held.length, { message: 'configure reached the stream-service write' }).toBe(1);
@@ -268,7 +275,7 @@ async function startHeldObsConfigure(page, obs) {
 // its OBS step without OBS hearing from the page while the first setup runs.
 async function startAgainWhileFirstSetupRuns(page, obs, { connectionsBefore, firstWhipUrl }) {
     await page.locator('#obsMode').check();
-    await page.locator('#obsApplySettings').uncheck();
+    await untickSetObsUp(page);
     await page.getByRole('button', { name: 'Start Sharing' }).click();
     await expect(page.getByText('Streaming via OBS')).toBeVisible();
     const whipUrl = await whipUrlOnPage(page);

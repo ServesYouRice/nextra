@@ -234,3 +234,129 @@ test('the diagnostics row is at least 44px tall and sits under the preview', asy
     expect(Math.abs(box.x - stage.x)).toBeLessThanOrEqual(1);
     expect(box.y).toBeGreaterThanOrEqual(stage.y + stage.height);
 });
+
+// OBS mode: four plain rows and "More options".
+
+async function visibleRowLabels(page) {
+    return page.evaluate(() => [...document.querySelectorAll('.host-settings-panel .setting-row-label, .host-settings-panel summary')]
+        .filter((el) => el.getClientRects().length > 0)
+        // Content of a closed disclosure is not on screen, whatever its boxes say.
+        .filter((el) => el.tagName === 'SUMMARY' || !el.closest('details:not([open])'))
+        .map((el) => el.textContent.trim()));
+}
+
+async function rowHeights(page) {
+    return page.evaluate(() => {
+        const heights = {};
+        for (const name of ['Resolution', 'Frame rate']) {
+            const group = document.querySelector(`.host-settings-panel [role="group"][aria-label="${name}"]`);
+            heights[name] = group.closest('.setting-row').getBoundingClientRect().height;
+        }
+        return heights;
+    });
+}
+
+test.describe('host settings panel in OBS mode at 1440x900', () => {
+    test.beforeEach(async ({ page }) => {
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await openHost(page);
+    });
+
+    test('the visible rows are Resolution, Frame rate, Picture preset, OBS password and More options', async ({ page }) => {
+        await page.locator('#obsMode').check();
+        await expect(page.locator('.obs-config-panel')).toBeVisible();
+        expect(await visibleRowLabels(page)).toEqual(['Resolution', 'Frame rate', 'Picture preset', 'OBS password', 'More options']);
+        const password = page.locator('#obsPassword');
+        await expect(password).toHaveAttribute('type', 'password');
+        await expect(password).toHaveAttribute('placeholder', 'Leave blank if none');
+        await expect(page.locator('.obs-config-panel').locator('#obsPassword')).toBeVisible();
+    });
+
+    test('the Resolution and Frame rate rows are as tall as in browser mode', async ({ page }) => {
+        const browserHeights = await rowHeights(page);
+        await page.locator('#obsMode').check();
+        await expect(page.locator('.obs-config-panel')).toBeVisible();
+        const obsHeights = await rowHeights(page);
+        for (const name of ['Resolution', 'Frame rate']) {
+            expect(Math.abs(obsHeights[name] - browserHeights[name]), `${name}: ${obsHeights[name]} vs ${browserHeights[name]}`).toBeLessThanOrEqual(1);
+        }
+    });
+
+    test('the OBS switches live in More options with plain names', async ({ page }) => {
+        await page.locator('#obsMode').check();
+        const more = page.locator('#hostMoreOptions');
+        for (const id of ['obsApplySettings', 'obsAutoStart', 'obsTryAv1']) {
+            await expect(page.locator(`#${id}`)).toBeHidden();
+            await expect(more.locator(`#${id}`)).toHaveCount(1);
+        }
+        await more.locator('summary').click();
+        await expect(page.getByLabel('Set OBS up for me')).toBeVisible();
+        await expect(page.getByLabel('Start stream for me')).toBeVisible();
+        await expect(page.getByLabel('AV1 with my own TURN server')).toBeVisible();
+        await expect(page.locator('#obsApplySettings')).toBeVisible();
+        await expect(page.locator('#obsAutoStart')).toBeVisible();
+        await expect(page.locator('#obsTryAv1')).toBeVisible();
+        const order = await more.evaluate((el) => [...el.querySelectorAll('input[type="checkbox"], #roomPassphrase')]
+            .map((input) => input.id));
+        expect(order).toEqual(['obsApplySettings', 'obsAutoStart', 'obsTryAv1', 'roomPassphrase', 'reloadRecoveryEnabled', 'allowMediaControl']);
+    });
+
+    test('turning Set OBS up for me off disables the three picture groups and says why', async ({ page }) => {
+        await page.locator('#obsMode').check();
+        const groups = ['Resolution', 'Frame rate', 'Picture preset'].map((name) => page.getByRole('group', { name }));
+        const buttons = groups.map((group) => group.getByRole('button'));
+        const note = page.getByText('OBS keeps its own picture settings.');
+        await expect(note).toHaveCount(0);
+        for (const group of buttons) {
+            for (const button of await group.all()) await expect(button).toBeEnabled();
+        }
+
+        await page.locator('.host-more-options summary').click();
+        await page.locator('#obsApplySettings').uncheck();
+        await expect(note).toBeVisible();
+        for (const group of groups) await expect(group).toHaveAttribute('aria-disabled', 'true');
+        for (const group of buttons) {
+            for (const button of await group.all()) await expect(button).toBeDisabled();
+        }
+        const opacity = await page.getByRole('group', { name: 'Picture preset' })
+            .evaluate((el) => getComputedStyle(el.closest('.setting-row')).opacity);
+        expect(Number(opacity)).toBeCloseTo(0.45, 2);
+
+        await page.locator('#obsApplySettings').check();
+        await expect(note).toHaveCount(0);
+        for (const group of groups) await expect(group).not.toHaveAttribute('aria-disabled', 'true');
+        for (const group of buttons) {
+            for (const button of await group.all()) await expect(button).toBeEnabled();
+        }
+    });
+
+    test('the old OBS names are gone from the panel', async ({ page }) => {
+        await page.locator('#obsMode').check();
+        await page.locator('.host-more-options summary').click();
+        const panel = page.locator('.host-settings-panel');
+        for (const text of ['WS password', 'BYOK', 'WHIP ingest', 'Apply recommended output settings']) {
+            await expect(panel.getByText(text), text).toHaveCount(0);
+        }
+    });
+});
+
+for (const { width, height } of [{ width: 1440, height: 900 }, { width: 1280, height: 720 }]) {
+    test(`in OBS mode at ${width}x${height} the panel keeps the preview's top and bottom and the rows do not scroll`, async ({ page }, testInfo) => {
+        test.skip(testInfo.project.name !== 'chromium', 'desktop layout tiers');
+        await page.setViewportSize({ width, height });
+        await openHost(page);
+        await page.locator('#obsMode').check();
+        await expect(page.locator('.obs-config-panel')).toBeVisible();
+        const m = await panelAndStage(page);
+        const label = `${width}x${height}`;
+        expect(Math.abs(m.panel.top - m.stage.top), `${label}: top ${m.panel.top} vs ${m.stage.top}`).toBeLessThanOrEqual(1);
+        expect(Math.abs(m.panel.bottom - m.stage.bottom), `${label}: bottom ${m.panel.bottom} vs ${m.stage.bottom}`).toBeLessThanOrEqual(1);
+        const body = await page.locator('.host-settings-body').evaluate((el) => ({
+            scrollHeight: el.scrollHeight,
+            clientHeight: el.clientHeight,
+            open: el.querySelector('.host-more-options').open,
+        }));
+        expect(body.open).toBe(false);
+        expect(body.scrollHeight, `${label}: rows scroll ${body.scrollHeight} > ${body.clientHeight}`).toBeLessThanOrEqual(body.clientHeight + 1);
+    });
+}
