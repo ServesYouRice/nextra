@@ -1118,109 +1118,199 @@ input.select-input {
   padding: clamp(2rem, 6vh, 4rem) var(--stage-pad-inline);
 }
 
-.landing-content {
-  max-width: 880px;
+.landing-grid {
   width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 3rem;
+  max-width: 1200px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2.5rem;
 }
 
-.landing-hero {
-  text-align: center;
+.landing-copy {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 1.35rem;
+  align-items: flex-start;
+  gap: 1.25rem;
+  min-width: 0;
 }
 
-/* The hero steps logo -> headline -> lead -> cards so each level is clearly
-   larger than the one under it instead of everything landing near 1rem. */
-.landing-hero h1 {
-  font-size: clamp(1.45rem, 2.9vw, 2rem);
-  font-weight: 600;
-  line-height: 1.15;
+.landing-copy .brand-logo-hero {
+  --brand-mark-height: 2.25rem;
+}
+
+.landing-copy h1 {
+  font-size: var(--fs-display);
+  font-weight: 700;
+  line-height: 1.1;
   letter-spacing: -0.02em;
   color: var(--text-1);
 }
 
-.landing-hero p {
+.landing-lead {
   color: var(--text-2);
   font-size: 1.0625rem;
   line-height: 1.6;
-  max-width: 56ch;
+  max-width: 52ch;
 }
 
-/* auto-fit drops to one column on its own when the cards stop fitting, which is
-   the same job the 640px override used to do by hand. */
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
-  gap: 1.25rem;
-  max-width: 720px;
-  width: 100%;
-  margin: 0 auto;
-}
-
-.card {
+.landing-join {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 2rem 1.75rem;
-  position: relative;
-  overflow: hidden;
-  isolation: isolate;
+  gap: 0.6rem;
+  width: 100%;
+  max-width: 26rem;
+  padding: 1rem;
   background: var(--surface-glass-accent), var(--surface-glass);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--panel-shell-radius);
-  text-decoration: none;
-  color: var(--text-1);
+  border-radius: 18px;
   box-shadow: var(--shadow-card);
-  transition: border-color var(--transition), transform var(--transition), box-shadow var(--transition);
 }
 
-.card:hover {
-  border-color: var(--border-strong);
-  box-shadow: var(--shadow-card-hover);
-  transform: translateY(-2px);
-}
-
-.card h2 {
-  font-size: 1.25rem;
+.landing-join label {
+  font-size: var(--fs-small);
   font-weight: 600;
-  letter-spacing: -0.01em;
-  margin-bottom: 0.4rem;
+  color: var(--text-1);
 }
 
-.card p {
-  font-size: 0.9375rem;
-  line-height: 1.55;
+.landing-join-row {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.landing-join .input-code {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  min-height: var(--tap-min);
+}
+
+.landing-join .btn {
+  min-height: var(--tap-min);
+}
+
+.landing-join-error {
+  color: #f5a3a3;
+  font-size: var(--fs-small);
+}
+
+.landing-facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  font-size: var(--fs-small);
   color: var(--text-2);
-  margin-bottom: 1.25rem;
+}
+
+.landing-facts li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.landing-facts svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+/* Decorative stand-in for a live room; the only place colour literals live. */
+.landing-preview {
+  min-width: 0;
+}
+
+.landing-preview-screen {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(135deg, #1c2340, #12141d 60%, #2a1d3d);
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.7);
+}
+
+.landing-preview-window {
+  position: absolute;
+  inset: 16% 12% 18%;
+  display: flex;
+  flex-direction: column;
+  gap: 8%;
+  padding: 5%;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #232636, #181a25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.landing-preview-bar {
+  height: 8%;
+  width: 30%;
+  border-radius: 999px;
+  background: linear-gradient(100deg, #5b8def, #b46cf0);
+}
+
+.landing-preview-line {
+  height: 6%;
+  width: 90%;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.landing-preview-line-short {
+  width: 55%;
+}
+
+.landing-preview-block {
   flex: 1;
+  border-radius: 8px;
+  background: rgba(91, 141, 239, 0.18);
 }
 
-/* Each badge takes one half of the mark's gradient, so the landing cards read
-   as the two strokes of the "N". `color` is the fallback wherever
-   background-clip: text is unsupported. */
-.card-badge {
-  font-size: 0.875rem;
+.landing-preview-badge,
+.landing-preview-meta,
+.landing-preview-code {
+  position: absolute;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
   font-weight: 600;
-  color: var(--brand-cyan);
-  background-image: linear-gradient(100deg, var(--brand-cyan), var(--brand-blue));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  background: rgba(10, 11, 16, 0.72);
+  color: #e8eaf2;
 }
 
-.card-watch .card-badge {
-  color: var(--brand-magenta);
-  background-image: linear-gradient(100deg, var(--brand-magenta), var(--brand-violet));
+.landing-preview-badge {
+  top: 4%;
+  left: 3%;
+  background: #d94a4a;
+  color: #fff;
+  letter-spacing: 0.06em;
 }
 
-.landing-footer {
-  text-align: center;
+.landing-preview-meta {
+  bottom: 4%;
+  left: 3%;
+}
+
+.landing-preview-code {
+  bottom: 4%;
+  right: 3%;
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+}
+
+@media (min-width: 900px) {
+  .landing-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 48px;
+    align-items: center;
+  }
+}
+
+@media (max-width: 639px) {
+  .landing-preview {
+    display: none;
+  }
 }
 
 /* ========== VIEW & ARTICLES ========== */

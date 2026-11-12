@@ -5,6 +5,8 @@ import ErrorBoundary from './components/ErrorBoundary';
 import { NotificationProvider } from './context/NotificationContext';
 import { routeName, routeTitle } from './lib/routeTitle.mjs';
 import { canLeaveRoute } from './lib/navigationGuard.mjs';
+import { extractRoomCode, formatRoomCode, normalizeRoomCode } from './lib/roomCode.mjs';
+import { getSessionStorageSafely, rememberJoinIntent } from './lib/joinIntent.mjs';
 import './index.css';
 
 const HostView = lazy(() => import('./HostView'));
@@ -19,6 +21,12 @@ const NAV_ITEMS = [
     { hash: '#watch', label: 'Watch' },
     { hash: '#how-to', label: 'How to Use' },
     { hash: '#status', label: 'Status' },
+];
+
+const LANDING_FACTS = [
+    'Up to 4K at 60 fps',
+    'Runs on your own machine',
+    'Nextra records nothing',
 ];
 
 function isNavItemActive(item, route) {
@@ -211,36 +219,88 @@ function LoadingState() {
 }
 
 function Landing() {
+    const [codeValue, setCodeValue] = useState('');
+    const [codeInvalid, setCodeInvalid] = useState(false);
+
+    const onCodeChange = (event) => {
+        setCodeValue(formatRoomCode(extractRoomCode(event.target.value)));
+        setCodeInvalid(false);
+    };
+
+    const onJoin = (event) => {
+        event.preventDefault();
+        const code = normalizeRoomCode(codeValue);
+        if (code.length !== 6) {
+            setCodeInvalid(true);
+            return;
+        }
+        rememberJoinIntent(code, getSessionStorageSafely(window));
+        window.location.hash = `#watch/${code}`;
+    };
+
     return (
         <div className="landing">
-            <div className="landing-content">
-                <div className="landing-hero">
+            <div className="landing-grid">
+                <div className="landing-copy">
                     <BrandLogo className="brand-logo-hero" />
-                    <h1>Self-hosted, low-latency screen sharing</h1>
-                    <p>
-                        Host from your browser or OBS, share a link or a room code,
-                        and viewers watch instantly — no installs, no accounts.
+                    <h1>Share your screen. They just open a link.</h1>
+                    <p className="landing-lead">
+                        Self-hosted and low-latency. Host from your browser or OBS.
+                        Viewers need no install and no account.
                     </p>
-                </div>
-
-                <div className="card-grid">
-                    <a href="#host" className="card card-host">
-                        <h2>Host</h2>
-                        <p>Share your screen with viewers in real-time</p>
-                        <span className="card-badge">Start Sharing</span>
+                    <a href="#host" className="btn btn-primary btn-main">
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+                            <rect x="2" y="3.5" width="16" height="10.5" rx="2" />
+                            <path d="M7 17h6M10 14v3" />
+                        </svg>
+                        Share my screen
                     </a>
-
-                    <a href="#watch" className="card card-watch">
-                        <h2>Watch</h2>
-                        <p>Join a room and watch a live stream</p>
-                        <span className="card-badge">Join Room</span>
-                    </a>
+                    <form className="landing-join" onSubmit={onJoin} noValidate>
+                        <label htmlFor="homeRoomCode">Got a room code?</label>
+                        <div className="landing-join-row">
+                            <input
+                                id="homeRoomCode"
+                                className="input-code"
+                                type="text"
+                                inputMode="text"
+                                autoComplete="off"
+                                placeholder="XXX-XXX"
+                                value={codeValue}
+                                onChange={onCodeChange}
+                                aria-invalid={codeInvalid ? 'true' : undefined}
+                                aria-describedby={codeInvalid ? 'homeRoomCodeError' : undefined}
+                            />
+                            <button type="submit" className="btn btn-secondary">Join</button>
+                        </div>
+                        {codeInvalid && (
+                            <p role="alert" id="homeRoomCodeError" className="landing-join-error">
+                                Enter the full 6-character room code.
+                            </p>
+                        )}
+                    </form>
+                    <ul className="landing-facts">
+                        {LANDING_FACTS.map((fact) => (
+                            <li key={fact}>
+                                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+                                    <path d="M3 8.5l3.2 3L13 4.5" />
+                                </svg>
+                                {fact}
+                            </li>
+                        ))}
+                    </ul>
                 </div>
-
-                <div className="landing-footer">
-                    <p className="footer-note">
-                        WebRTC media is encrypted in transit; relay media is encrypted only as far as the page connection is. Media is not stored by Nextra.
-                    </p>
+                <div className="landing-preview" aria-hidden="true">
+                    <div className="landing-preview-screen">
+                        <span className="landing-preview-badge">LIVE</span>
+                        <div className="landing-preview-window">
+                            <span className="landing-preview-bar" />
+                            <span className="landing-preview-line" />
+                            <span className="landing-preview-line landing-preview-line-short" />
+                            <span className="landing-preview-block" />
+                        </div>
+                        <span className="landing-preview-meta">2 watching</span>
+                        <span className="landing-preview-code">VW6-349</span>
+                    </div>
                 </div>
             </div>
         </div>
