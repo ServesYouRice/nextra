@@ -13,9 +13,12 @@ async function focusByKeyboard(page, locator) {
 }
 
 test('dim grey text is readable on the watch page', async ({ page }) => {
+    // T60 moved #joinHint to --text-2; the paste hint is the watch page's
+    // --text-3 text now.
     await page.goto('/#watch');
-    await expect(page.locator('#joinHint')).toBeVisible();
-    await expect(page.locator('#joinHint')).toHaveCSS('color', 'rgb(148, 148, 168)');
+    const pasteHint = page.locator('.join-paste-hint');
+    await expect(pasteHint).toBeVisible();
+    await expect(pasteHint).toHaveCSS('color', 'rgb(148, 148, 168)');
 });
 
 test('the primary button keeps its gradient through the token', async ({ page }) => {
