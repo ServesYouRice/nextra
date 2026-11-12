@@ -1285,6 +1285,18 @@ input.select-input {
   margin-bottom: 0.5rem;
 }
 
+/* A command line scrolls inside its own box, never the page. */
+.article-container pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* A long inline address (the WHEP URL) wraps instead of widening the page.
+   It does not reach code inside pre, which keeps white-space: pre. */
+.article-container :not(pre) > code {
+  overflow-wrap: anywhere;
+}
+
 .article-container a {
   color: var(--accent);
 }

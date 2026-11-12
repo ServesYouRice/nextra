@@ -229,6 +229,31 @@ for (const width of REFLOW_WIDTHS) {
     });
 }
 
+for (const width of [320, 375, 390]) {
+    test(`the How to Use page does not scroll sideways at ${width}px once it has rendered`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 800 });
+        await page.goto('/#how-to');
+        await expect(page.getByRole('heading', { name: 'How to use Nextra' })).toBeVisible();
+        const pre = page.locator('.article-step pre').first();
+        await expect(pre).toBeVisible();
+
+        const metrics = await horizontalOverflow(page);
+        expect(metrics.documentScrollWidth, `document at ${width}px`)
+            .toBeLessThanOrEqual(metrics.clientWidth + 1);
+        expect(metrics.bodyScrollWidth, `body at ${width}px`)
+            .toBeLessThanOrEqual(metrics.clientWidth + 1);
+
+        const box = await pre.evaluate((el) => ({
+            scrollWidth: el.scrollWidth,
+            clientWidth: el.clientWidth,
+            right: el.getBoundingClientRect().right,
+            viewport: document.documentElement.clientWidth,
+        }));
+        expect(box.scrollWidth, 'the command block scrolls inside itself').toBeGreaterThan(box.clientWidth);
+        expect(box.right, 'the command block stays inside the viewport').toBeLessThanOrEqual(box.viewport + 1);
+    });
+}
+
 // Selecting OBS ingest adds the OBS card and the tuning-profile toggle to the
 // host page. The loop above never selects it, so a layout that only overflows
 // with OBS on went unnoticed: at 320px the three-cell toggle was wider than the
