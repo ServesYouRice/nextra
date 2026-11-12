@@ -52,7 +52,14 @@ const {
     timingSafeTokenEqual,
 } = require('./lib/network');
 const { createRequestIdentity, normalizeOrigin, parseUrlHostParts } = require('./lib/requestIdentity');
-const { createWhipRouter, setIo: setWhipIo, setMediaLifecycle: setWhipMediaLifecycle } = require('./lib/whipRoutes');
+const { createOperatorSessions, readOperatorSessionIds } = require('./lib/operatorSessions');
+const { createOperatorSessionRouter } = require('./lib/operatorSignIn');
+const {
+    createWhipRouter,
+    rateLimitBucketKey,
+    setIo: setWhipIo,
+    setMediaLifecycle: setWhipMediaLifecycle,
+} = require('./lib/whipRoutes');
 const { createWhepRouter } = require('./lib/whepRoutes');
 const { warmNvencProbe, getNvencProbeStatus } = require('./lib/ffmpegRelay');
 const { findAvailablePort } = require('./lib/portResolver');
@@ -291,11 +298,13 @@ const operatorHostnames = [...new Set([
 ].map((name) => String(name || '').trim().toLowerCase()).filter(Boolean))];
 
 // Who a request or socket comes from; see lib/requestIdentity.js. The tunnel and any same-host proxy relay from
-// loopback, so a relayed request is classified as a known proxy, never as the local operator.
+// loopback, and a proxy named in TRUSTED_PROXY_CIDRS relays from its own address, so a relayed request is classified
+// as a known proxy, never as the local operator.
 const {
     isKnownPublicShareOrigin,
     isKnownPublicShareRequest,
     isRelayedFromLoopback,
+    isRelayedByTrustedProxy,
     isOperatorAddressedRequest,
     shouldTrustRequestForwardedHeaders,
     getClientIpFromHeaders,
@@ -306,10 +315,21 @@ const {
     getManagedTunnelOrigin,
     getTrustCloudflareClientIp: () => config.TRUST_CLOUDFLARE_CONNECTING_IP,
     getOperatorHostnames: () => operatorHostnames,
+    getTrustedProxyCidrs: () => config.TRUSTED_PROXY_CIDRS,
 });
 
 function getRequestClientIp(req) {
     return getClientIpFromHeaders(req?.headers || {}, getRemoteAddressFromReq(req));
+}
+
+// Whether a request or socket reached this listener through a relay (a proxy named in TRUSTED_PROXY_CIDRS, the
+// public link, a proxy on this machine) or under a name that is not this machine's. The trusted-proxy test comes
+// first and needs no header: such a peer is a relay even when its own address is inside TRUSTED_LAN_CIDRS.
+function isRelayedClient(headers, remoteAddress) {
+    return isRelayedByTrustedProxy(remoteAddress)
+        || isKnownPublicShareRequest(headers)
+        || isRelayedFromLoopback(headers, remoteAddress)
+        || !isOperatorAddressedRequest(headers, remoteAddress);
 }
 
 function getRequestClientClassification(req) {
@@ -318,9 +338,7 @@ function getRequestClientClassification(req) {
     return classifyClient({
         ip: getRequestClientIp(req),
         trustedLanCidrs: config.TRUSTED_LAN_CIDRS,
-        viaKnownProxy: isKnownPublicShareRequest(headers)
-            || isRelayedFromLoopback(headers, remoteAddress)
-            || !isOperatorAddressedRequest(headers, remoteAddress),
+        viaKnownProxy: isRelayedClient(headers, remoteAddress),
     });
 }
 
@@ -337,9 +355,7 @@ function getSocketClientClassification(socket) {
     return classifyClient({
         ip: getSocketHandshakeIp(socket),
         trustedLanCidrs: config.TRUSTED_LAN_CIDRS,
-        viaKnownProxy: isKnownPublicShareRequest(headers)
-            || isRelayedFromLoopback(headers, remoteAddress)
-            || !isOperatorAddressedRequest(headers, remoteAddress),
+        viaKnownProxy: isRelayedClient(headers, remoteAddress),
     });
 }
 
@@ -349,20 +365,117 @@ function extractOperatorToken(req) {
         : '';
 }
 
+function isLocalOperatorClient(classification) {
+    return classification?.kind === 'loopback' || classification?.kind === 'trusted-lan';
+}
+
 function isOperatorAuthorized(classification, providedToken = '') {
-    if (classification?.kind === 'loopback' || classification?.kind === 'trusted-lan') return true;
+    if (isLocalOperatorClient(classification)) return true;
     return timingSafeTokenEqual(providedToken, config.OPERATOR_TOKEN);
 }
 
+// Host sign-in: a host on another computer proves the host password (OPERATOR_TOKEN) once at
+// POST /api/operator/session and then holds a session id in an HttpOnly cookie (lib/operatorSessions.js,
+// lib/operatorSignIn.js). A live session authorizes wherever isOperatorAuthorized decides, after the local and
+// token rules, which stay as they are.
+const operatorSessions = createOperatorSessions();
+
+function hasOperatorSession(headers = {}) {
+    return readOperatorSessionIds(headers?.cookie).some((id) => operatorSessions.isValid(id));
+}
+
+// The origin a request was addressed to: its Host under the scheme it arrived with (a trusted proxy's
+// X-Forwarded-Proto included).
+function getHostOriginFromHeaders(headers = {}, remoteAddress = '', encrypted = false) {
+    let proto = encrypted ? 'https' : 'http';
+
+    if (shouldTrustRequestForwardedHeaders(headers, remoteAddress)) {
+        const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
+        if (forwardedProto === 'http' || forwardedProto === 'https') {
+            proto = forwardedProto;
+        }
+    }
+
+    const hostHeader = typeof headers.host === 'string' ? headers.host : '';
+    const hostParts = parseUrlHostParts(hostHeader);
+    if (!hostParts) return '';
+
+    return `${proto}://${hostParts.hostWithPort}`;
+}
+
+// Whether an Origin header names Nextra's own page: the origin the request itself was addressed to, or a public
+// share origin in use now. A missing or unreadable Origin never does.
+function isOwnOrShareOrigin(originHeader, headers, remoteAddress, encrypted) {
+    const origin = normalizeOrigin(typeof originHeader === 'string' ? originHeader.trim() : '');
+    if (!origin) return false;
+    const ownOrigin = normalizeOrigin(getHostOriginFromHeaders(headers, remoteAddress, encrypted));
+    return origin === ownOrigin || isKnownPublicShareOrigin(origin);
+}
+
+function isSameOriginRequest(req) {
+    const headers = req?.headers || {};
+    return isOwnOrShareOrigin(headers.origin, headers, getRemoteAddressFromReq(req), !!req?.socket?.encrypted);
+}
+
+// A browser attaches the session cookie on its own, so a request that holds nothing else must come from Nextra's
+// own page. SameSite=Strict already keeps the cookie off requests another site starts; this is the second lock,
+// and it also covers what SameSite does not: a page on a sibling subdomain, which is the same site.
+// - Sec-Fetch-Site, where the browser sends it, must say the request is same-origin or typed by the user.
+// - A request that changes something must name its origin. Browsers send none on a same-origin GET, so a read
+//   is refused only when it names another origin.
+function isSessionRequestOriginAllowed(req) {
+    const headers = req?.headers || {};
+    const fetchSite = typeof headers['sec-fetch-site'] === 'string' ? headers['sec-fetch-site'].trim().toLowerCase() : '';
+    if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') return false;
+    const originHeader = headers.origin;
+    const hasOrigin = Array.isArray(originHeader) || (typeof originHeader === 'string' && originHeader.trim() !== '');
+    if (!hasOrigin) return req?.method === 'GET' || req?.method === 'HEAD';
+    return isSameOriginRequest(req);
+}
+
+// How a request holds operator rights. `local` is the operator's own machine or trusted LAN, which needs no
+// sign-in; `session` is true only when the rights come from a host sign-in session and nothing else.
+function getRequestOperatorAccess(req) {
+    const classification = getRequestClientClassification(req);
+    const local = isLocalOperatorClient(classification);
+    if (isOperatorAuthorized(classification, extractOperatorToken(req))) {
+        return { authorized: true, local, session: false };
+    }
+    const session = hasOperatorSession(req?.headers) && isSessionRequestOriginAllowed(req);
+    return { authorized: session, local, session };
+}
+
 function isOperatorRequestAuthorized(req) {
-    return isOperatorAuthorized(getRequestClientClassification(req), extractOperatorToken(req));
+    return getRequestOperatorAccess(req).authorized;
+}
+
+// A socket's handshake is one request and creating a room changes state, so a socket that holds only the session
+// cookie must have sent an Origin that is this server's own or a public share origin.
+function isSessionSocketOriginAllowed(socket) {
+    const headers = socket?.handshake?.headers || {};
+    return isOwnOrShareOrigin(
+        headers.origin,
+        headers,
+        getSocketRemoteAddress(socket),
+        !!socket?.request?.socket?.encrypted
+    );
 }
 
 function isOperatorSocketAuthorized(socket, providedToken = '') {
     const handshakeToken = typeof socket?.handshake?.auth?.operatorToken === 'string'
         ? socket.handshake.auth.operatorToken
         : '';
-    return isOperatorAuthorized(getSocketClientClassification(socket), providedToken || handshakeToken);
+    if (isOperatorAuthorized(getSocketClientClassification(socket), providedToken || handshakeToken)) return true;
+    return hasOperatorSession(socket?.handshake?.headers) && isSessionSocketOriginAllowed(socket);
+}
+
+// HTTPS as the client sees it: TLS on this listener, or X-Forwarded-Proto: https from a proxy whose forwarded
+// headers are trusted.
+function isRequestExternallySecure(req) {
+    if (req?.socket?.encrypted) return true;
+    const headers = req?.headers || {};
+    if (!shouldTrustRequestForwardedHeaders(headers, getRemoteAddressFromReq(req))) return false;
+    return parseForwardedFirst(headers['x-forwarded-proto']).toLowerCase() === 'https';
 }
 
 function isSocketExternallySecure(socket) {
@@ -406,21 +519,7 @@ function isAllowedSocketOrigin(origin) {
 }
 
 function getSocketRequestHostOrigin(req) {
-    const remoteAddress = getRemoteAddressFromReq(req);
-    let proto = req?.socket?.encrypted ? 'https' : 'http';
-
-    if (shouldTrustRequestForwardedHeaders(req?.headers || {}, remoteAddress)) {
-        const forwardedProto = parseForwardedFirst(req?.headers?.['x-forwarded-proto']);
-        if (forwardedProto === 'http' || forwardedProto === 'https') {
-            proto = forwardedProto;
-        }
-    }
-
-    const hostHeader = typeof req?.headers?.host === 'string' ? req.headers.host : '';
-    const hostParts = parseUrlHostParts(hostHeader);
-    if (!hostParts) return '';
-
-    return `${proto}://${hostParts.hostWithPort}`;
+    return getHostOriginFromHeaders(req?.headers || {}, getRemoteAddressFromReq(req), !!req?.socket?.encrypted);
 }
 
 function validateSocketHandshakeRequest(req) {
@@ -784,13 +883,25 @@ async function loadCloudflareTurnCredentials() {
 }
 
 app.get('/api/config', (req, res) => {
+    const operatorAccess = getRequestOperatorAccess(req);
+    // The answer depends on who asks (and now on their sign-in), so no cache may hand it to anyone else or keep
+    // it past a sign-in or sign-out.
+    res.set('Cache-Control', 'no-store');
     res.json({
         hostUploadMbps: config.HOST_UPLOAD_MBPS,
         shareBaseUrl: getShareBaseUrl(req),
         lanUrl: shouldExposeLanUrl(req) ? getLocalBaseUrl() : '',
         hasTurnServer: getHasTurnServer(),
-        cloudflareTurnAutofillAvailable: isOperatorRequestAuthorized(req)
+        cloudflareTurnAutofillAvailable: operatorAccess.authorized
             && config.hasCloudflareTurnCredentialSource(),
+        // What the host page needs to choose between the host controls and the sign-in panel. These three are the
+        // only place a client can tell whether a host password is set.
+        // - operatorAuthorized: this request has operator rights, by any means.
+        // - operatorSignInAvailable: a host password is set and this client is not already the local operator.
+        // - operatorSession: the rights come from a sign-in session, so the page can offer "Sign out".
+        operatorAuthorized: operatorAccess.authorized,
+        operatorSignInAvailable: !!config.OPERATOR_TOKEN && !operatorAccess.local,
+        operatorSession: operatorAccess.session,
         // NOTE: ICE servers (with ephemeral TURN credentials) are intentionally
         // NOT exposed here. This endpoint is unauthenticated, so shipping TURN
         // credentials would hand them to any caller. Clients receive room-scoped
@@ -810,6 +921,16 @@ app.get('/api/config', (req, res) => {
         whepEnabled: config.WHEP_ENABLED,
     });
 });
+
+app.use('/api/operator/session', createOperatorSessionRouter({
+    sessions: operatorSessions,
+    getOperatorToken: () => config.OPERATOR_TOKEN,
+    isLocalClient: (req) => isLocalOperatorClient(getRequestClientClassification(req)),
+    isSecureRequest: isRequestExternallySecure,
+    isSameOriginRequest,
+    // The limit follows the client a proxy vouches for, never the proxy; an IPv6 client is counted by its /64.
+    getClientId: (req) => rateLimitBucketKey(getRequestClientIp(req)),
+}));
 
 let cachedCloudflareTurnCredentials = null;
 // Absolute ms when the cached credentials expire, and the end of the window in
@@ -1382,6 +1503,9 @@ async function startWhipHttpServer(whipRouter) {
     }
     if (config.TRUST_X_FORWARDED_HEADERS) {
         console.log('Forwarded header trust: enabled for loopback proxy peers only.');
+    }
+    if (config.TRUSTED_PROXY_CIDRS) {
+        console.log(`Trusted reverse proxies: ${config.TRUSTED_PROXY_CIDRS}. Requests from them are always treated as relayed, never as the local operator.`);
     }
     if (config.TRUST_CLOUDFLARE_CONNECTING_IP) {
         console.log('CF-Connecting-IP trust: enabled for loopback proxy peers; use it only behind cloudflared.');

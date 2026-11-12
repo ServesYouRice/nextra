@@ -1524,6 +1524,46 @@ input.select-input {
   gap: 1rem;
 }
 
+/* Host sign-in: the card a host on another computer gets in place of the room
+   settings (HostSignInPanel). It is a .settings-panel, so only its own text and
+   spacing are set here. */
+.host-sign-in-text {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text-2);
+  margin-bottom: 0.75rem;
+}
+
+.host-sign-in-text a {
+  color: var(--accent);
+}
+
+.host-sign-in-text a:hover {
+  color: var(--accent-hover);
+}
+
+.host-sign-in .alert {
+  margin: 0.75rem 0 0;
+}
+
+.host-sign-in-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+/* "Signed in with the host password" and its Sign out button, under the settings card. */
+.host-session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  padding: 0 0.25rem;
+  font-size: 0.8rem;
+  color: var(--text-2);
+}
+
 .room-info {
   display: flex;
   align-items: flex-start;
@@ -2192,6 +2232,13 @@ input.select-input {
   .host-side-panel:has(.streaming-info-row) {
     width: 100%;
     max-width: 100%;
+  }
+
+  /* In the stacked layout the stage column is only as wide as its content. The
+     start controls normally give it the full width; with the sign-in card in
+     their place nothing does, and the stage shrank to its floor. */
+  .host-layout:has(.host-sign-in) .host-video-section {
+    align-self: stretch;
   }
 
   .modal-backdrop {
