@@ -124,8 +124,8 @@
   --transition: 180ms ease;
   --transition-panel: 420ms cubic-bezier(0.22, 1, 0.36, 1);
 
-  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', Menlo, monospace;
+  --font-sans: 'Inter Variable', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'Cascadia Code', Menlo, monospace;
 
   accent-color: var(--accent);
 }
