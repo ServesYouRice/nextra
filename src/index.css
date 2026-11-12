@@ -1461,15 +1461,15 @@ input.select-input {
   background: #0a0a0c;
 }
 
-/* The viewer page carries less below the stage than the host page does - no
-   capture rows, no start controls - so it can afford a taller stage before the
-   page would scroll. Without its own value it would inherit the host's budget
-   and shrink the video for chrome that is not there. On a landscape phone this
-   budget is still larger than the viewport is tall, and --stage-min-width keeps
-   the stage from collapsing. */
+/* Once joined, the viewer page is the top bar and the picture: no page header,
+   no rows under the stage (its controls sit on it, see WATCH STAGE), so 7rem
+   is the top bar and the page's block padding. Without its own value it would
+   inherit the host's budget and shrink the video for chrome that is not there.
+   On a landscape phone this budget is still larger than the viewport is tall,
+   and --stage-min-width keeps the stage from collapsing. */
 .watch-video {
   max-width: 100%;
-  --stage-chrome: 19rem;
+  --stage-chrome: 7rem;
 }
 
 .video-overlay {
@@ -1704,6 +1704,369 @@ input.select-input {
 
   50% {
     box-shadow: 0 0 0 8px rgba(91, 141, 239, 0);
+  }
+}
+
+/* ========== WATCH STAGE ==========
+   The viewer's joined view: the picture as large as the window allows, with its
+   own control bar on it. The bar fades while the picture plays and nobody uses
+   it; it is hidden with opacity only, so the keyboard, touch and the tests can
+   always reach its buttons. From 640px down it sits under the picture instead. */
+.view-container.watch-live {
+  padding-block: 12px;
+}
+
+/* Joined, the window is the top bar and the picture (--stage-chrome on
+   .watch-video budgets nothing else); the footer would push the page into a
+   scrollbar. It is back as soon as the viewer leaves the room, and phones,
+   whose page scrolls anyway, keep it. */
+@media (min-width: 641px) {
+  .app-layout:has(.watch-live) .site-footer {
+    display: none;
+  }
+}
+
+/* "Fit to page": back inside the page margins, at most 1040px wide. */
+.watch-video.is-fit {
+  max-width: 65rem;
+}
+
+.watch-video:fullscreen {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  aspect-ratio: auto;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg-0);
+}
+
+/* The <video>, its overlays and the notices; the stage itself draws the frame. */
+.watch-picture {
+  position: absolute;
+  inset: 0;
+}
+
+/* Notices, the media-control line and "Tap for sound", top centre. */
+.watch-top {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(90%, 40rem);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.watch-notices {
+  display: grid;
+  gap: 0.5rem;
+  width: 100%;
+  border-radius: var(--radius);
+  background: var(--bg-1);
+}
+
+.watch-notices .alert {
+  margin: 0;
+}
+
+.watch-control-status {
+  margin: 0;
+  padding: 0.25rem 0.75rem;
+  border-radius: var(--radius-pill);
+  background: var(--bg-1);
+  color: var(--text-2);
+}
+
+.watch-sound-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: var(--tap-min);
+  padding: 0 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface-button-quiet);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.watch-sound-chip:hover {
+  border-color: var(--border-focus);
+}
+
+.watch-controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  padding: 12px 16px;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+/* The bottom-to-top shade that keeps the bar readable on a bright picture. */
+.watch-controls::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: -1;
+  height: 96px;
+  min-height: 100%;
+  background: linear-gradient(to top, rgba(10, 10, 12, 0.85), transparent);
+  pointer-events: none;
+}
+
+/* Shown while nothing plays, after recent input (.controls-shown, set by
+   WatchView), while the pointer is over the stage, and while keyboard focus
+   is inside it. */
+.watch-video.controls-shown .watch-controls,
+.watch-video:has(:focus-visible) .watch-controls {
+  opacity: 1;
+}
+
+@media (hover: hover) {
+  .watch-video:hover .watch-controls {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .watch-controls {
+    transition: none;
+  }
+}
+
+.watch-controls-info,
+.watch-controls-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.watch-controls-actions {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.watch-live-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: var(--surface-button-stop);
+  color: var(--text-1);
+  font-size: var(--fs-label);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.watch-room-code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  color: var(--text-1);
+  letter-spacing: 0.06em;
+}
+
+.watch-status {
+  position: relative;
+}
+
+.watch-status-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap-min);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.watch-status-panel {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.25rem);
+  width: max-content;
+  max-width: min(20rem, 80vw);
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-glass-accent), var(--surface-glass);
+  box-shadow: var(--shadow-card);
+  color: var(--text-2);
+  font-size: var(--fs-label);
+}
+
+.watch-status-panel[hidden] {
+  display: none;
+}
+
+.watch-status-numbers {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  gap: 0.25rem 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.watch-status-numbers dt {
+  color: var(--text-3);
+}
+
+.watch-status-numbers dd {
+  margin: 0.15rem 0 0;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+}
+
+.watch-status-sentence {
+  margin: 0;
+}
+
+.watch-btn {
+  min-height: var(--tap-min);
+  padding: 0 1rem;
+}
+
+.watch-btn-icon {
+  width: var(--tap-min);
+  padding: 0;
+}
+
+/* Icon buttons keep their text as their name, out of sight on the picture. */
+.watch-btn-icon .watch-btn-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.watch-icon {
+  flex: 0 0 auto;
+}
+
+.watch-turn-hint {
+  display: none;
+}
+
+/* Phones: the picture keeps the page margin and its corners, and the controls
+   sit under it - one line of status, then sound, full screen and leave as three
+   large buttons, then anything else. */
+@media (max-width: 640px) {
+  .watch-video {
+    aspect-ratio: auto;
+    overflow: visible;
+    background: none;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .watch-picture {
+    position: relative;
+    inset: auto;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--panel-shell-radius);
+  }
+
+  .watch-video .watch-controls {
+    position: static;
+    display: grid;
+    gap: 0.75rem;
+    padding: 0.75rem 0 0;
+    opacity: 1;
+  }
+
+  .watch-controls::before {
+    display: none;
+  }
+
+  .watch-controls-info {
+    flex-wrap: nowrap;
+  }
+
+  .watch-status {
+    order: 1;
+  }
+
+  .watch-room-code {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .watch-controls-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-left: 0;
+  }
+
+  .watch-controls-actions .watch-btn {
+    grid-column: 1 / -1;
+    order: 1;
+  }
+
+  .watch-controls-actions .watch-btn-main {
+    grid-column: auto;
+    order: 0;
+    flex-direction: column;
+    gap: 0.25rem;
+    width: auto;
+    min-width: 0;
+    min-height: 3rem;
+    padding: 0.4rem 0.25rem;
+    font-size: var(--fs-label);
+    white-space: normal;
+    text-align: center;
+  }
+
+  .watch-btn-icon .watch-btn-text {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
+  }
+
+  .watch-btn-fit {
+    display: none;
+  }
+
+  .watch-video:fullscreen {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 1rem;
+  }
+}
+
+@media (max-width: 640px) and (orientation: portrait) {
+  .watch-turn-hint {
+    display: block;
+    margin: 0;
+    font-size: var(--fs-small);
+    color: var(--text-3);
+    text-align: center;
   }
 }
 

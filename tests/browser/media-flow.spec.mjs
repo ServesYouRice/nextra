@@ -928,6 +928,145 @@ test('fullscreen control exposes pressed state and exits fullscreen', async ({ b
     await hostContext.close();
 });
 
+// Joined, the viewer page is the top bar and the picture. The control bar sits
+// on the picture, rests after 3 seconds without input, and comes back for the
+// pointer and for keyboard focus.
+test('the viewer\'s controls sit on the picture and the picture fills the window', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+
+    const stage = viewerPage.locator('.video-container');
+    expect(await viewerPage.locator('video').evaluate((video) => video.hasAttribute('controls')), 'no browser video bar')
+        .toBe(false);
+    await expect(stage.locator('.watch-controls')).toHaveCount(1);
+    const layout = await viewerPage.evaluate(() => {
+        const stageElement = document.querySelector('.video-container');
+        const pageStyle = getComputedStyle(stageElement.parentElement);
+        return {
+            stageWidth: stageElement.getBoundingClientRect().width,
+            pageInnerWidth: stageElement.parentElement.clientWidth
+                - parseFloat(pageStyle.paddingLeft) - parseFloat(pageStyle.paddingRight),
+            scrollHeight: document.documentElement.scrollHeight,
+            innerHeight: window.innerHeight,
+        };
+    });
+    expect(Math.abs(layout.stageWidth - layout.pageInnerWidth), `stage ${layout.stageWidth}px, page ${layout.pageInnerWidth}px`)
+        .toBeLessThanOrEqual(1);
+    expect(layout.scrollHeight, 'the joined page does not scroll').toBeLessThanOrEqual(layout.innerHeight);
+
+    await expect(stage.getByText('LIVE', { exact: true })).toBeVisible();
+    await expect(stage.getByText(`${code.slice(0, 3)}-${code.slice(3)}`, { exact: true })).toBeVisible();
+    const chip = stage.getByRole('button', { name: /^(Good connection|Fair connection|Poor connection|Connected)$/ });
+    await expect(chip).toHaveAttribute('aria-expanded', 'false');
+    await chip.click();
+    await expect(chip).toHaveAttribute('aria-expanded', 'true');
+    const panel = viewerPage.locator('#watchStatusPanel');
+    await expect(panel.getByText('RTT', { exact: true })).toBeVisible();
+    await expect(panel.getByText('WebRTC mode active (lowest latency).', { exact: true })).toBeVisible();
+    await viewerPage.keyboard.press('Escape');
+    await expect(chip).toHaveAttribute('aria-expanded', 'false');
+    await expect(panel).toBeHidden();
+
+    const stageWidth = async () => (await stage.boundingBox()).width;
+    const fullWidth = await stageWidth();
+    await stage.getByRole('button', { name: 'Fit to page' }).click();
+    const fillWindow = stage.getByRole('button', { name: 'Fill window' });
+    await expect(fillWindow).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(stageWidth).toBeLessThanOrEqual(1040);
+    await fillWindow.click();
+    await expect(stage.getByRole('button', { name: 'Fit to page' })).toHaveAttribute('aria-pressed', 'false');
+    await expect.poll(stageWidth).toBeCloseTo(fullWidth, 0);
+
+    const stageBox = await stage.boundingBox();
+    for (const name of ['Mute Audio', 'Fullscreen', 'Leave Room']) {
+        const box = await stage.getByRole('button', { name, exact: true }).boundingBox();
+        expect(box.height, `${name} height`).toBeGreaterThanOrEqual(44);
+        expect(box.x, `${name} inside the stage`).toBeGreaterThanOrEqual(stageBox.x);
+        expect(box.y, `${name} inside the stage`).toBeGreaterThanOrEqual(stageBox.y);
+        expect(box.x + box.width, `${name} inside the stage`).toBeLessThanOrEqual(stageBox.x + stageBox.width);
+        expect(box.y + box.height, `${name} inside the stage`).toBeLessThanOrEqual(stageBox.y + stageBox.height);
+    }
+
+    const controls = stage.locator('.watch-controls');
+    const opacity = () => controls.evaluate((element) => getComputedStyle(element).opacity);
+    await viewerPage.mouse.move(5, 5);
+    await viewerPage.waitForTimeout(4000);
+    expect(await opacity(), 'the bar rests with the pointer away').toBe('0');
+    await viewerPage.mouse.move(stageBox.x + stageBox.width / 2, stageBox.y + stageBox.height / 2);
+    await expect.poll(opacity).toBe('1');
+
+    await viewerPage.mouse.move(5, 5);
+    await viewerPage.waitForTimeout(4000);
+    expect(await opacity()).toBe('0');
+    await stage.getByRole('button', { name: 'Fullscreen', exact: true }).focus();
+    await viewerPage.keyboard.press('Tab');
+    await expect(stage.getByRole('button', { name: 'Leave Room' })).toBeFocused();
+    await viewerPage.waitForTimeout(4000);
+    expect(await opacity(), 'keyboard focus inside the stage keeps the bar').toBe('1');
+
+    await expect(viewerPage.locator('.connection-quality')).toHaveCount(0);
+    await expect(viewerPage.getByRole('status').filter({ hasText: 'WebRTC mode active' }))
+        .toHaveClass(/\bvisually-hidden\b/);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+test('a phone viewer gets three large controls under the picture', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext({ ...devices['Pixel 5'] });
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    const code = await startHost(hostPage);
+    await joinAndWatch(viewerPage, code);
+
+    const stage = viewerPage.locator('.video-container');
+    const pictureBox = await stage.locator('.watch-picture').boundingBox();
+    const buttons = [];
+    for (const name of ['Mute Audio', 'Fullscreen', 'Leave Room']) {
+        buttons.push({ name, box: await stage.getByRole('button', { name, exact: true }).boundingBox() });
+    }
+    for (const { name, box } of buttons) {
+        expect(box.height, `${name} height`).toBeGreaterThanOrEqual(48);
+        expect(box.y, `${name} sits below the picture`).toBeGreaterThanOrEqual(pictureBox.y + pictureBox.height);
+        expect(Math.abs(box.y - buttons[0].box.y), `${name} shares the row`).toBeLessThanOrEqual(1);
+    }
+    expect(buttons[0].box.x).toBeLessThan(buttons[1].box.x);
+    expect(buttons[1].box.x).toBeLessThan(buttons[2].box.x);
+
+    const margins = await viewerPage.evaluate(() => {
+        const box = document.querySelector('.video-container').getBoundingClientRect();
+        const viewportWidth = document.documentElement.clientWidth;
+        return {
+            left: box.left,
+            right: viewportWidth - box.right,
+            scrollWidth: document.documentElement.scrollWidth,
+            viewportWidth,
+        };
+    });
+    expect(Math.abs(margins.left - 16), `left margin ${margins.left}px`).toBeLessThanOrEqual(1);
+    expect(Math.abs(margins.right - 16), `right margin ${margins.right}px`).toBeLessThanOrEqual(1);
+    await expect(viewerPage.getByText('Turn your phone sideways, or press Fullscreen, for a bigger picture.')).toBeVisible();
+    expect(margins.scrollWidth, 'the page does not scroll sideways').toBeLessThanOrEqual(margins.viewportWidth);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+    await viewerContext.close();
+    await hostContext.close();
+});
+
 test('the streaming frame-rate control is a labelled group with programmatic selection', async ({ browser, request }) => {
     const context = await browser.newContext();
     const page = await context.newPage();

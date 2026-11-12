@@ -16,6 +16,8 @@ import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
 import { createLifecycleController } from './lib/lifecycleController.mjs';
 import { useViewerSessionController } from './hooks/useViewerSessionController';
 import UserErrorAlert from './components/UserErrorAlert';
+import StatusPill from './components/StatusPill';
+import { describeViewerStatus } from './lib/viewerStatus.mjs';
 import { normalizeRoomCode, extractRoomCode, formatRoomCode } from './lib/roomCode.mjs';
 import { getLocalStorageSafely, isManualStartRequested, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 import { getSessionStorageSafely, takeJoinIntent } from './lib/joinIntent.mjs';
@@ -42,6 +44,9 @@ import { abandonStaleJoin, createViewerSession, isStaleViewerSessionError } from
 const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, getLocalStorageSafely(window));
 // `?manualStart`: Join Room only joins, and the viewer presses Watch Stream.
 const MANUAL_START = isManualStartRequested(window.location);
+// The control bar on the picture fades this long after the last pointer move,
+// key press or touch on the stage.
+const CONTROLS_REST_MS = 3000;
 
 function mediaDebugLog(...args) {
     if (MEDIA_DEBUG_LOGS) {
@@ -86,6 +91,27 @@ function ackFailure(event, response) {
     return error;
 }
 
+const CONTROL_ICON_PATHS = {
+    sound: ['M11 5 6 9H3v6h3l5 4V5z', 'M15.5 8.5a5 5 0 0 1 0 7', 'M18.5 5.5a9 9 0 0 1 0 13'],
+    muted: ['M11 5 6 9H3v6h3l5 4V5z', 'M16 9l6 6', 'M22 9l-6 6'],
+    fit: ['M3 5h18v14H3z', 'M8 9h8v6H8z'],
+    fill: ['M3 5h18v14H3z', 'M5 12h4M5 12l2-2M5 12l2 2', 'M19 12h-4M19 12l-2-2M19 12l-2 2'],
+    fullscreen: ['M4 9V4h5', 'M20 9V4h-5', 'M4 15v5h5', 'M20 15v5h-5'],
+    exitFullscreen: ['M9 4v5H4', 'M15 4v5h5', 'M9 20v-5H4', 'M15 20v-5h5'],
+    leave: ['M15 17l5-5-5-5', 'M20 12H9', 'M9 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h4'],
+};
+
+// The icons of the viewer's control bar. The button's own text is its name.
+function ControlIcon({ name }) {
+    return (
+        <svg className="watch-icon" width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            {CONTROL_ICON_PATHS[name].map((d) => (
+                <path key={d} d={d} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            ))}
+        </svg>
+    );
+}
+
 
 export default function WatchView({ initialCode = '' }) {
     const socket = useSocket();
@@ -125,8 +151,19 @@ export default function WatchView({ initialCode = '' }) {
     const [whipReconnecting, setWhipReconnecting] = useState(false);
     const [connectionQuality, setConnectionQuality] = useState(null);
     const [isFullscreen, setIsFullscreen] = useState(false);
+    // The control bar on the picture: whether the viewer used the stage in the
+    // last CONTROLS_REST_MS, "Fit to page", the status chip's panel, and a muted
+    // start the browser forced (playVideoElement), which shows "Tap for sound".
+    const [controlsAwake, setControlsAwake] = useState(true);
+    const [isFitToPage, setIsFitToPage] = useState(false);
+    const [statusPanelOpen, setStatusPanelOpen] = useState(false);
+    const [soundBlocked, setSoundBlocked] = useState(false);
 
     const videoRef = useRef(null);
+    const stageRef = useRef(null);
+    const controlsTimerRef = useRef(null);
+    const statusChipRef = useRef(null);
+    const statusPanelRef = useRef(null);
     const passphraseInputRef = useRef(null);
     const deviceRef = useRef(null);
     const recvTransportRef = useRef(null);
@@ -193,10 +230,14 @@ export default function WatchView({ initialCode = '' }) {
         if (passphraseRequired) passphraseInputRef.current?.focus();
     }, [passphraseRequired, passphraseRejected]);
 
+    // The stage is what goes full screen, so the control bar stays with the
+    // picture; the <video> itself only where the stage cannot (see
+    // handleToggleFullscreen).
     useEffect(() => {
         const syncFullscreen = () => {
             const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
-            setIsFullscreen(fullscreenElement === videoRef.current);
+            setIsFullscreen(Boolean(fullscreenElement)
+                && (fullscreenElement === stageRef.current || fullscreenElement === videoRef.current));
         };
         document.addEventListener('fullscreenchange', syncFullscreen);
         document.addEventListener('webkitfullscreenchange', syncFullscreen);
@@ -205,6 +246,54 @@ export default function WatchView({ initialCode = '' }) {
             document.removeEventListener('webkitfullscreenchange', syncFullscreen);
         };
     }, []);
+
+    const handleToggleFullscreen = useCallback(async () => {
+        const stage = stageRef.current;
+        const player = videoRef.current;
+        if (!stage || !player) return;
+        try {
+            if (isFullscreen) {
+                if (document.exitFullscreen) await document.exitFullscreen();
+                else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
+            } else if (stage.requestFullscreen) await stage.requestFullscreen();
+            else if (stage.webkitRequestFullscreen) await stage.webkitRequestFullscreen();
+            else if (player.requestFullscreen) await player.requestFullscreen();
+            else if (player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
+            else if (player.msRequestFullscreen) await player.msRequestFullscreen();
+        } catch (err) {
+            setError(err);
+        }
+    }, [isFullscreen]);
+
+    // A pointer move, key press or touch on the stage shows the control bar for
+    // CONTROLS_REST_MS. Only the first one after a rest re-renders.
+    const wakeControls = useCallback(() => {
+        setControlsAwake(true);
+        clearTimeout(controlsTimerRef.current);
+        controlsTimerRef.current = setTimeout(() => setControlsAwake(false), CONTROLS_REST_MS);
+    }, []);
+
+    useEffect(() => () => clearTimeout(controlsTimerRef.current), []);
+
+    // The status chip's panel closes on Escape and on a press anywhere else.
+    useEffect(() => {
+        if (!statusPanelOpen) return undefined;
+        const onPointerDown = (evt) => {
+            if (statusPanelRef.current?.contains(evt.target) || statusChipRef.current?.contains(evt.target)) return;
+            setStatusPanelOpen(false);
+        };
+        const onKeyDown = (evt) => {
+            if (evt.key !== 'Escape') return;
+            setStatusPanelOpen(false);
+            statusChipRef.current?.focus();
+        };
+        document.addEventListener('pointerdown', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('pointerdown', onPointerDown);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [statusPanelOpen]);
 
     const cleanupPlayback = useViewerSessionController({
         socket,
@@ -255,6 +344,7 @@ export default function WatchView({ initialCode = '' }) {
         } catch (err) {
             if (err?.name === 'NotAllowedError' && isCurrent() && videoRef.current) {
                 syncMutedState(true);
+                setSoundBlocked(true);
                 try {
                     await videoRef.current.play();
                 } catch {
@@ -1785,19 +1875,33 @@ export default function WatchView({ initialCode = '' }) {
                         ? 'OBS WebRTC mode active (lowest latency).'
                         : 'WebRTC mode active (lowest latency).'
                     : '';
+    // A picture is on the screen: the LIVE badge shows, and the control bar may rest.
+    const pictureLive = (watching && !hostPictureStopped && !hostReconnectingReason)
+        || (fallbackMode && fallbackState === 'playing');
+    const viewerStatus = describeViewerStatus({
+        watching,
+        playbackMode,
+        fallbackMode,
+        fallbackState,
+        quality: connectionQuality?.quality,
+        pictureInterrupted: hostPictureStopped,
+    });
+    const statusPanelShown = statusPanelOpen && Boolean(viewerStatus);
+    const controlsShown = !pictureLive || controlsAwake || statusPanelShown;
+    const playing = watching || fallbackMode;
+    const showSoundChip = soundBlocked && isMuted && playing;
+    const hasStageNotice = Boolean(error) || whipReconnecting
+        || (ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported);
+
+    // Once a picture shows, the bar rests CONTROLS_REST_MS after the last input.
+    useEffect(() => {
+        if (!pictureLive) return undefined;
+        const wake = setTimeout(wakeControls, 0);
+        return () => clearTimeout(wake);
+    }, [pictureLive, wakeControls]);
+
     return (
-        <div className="view-container">
-            {joined && (
-                <>
-                    <div className="view-header">
-                        <h1>Watch</h1>
-                        <p className="subtitle">Join a room to watch a stream</p>
-                    </div>
-
-                    <UserErrorAlert error={error} id="watchError" />
-                </>
-            )}
-
+        <div className={joined ? 'view-container watch-live' : 'view-container'}>
             {!joined ? (
                 <div className="join-form join-card">
                     <h1>{passphraseRequired ? 'This room has a passphrase' : 'Join a stream'}</h1>
@@ -1913,163 +2017,246 @@ export default function WatchView({ initialCode = '' }) {
                 </div>
             ) : (
                 <>
-                    <div className="video-container watch-video">
-                        <video
-                            ref={videoRef}
-                            className="video-player"
-                            controls
-                            autoPlay
-                            playsInline
-                            muted={isMuted}
-                            onPlay={() => { userPausedRef.current = false; }}
-                            onPause={() => { userPausedRef.current = true; }}
-                            onVolumeChange={(evt) => setIsMuted(evt.target.muted)}
-                        />
+                    <div
+                        ref={stageRef}
+                        className={[
+                            'video-container watch-video',
+                            isFitToPage && 'is-fit',
+                            controlsShown && 'controls-shown',
+                        ].filter(Boolean).join(' ')}
+                        onPointerMove={wakeControls}
+                        onPointerDown={wakeControls}
+                        onKeyDown={wakeControls}
+                    >
+                        <div className="watch-picture">
+                            <video
+                                ref={videoRef}
+                                className="video-player"
+                                autoPlay
+                                playsInline
+                                muted={isMuted}
+                                onPlay={() => { userPausedRef.current = false; }}
+                                onPause={() => { userPausedRef.current = true; }}
+                                onVolumeChange={(evt) => setIsMuted(evt.target.muted)}
+                            />
 
-                        {!watching && !hostDisconnected && !fallbackMode && (
-                            <div className="video-overlay">
-                                {hasProducer && !MANUAL_START && (autoStartArmed || watchLoading) ? (
-                                    <p className="video-overlay-status" role="status">
-                                        <span className="spinner" aria-hidden="true" />
-                                        Starting the picture…
+                            {!watching && !hostDisconnected && !fallbackMode && (
+                                <div className="video-overlay">
+                                    {hasProducer && !MANUAL_START && (autoStartArmed || watchLoading) ? (
+                                        <p className="video-overlay-status" role="status">
+                                            <span className="spinner" aria-hidden="true" />
+                                            Starting the picture…
+                                        </p>
+                                    ) : hasProducer ? (
+                                        <button
+                                            className="btn btn-primary btn-large pulse"
+                                            onClick={handleWatch}
+                                            disabled={watchLoading}
+                                        >
+                                            {watchLoading ? 'Connecting...' : 'Watch Stream'}
+                                        </button>
+                                    ) : MANUAL_START ? (
+                                        <>
+                                            <p>Waiting for host to start sharing...</p>
+                                            <p className="video-overlay-sub">
+                                                You&apos;re in room {formatRoomCode(joinedRoomCode)}.
+                                                A <strong>Watch Stream</strong> button appears here once the host&apos;s media starts.
+                                            </p>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <p>Waiting for host to start sharing...</p>
+                                            <p className="video-overlay-sub">
+                                                You&apos;re in room {formatRoomCode(joinedRoomCode)}. The stream starts here by itself.
+                                            </p>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+
+                            {hostReconnectingReason && !hostDisconnected && (
+                                <div className="video-overlay">
+                                    <p>{hostReconnectingReason}</p>
+                                </div>
+                            )}
+
+                            {hostPictureStopped && !hostReconnectingReason && !hostDisconnected && (
+                                <div className="video-overlay" role="status">
+                                    <p>The host dropped out</p>
+                                    <p className="video-overlay-sub">
+                                        Waiting for the picture to come back. You don&apos;t need to do anything.
                                     </p>
-                                ) : hasProducer ? (
-                                    <button
-                                        className="btn btn-primary btn-large pulse"
-                                        onClick={handleWatch}
-                                        disabled={watchLoading}
-                                    >
-                                        {watchLoading ? 'Connecting...' : 'Watch Stream'}
-                                    </button>
-                                ) : MANUAL_START ? (
-                                    <>
-                                        <p>Waiting for host to start sharing...</p>
-                                        <p className="video-overlay-sub">
-                                            You&apos;re in room {formatRoomCode(joinedRoomCode)}.
-                                            A <strong>Watch Stream</strong> button appears here once the host&apos;s media starts.
-                                        </p>
-                                    </>
-                                ) : (
-                                    <>
-                                        <p>Waiting for host to start sharing...</p>
-                                        <p className="video-overlay-sub">
-                                            You&apos;re in room {formatRoomCode(joinedRoomCode)}. The stream starts here by itself.
-                                        </p>
-                                    </>
+                                </div>
+                            )}
+
+                            {hostDisconnected && (
+                                <div className="video-overlay">
+                                    <p className="host-ended">
+                                        This room has ended
+                                    </p>
+                                </div>
+                            )}
+
+                            {(hasStageNotice || mediaControlStatus || showSoundChip) && (
+                                <div className="watch-top">
+                                    {hasStageNotice && (
+                                        <div className="watch-notices">
+                                            <UserErrorAlert error={error} id="watchError" />
+
+                                            {whipReconnecting && (
+                                                <div className="alert alert-warning" role="status">
+                                                    OBS disconnected — waiting for reconnection...
+                                                </div>
+                                            )}
+
+                                            {ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported && (
+                                                <div className="alert alert-error" role="alert">
+                                                    This browser&apos;s WebRTC receive capabilities do not include video/AV1. This AV1 room has no relay fallback.
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {mediaControlStatus && (
+                                        <div className="media-status watch-control-status" role="status">{mediaControlStatus}</div>
+                                    )}
+
+                                    {showSoundChip && (
+                                        <button
+                                            type="button"
+                                            className="watch-sound-chip"
+                                            onClick={() => {
+                                                setSoundBlocked(false);
+                                                syncMutedState(false);
+                                            }}
+                                        >
+                                            <ControlIcon name="sound" />
+                                            Tap for sound
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="watch-controls">
+                            <div className="watch-controls-info">
+                                {pictureLive && <span className="watch-live-badge">LIVE</span>}
+                                <span className="watch-room-code" title="Room code">{formatRoomCode(joinedRoomCode)}</span>
+                                {viewerStatus && (
+                                    <div className="watch-status">
+                                        <button
+                                            ref={statusChipRef}
+                                            type="button"
+                                            className="watch-status-chip"
+                                            aria-expanded={statusPanelShown}
+                                            aria-controls="watchStatusPanel"
+                                            onClick={() => setStatusPanelOpen(!statusPanelShown)}
+                                        >
+                                            <StatusPill tone={viewerStatus.tone}>{viewerStatus.label}</StatusPill>
+                                        </button>
+                                        <div
+                                            ref={statusPanelRef}
+                                            id="watchStatusPanel"
+                                            className="watch-status-panel"
+                                            hidden={!statusPanelShown}
+                                        >
+                                            {statusPanelShown && (
+                                                <>
+                                                    {connectionQuality && (
+                                                        <dl className="watch-status-numbers">
+                                                            <div>
+                                                                <dt>RTT</dt>
+                                                                <dd>{connectionQuality.rttMs == null ? 'n/a' : `${connectionQuality.rttMs.toFixed(0)} ms`}</dd>
+                                                            </div>
+                                                            <div>
+                                                                <dt>Jitter</dt>
+                                                                <dd>{connectionQuality.jitterMs == null ? 'n/a' : `${connectionQuality.jitterMs.toFixed(1)} ms`}</dd>
+                                                            </div>
+                                                            <div>
+                                                                <dt>Packets lost</dt>
+                                                                <dd>{connectionQuality.packetsLost}</dd>
+                                                            </div>
+                                                        </dl>
+                                                    )}
+                                                    {playbackStatus && <p className="watch-status-sentence">{playbackStatus}</p>}
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
                                 )}
                             </div>
-                        )}
 
-                        {hostReconnectingReason && !hostDisconnected && (
-                            <div className="video-overlay">
-                                <p>{hostReconnectingReason}</p>
-                            </div>
-                        )}
+                            <div className="watch-controls-actions">
+                                {playing && allowMediaControl && (
+                                    <button className="btn btn-secondary watch-btn" type="button" onClick={handleToggleMedia}>
+                                        Play/Pause Host Media
+                                    </button>
+                                )}
 
-                        {hostPictureStopped && !hostReconnectingReason && !hostDisconnected && (
-                            <div className="video-overlay" role="status">
-                                <p>The host dropped out</p>
-                                <p className="video-overlay-sub">
-                                    Waiting for the picture to come back. You don&apos;t need to do anything.
-                                </p>
-                            </div>
-                        )}
+                                {watching && !fallbackMode && playbackMode === 'mediasoup' && ingestMode === 'obs' && relayAllowed && !codecUnsupported && (
+                                    <button className="btn btn-secondary watch-btn" type="button" onClick={enterFallbackMode}>
+                                        Switch to Relay Mode
+                                    </button>
+                                )}
+                                {fallbackMode && (
+                                    <button className="btn btn-secondary watch-btn" type="button" onClick={handleTryMediasoup} disabled={watchLoading}>
+                                        Try WebRTC
+                                    </button>
+                                )}
 
-                        {hostDisconnected && (
-                            <div className="video-overlay">
-                                <p className="host-ended">
-                                    This room has ended
-                                </p>
+                                {playing && (
+                                    <button
+                                        className="btn btn-secondary watch-btn watch-btn-icon watch-btn-main"
+                                        type="button"
+                                        title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+                                        onClick={() => {
+                                            if (!videoRef.current) return;
+                                            setSoundBlocked(false);
+                                            syncMutedState(!videoRef.current.muted);
+                                        }}
+                                    >
+                                        <ControlIcon name={isMuted ? 'muted' : 'sound'} />
+                                        <span className="watch-btn-text">{isMuted ? 'Unmute Audio' : 'Mute Audio'}</span>
+                                    </button>
+                                )}
+
+                                <button
+                                    className="btn btn-secondary watch-btn watch-btn-icon watch-btn-fit"
+                                    type="button"
+                                    aria-pressed={isFitToPage}
+                                    title={isFitToPage ? 'Fill window' : 'Fit to page'}
+                                    onClick={() => setIsFitToPage(!isFitToPage)}
+                                >
+                                    <ControlIcon name={isFitToPage ? 'fill' : 'fit'} />
+                                    <span className="watch-btn-text">{isFitToPage ? 'Fill window' : 'Fit to page'}</span>
+                                </button>
+
+                                {playing && (
+                                    <button
+                                        className="btn btn-secondary watch-btn watch-btn-icon watch-btn-main"
+                                        type="button"
+                                        aria-pressed={isFullscreen}
+                                        title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                                        onClick={handleToggleFullscreen}
+                                    >
+                                        <ControlIcon name={isFullscreen ? 'exitFullscreen' : 'fullscreen'} />
+                                        <span className="watch-btn-text">{isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}</span>
+                                    </button>
+                                )}
+
+                                <button className="btn btn-secondary watch-btn watch-btn-main" type="button" onClick={handleLeave}>
+                                    <ControlIcon name="leave" />
+                                    <span>Leave Room</span>
+                                </button>
                             </div>
-                        )}
+
+                            <p className="watch-turn-hint">
+                                Turn your phone sideways, or press Fullscreen, for a bigger picture.
+                            </p>
+                        </div>
                     </div>
 
-                    {whipReconnecting && (
-                        <div className="alert alert-warning" role="status">
-                            OBS disconnected — waiting for reconnection...
-                        </div>
-                    )}
-
-                    {ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported && (
-                        <div className="alert alert-error" role="alert">
-                            This browser&apos;s WebRTC receive capabilities do not include video/AV1. This AV1 room has no relay fallback.
-                        </div>
-                    )}
-
-                    <div className="controls">
-                        {(watching || fallbackMode) && (
-                            <button
-                                className={`btn ${isMuted ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => {
-                                    if (!videoRef.current) return;
-                                    syncMutedState(!videoRef.current.muted);
-                                }}
-                            >
-                                {isMuted ? 'Unmute Audio' : 'Mute Audio'}
-                            </button>
-                        )}
-
-                        {(watching || fallbackMode) && allowMediaControl && (
-                            <button className="btn btn-secondary" onClick={handleToggleMedia}>
-                                Play/Pause Host Media
-                            </button>
-                        )}
-
-                        {(watching || fallbackMode) && (
-                            <button
-                                className="btn btn-primary"
-                                type="button"
-                                aria-pressed={isFullscreen}
-                                onClick={async () => {
-                                    const player = videoRef.current;
-                                    if (!player) return;
-                                    try {
-                                        if (isFullscreen) {
-                                            if (document.exitFullscreen) await document.exitFullscreen();
-                                            else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
-                                        } else if (player.requestFullscreen) await player.requestFullscreen();
-                                        else if (player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
-                                        else if (player.msRequestFullscreen) await player.msRequestFullscreen();
-                                    } catch (err) {
-                                        setError(err);
-                                    }
-                                }}
-                            >
-                                {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-                            </button>
-                        )}
-
-                        {watching && !fallbackMode && playbackMode === 'mediasoup' && ingestMode === 'obs' && relayAllowed && !codecUnsupported && (
-                            <button className="btn btn-secondary" onClick={enterFallbackMode}>
-                                Switch to Relay Mode
-                            </button>
-                        )}
-                        {fallbackMode && (
-                            <button className="btn btn-primary" onClick={handleTryMediasoup} disabled={watchLoading}>
-                                Try WebRTC
-                            </button>
-                        )}
-
-                        <button className="btn btn-outline" onClick={handleLeave}>
-                            Leave Room
-                        </button>
-
-                    </div>
-
-                    {playbackStatus && <div className="media-status" role="status">{playbackStatus}</div>}
-
-                    {connectionQuality && (
-                        <details className="connection-quality">
-                            <summary>Connection quality: {connectionQuality.quality}</summary>
-                            <span>RTT {connectionQuality.rttMs == null ? 'n/a' : `${connectionQuality.rttMs.toFixed(0)} ms`}</span>
-                            <span>Jitter {connectionQuality.jitterMs == null ? 'n/a' : `${connectionQuality.jitterMs.toFixed(1)} ms`}</span>
-                            <span>Packets lost {connectionQuality.packetsLost}</span>
-                        </details>
-                    )}
-
-                    {mediaControlStatus && (
-                        <div className="media-status" role="status">{mediaControlStatus}</div>
-                    )}
+                    {playbackStatus && <div className="media-status visually-hidden" role="status">{playbackStatus}</div>}
                 </>
             )}
         </div>

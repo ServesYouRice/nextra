@@ -661,9 +661,9 @@ for (const { width, height } of [{ width: 1440, height: 900 }, { width: 1366, he
             await page.getByRole('button', { name: 'Join Room' }).click();
             await expect(page.locator('.watch-video')).toBeVisible();
             const watch = await stageWidths(page);
-            // .watch-video brings its own 19rem of chrome and no width cap.
+            // .watch-video keeps only 7rem free, for the top bar and its padding, and has no width cap.
             expect(watch.stage.width, `watch at ${width}x${height}`)
-                .toBeCloseTo(stageWidthWithoutFloor(watch, { chromeRem: 19 }), 0);
+                .toBeCloseTo(stageWidthWithoutFloor(watch, { chromeRem: 7 }), 0);
             expect(watch.stage.width).toBeGreaterThan(STAGE_MIN_WIDTH_PX);
             expect(watch.stage.width, `watch share at ${width}x${height}`)
                 .toBeGreaterThan(watch.containerWidth * 0.6);
