@@ -10,7 +10,7 @@ import UserErrorAlert from './components/UserErrorAlert';
 import RoomSharePanel from './components/RoomSharePanel';
 import { useHostSessionController } from './hooks/useHostSessionController';
 import { getLocalStorageSafely, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
-import { evaluateHostPreflight } from './lib/hostPreflight.mjs';
+import { evaluateHostPreflight, deviceCannotShare } from './lib/hostPreflight.mjs';
 import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
 import { setNavigationGuard } from './lib/navigationGuard.mjs';
 import { RELOAD_PRESERVE, createStartAttempt, startOperationGuardFor } from './lib/startOperationGuard.mjs';
@@ -631,6 +631,13 @@ export default function HostView() {
     const [saveByokTurnForSession, setSaveByokTurnForSession] = useState(() => storedByokTurnSession != null);
     const [showByokTurnModal, setShowByokTurnModal] = useState(false);
     const [hostToken, setHostToken] = useState('');
+    // Read once: a touch device whose browser cannot capture a screen is told so
+    // up front instead of being shown host controls that cannot work.
+    const [cannotShare] = useState(() => deviceCannotShare({
+        captureApiAvailable: typeof navigator.mediaDevices?.getDisplayMedia === 'function',
+        coarsePointer: typeof window.matchMedia === 'function'
+            && window.matchMedia('(pointer: coarse)').matches,
+    }));
 
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -2313,6 +2320,37 @@ export default function HostView() {
             />
         </>
     );
+
+    if (cannotShare) {
+        return (
+            <div className="view-container">
+                <div className="view-header">
+                    <h1>Host</h1>
+                    <p className="subtitle">Share your screen with viewers</p>
+                </div>
+                <div className="cannot-share">
+                    <svg
+                        width="48"
+                        height="48"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                    >
+                        <rect x="3" y="4" width="18" height="12" rx="2" />
+                        <path d="M2 20h20" />
+                    </svg>
+                    <h2>Sharing needs a computer</h2>
+                    <p>Phone and tablet browsers can't capture the screen. Open Nextra on a laptop or desktop to share.</p>
+                    <a className="btn btn-primary btn-main" href="#watch">Watch a stream instead</a>
+                    <a className="btn btn-outline" href="#how-to">How to Use</a>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="view-container">

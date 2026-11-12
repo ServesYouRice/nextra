@@ -2798,6 +2798,40 @@ input.select-input {
   margin-top: 0.5rem;
 }
 
+/* Host page on a touch device that cannot capture a screen. */
+.cannot-share {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  max-width: 26rem;
+  margin: 8vh auto 0;
+  padding: 0 16px;
+  text-align: center;
+}
+
+.cannot-share h2 {
+  font-size: var(--fs-heading);
+}
+
+.cannot-share p {
+  font-size: var(--fs-body);
+  color: var(--text-2);
+}
+
+.cannot-share .btn {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 640px) {
+  .cannot-share .btn {
+    width: 100%;
+  }
+}
+
 .center-page-code {
   font-family: var(--font-mono);
   font-size: 0.75rem;
