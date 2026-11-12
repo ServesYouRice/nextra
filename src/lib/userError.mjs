@@ -4,7 +4,7 @@ const FAILURE_ADVICE = [
         action: 'The request was cancelled. Try the action again.',
     },
     {
-        matches: (message) => /screen sharing was cancelled|failed to start sharing|getdisplaymedia|notallowederror/i.test(message),
+        matches: (message) => /screen sharing was cancelled|getdisplaymedia|notallowederror/i.test(message),
         action: 'Choose a screen or window, allow sharing, and try again.',
     },
     {
