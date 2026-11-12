@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback, useEffectEvent } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useEffectEvent } from 'react';
 import { useSocket } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { createFmp4RelayPlayer } from './lib/fmp4RelayPlayer';
@@ -112,6 +112,28 @@ function ControlIcon({ name }) {
     );
 }
 
+// Copies the frame the <video> shows now onto the stage's last-frame canvas, so
+// the picture stays, dimmed, behind "The host dropped out" once its track is
+// gone. A <video> with no frame leaves an earlier copy as it is. Never throws:
+// it runs inside the socket handlers.
+function drawLastFrame(video, canvas) {
+    try {
+        if (!video || !canvas || !(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
+    } catch (err) {
+        console.warn('[Nextra] Could not keep the last picture:', err?.message);
+        clearLastFrame(canvas);
+    }
+}
+
+// A canvas 0 wide holds no frame and is not shown (see .watch-last-frame).
+function clearLastFrame(canvas) {
+    if (!canvas) return;
+    canvas.width = 0;
+    canvas.height = 0;
+}
 
 export default function WatchView({ initialCode = '' }) {
     const socket = useSocket();
@@ -124,6 +146,8 @@ export default function WatchView({ initialCode = '' }) {
     const [unknownRoom, setUnknownRoom] = useState(false);
     const codeInputRef = useRef(null);
     const [hostDisconnected, setHostDisconnected] = useState(false);
+    // The server's reason the room ended, or '' when it gave none.
+    const [roomEndedReason, setRoomEndedReason] = useState('');
     const [hostReconnectingReason, setHostReconnectingReason] = useState('');
     const [pictureInterrupted, setPictureInterrupted] = useState(false); // WebRTC viewer whose video producer closed
     const [mediaControlStatus, setMediaControlStatus] = useState('');
@@ -160,6 +184,7 @@ export default function WatchView({ initialCode = '' }) {
     const [soundBlocked, setSoundBlocked] = useState(false);
 
     const videoRef = useRef(null);
+    const lastFrameRef = useRef(null);
     const stageRef = useRef(null);
     const controlsTimerRef = useRef(null);
     const statusChipRef = useRef(null);
@@ -1007,11 +1032,13 @@ export default function WatchView({ initialCode = '' }) {
             setFallbackState(null);
             setWhipReconnecting(false);
             setHostDisconnected(true);
+            setRoomEndedReason(reason || '');
             setError(reason || 'This room ended. Leave it and join a new room to continue.');
         };
 
         const onHostDisconnected = ({ reason, recoverable } = {}) => {
             if (recoverable) {
+                drawLastFrame(videoRef.current, lastFrameRef.current);
                 setHostReconnectingReason(reason || 'Host reconnecting...');
                 return;
             }
@@ -1060,6 +1087,8 @@ export default function WatchView({ initialCode = '' }) {
             console.log('Producer closed for consumer:', consumerId);
             const closed = consumersRef.current.find((consumer) => consumer.id === consumerId);
             if (!closed) return;
+            // Before the track goes: the stream rebuilt without it has no frame.
+            if (closed.kind === 'video') drawLastFrame(videoRef.current, lastFrameRef.current);
             try { closed.close(); } catch { }
             try { closed.track?.stop(); } catch { }
             consumersRef.current = consumersRef.current.filter((consumer) => consumer.id !== consumerId);
@@ -1890,8 +1919,20 @@ export default function WatchView({ initialCode = '' }) {
     const controlsShown = !pictureLive || controlsAwake || statusPanelShown;
     const playing = watching || fallbackMode;
     const showSoundChip = soundBlocked && isMuted && playing;
-    const hasStageNotice = Boolean(error) || whipReconnecting
+    // An ended room says why in its own overlay, so the notice stack leaves it out.
+    const hasStageNotice = (Boolean(error) && !hostDisconnected) || whipReconnecting
         || (ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported);
+    const pictureStarting = hasProducer && !MANUAL_START && (autoStartArmed || watchLoading);
+    // Either "The host dropped out" overlay is on screen, over the last picture.
+    const hostDroppedOut = !hostDisconnected && (Boolean(hostReconnectingReason) || hostPictureStopped);
+
+    // The last picture goes once neither overlay is up: the picture is back,
+    // the room ended or playback stopped. In the commit, not after it: a
+    // reconnected host's producer-closed often follows within milliseconds and
+    // draws again, which a passive effect still pending would wipe.
+    useLayoutEffect(() => {
+        if (!hostDroppedOut) clearLastFrame(lastFrameRef.current);
+    }, [hostDroppedOut]);
 
     // Once a picture shows, the bar rests CONTROLS_REST_MS after the last input.
     useEffect(() => {
@@ -2040,16 +2081,30 @@ export default function WatchView({ initialCode = '' }) {
                                 onVolumeChange={(evt) => setIsMuted(evt.target.muted)}
                             />
 
+                            {/* The last picture behind "The host dropped out"; drawn by
+                                drawLastFrame, empty (0 wide) otherwise. */}
+                            <canvas
+                                ref={lastFrameRef}
+                                className="watch-last-frame"
+                                aria-hidden="true"
+                                width={0}
+                                height={0}
+                                hidden={!hostDroppedOut}
+                            />
+
                             {!watching && !hostDisconnected && !fallbackMode && (
-                                <div className="video-overlay">
-                                    {hasProducer && !MANUAL_START && (autoStartArmed || watchLoading) ? (
-                                        <p className="video-overlay-status" role="status">
+                                <div
+                                    className="video-overlay watch-state"
+                                    role={hasProducer && !pictureStarting ? undefined : 'status'}
+                                >
+                                    {pictureStarting ? (
+                                        <p className="video-overlay-status watch-state-title">
                                             <span className="spinner" aria-hidden="true" />
                                             Starting the picture…
                                         </p>
                                     ) : hasProducer ? (
                                         <button
-                                            className="btn btn-primary btn-large pulse"
+                                            className="btn btn-primary btn-main"
                                             onClick={handleWatch}
                                             disabled={watchLoading}
                                         >
@@ -2057,16 +2112,16 @@ export default function WatchView({ initialCode = '' }) {
                                         </button>
                                     ) : MANUAL_START ? (
                                         <>
-                                            <p>Waiting for host to start sharing...</p>
-                                            <p className="video-overlay-sub">
+                                            <p className="watch-state-title">Waiting for the host</p>
+                                            <p className="watch-state-sub">
                                                 You&apos;re in room {formatRoomCode(joinedRoomCode)}.
                                                 A <strong>Watch Stream</strong> button appears here once the host&apos;s media starts.
                                             </p>
                                         </>
                                     ) : (
                                         <>
-                                            <p>Waiting for host to start sharing...</p>
-                                            <p className="video-overlay-sub">
+                                            <p className="watch-state-title">Waiting for the host</p>
+                                            <p className="watch-state-sub">
                                                 You&apos;re in room {formatRoomCode(joinedRoomCode)}. The stream starts here by itself.
                                             </p>
                                         </>
@@ -2075,25 +2130,39 @@ export default function WatchView({ initialCode = '' }) {
                             )}
 
                             {hostReconnectingReason && !hostDisconnected && (
-                                <div className="video-overlay">
-                                    <p>{hostReconnectingReason}</p>
+                                <div className="video-overlay watch-state" role="status">
+                                    <p className="watch-state-title">The host dropped out</p>
+                                    <p className="watch-state-sub">
+                                        Trying to reconnect. You don&apos;t need to do anything.
+                                    </p>
                                 </div>
                             )}
 
                             {hostPictureStopped && !hostReconnectingReason && !hostDisconnected && (
-                                <div className="video-overlay" role="status">
-                                    <p>The host dropped out</p>
-                                    <p className="video-overlay-sub">
+                                <div className="video-overlay watch-state" role="status">
+                                    <p className="watch-state-title">The host dropped out</p>
+                                    <p className="watch-state-sub">
                                         Waiting for the picture to come back. You don&apos;t need to do anything.
                                     </p>
                                 </div>
                             )}
 
+                            {/* Ending is normal: no red, and two ways forward. The title is
+                                the page's one alert, with the server's reason. */}
                             {hostDisconnected && (
-                                <div className="video-overlay">
-                                    <p className="host-ended">
-                                        This room has ended
+                                <div className="video-overlay watch-state">
+                                    <p className="watch-state-title" role="alert" id="watchError">
+                                        {roomEndedReason || 'This room has ended'}
                                     </p>
+                                    {roomEndedReason && (
+                                        <p className="watch-state-sub">This room has ended.</p>
+                                    )}
+                                    <div className="watch-state-actions">
+                                        <button className="btn btn-primary btn-main" type="button" onClick={handleLeave}>
+                                            Join another room
+                                        </button>
+                                        <a href="#" className="btn btn-outline">Home</a>
+                                    </div>
                                 </div>
                             )}
 
@@ -2101,7 +2170,7 @@ export default function WatchView({ initialCode = '' }) {
                                 <div className="watch-top">
                                     {hasStageNotice && (
                                         <div className="watch-notices">
-                                            <UserErrorAlert error={error} id="watchError" />
+                                            {!hostDisconnected && <UserErrorAlert error={error} id="watchError" />}
 
                                             {whipReconnecting && (
                                                 <div className="alert alert-warning" role="status">

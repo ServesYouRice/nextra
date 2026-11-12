@@ -1227,6 +1227,69 @@ test('a viewer is told when the host\'s picture stops and sees it return after R
     await hostContext.close();
 });
 
+test('a viewer is told what is happening while waiting, when the host drops out and when the stream ends', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const waitingContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    const waitingPage = await waitingContext.newPage();
+
+    await installDeterministicDisplayCapture(hostPage);
+    await hostPage.goto('/#host');
+    await hostPage.getByLabel('Allow recovery after reload').check();
+    await hostPage.getByRole('button', { name: 'Start Sharing' }).click();
+    await expect(hostPage.getByText(/Streaming \(/)).toBeVisible();
+    const code = await readRoomCode(hostPage);
+    await joinAndWatch(viewerPage, code);
+
+    // The host drops out: the last picture stays behind the message, which is
+    // a status, not an error.
+    await hostPage.reload();
+    await expect(viewerPage.getByText('The host dropped out')).toBeVisible({ timeout: 15_000 });
+    const lastFrame = viewerPage.locator('.watch-last-frame');
+    await expect(lastFrame).toBeVisible();
+    expect(await lastFrame.evaluate((canvas) => canvas.width)).toBeGreaterThan(0);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+
+    // A viewer who joins now waits for the host, told so in readable text.
+    await waitingPage.goto(`/#watch/${code}`);
+    await waitingPage.getByRole('button', { name: 'Join Room' }).click();
+    const waitingTitle = waitingPage.getByText('Waiting for the host', { exact: true });
+    await expect(waitingTitle).toBeVisible();
+    expect(await waitingTitle.evaluate((element) => getComputedStyle(element).color)).toBe('rgb(236, 236, 240)');
+    const waitingSub = waitingPage.locator('.watch-state-sub');
+    await expect(waitingSub).toContainText(`${code.slice(0, 3)}-${code.slice(3)}`);
+    await expect(waitingSub).toContainText('The stream starts here by itself.');
+
+    await hostPage.getByRole('button', { name: 'Resume Sharing' }).click();
+    await expect(hostPage.getByText(/Streaming \(/)).toBeVisible();
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
+    await expect(waitingPage.getByText(/WebRTC mode active/)).toBeVisible();
+    await expect(lastFrame).toBeHidden();
+
+    // The stream ends: calm, with two ways forward.
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    const ended = viewerPage.getByRole('alert');
+    await expect(ended).toHaveText('Host stopped sharing');
+    expect(await ended.evaluate((element) => getComputedStyle(element).color)).toBe('rgb(236, 236, 240)');
+    await expect(viewerPage.locator('.alert-error')).toHaveCount(0);
+    await expect(viewerPage.getByText(/This room has ended/)).toBeVisible();
+    await viewerPage.getByRole('button', { name: 'Join another room' }).click();
+    await expect(viewerPage.getByRole('button', { name: 'Join Room' })).toBeVisible();
+
+    await waitingPage.getByRole('link', { name: 'Home', exact: true }).click();
+    await expect(waitingPage).toHaveTitle('Nextra — Self-hosted screen sharing');
+
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+
+    await waitingContext.close();
+    await viewerContext.close();
+    await hostContext.close();
+});
+
 test('delayed relay-first viewers select one fresh recorder generation and clean up after rejoin', async ({ browser, request }, testInfo) => {
     const hostContext = await browser.newContext();
     const firstViewerContext = await browser.newContext();

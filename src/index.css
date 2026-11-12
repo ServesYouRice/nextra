@@ -2070,6 +2070,52 @@ input.select-input {
   }
 }
 
+/* The picture's states (starting, waiting for the host, the host dropped out,
+   ended): a readable title, one plain line and, where there is one, the next
+   step. They sit on .video-overlay, which dims what is behind them. */
+.watch-state-title {
+  margin: 0;
+  font-size: var(--fs-heading);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.watch-state-sub {
+  margin: 0;
+  max-width: 28rem;
+  font-size: var(--fs-small);
+  color: var(--text-2);
+}
+
+.watch-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+/* The last picture, kept behind "The host dropped out": above the <video>,
+   under the overlays. A canvas 0 wide holds no frame and stays out of sight. */
+.watch-last-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.watch-last-frame[hidden],
+.watch-last-frame[width="0"] {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .watch-state-title {
+    font-size: var(--fs-body);
+  }
+}
+
 /* ========== HOST LAYOUT ==========
    One column on a phone or tablet: tabs, preview, settings panel, alerts,
    diagnostics. From 900px the preview and the settings panel sit side by side
