@@ -8,11 +8,13 @@ import Modal from './components/Modal';
 import HostDiagnostics from './components/HostDiagnostics';
 import UserErrorAlert from './components/UserErrorAlert';
 import RoomSharePanel from './components/RoomSharePanel';
+import HostSignInPanel from './components/HostSignInPanel';
 import { useHostSessionController } from './hooks/useHostSessionController';
 import { getLocalStorageSafely, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 import { evaluateHostPreflight, deviceCannotShare } from './lib/hostPreflight.mjs';
 import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
 import { setNavigationGuard } from './lib/navigationGuard.mjs';
+import { ASSUMED_OPERATOR_ACCESS, fetchHostConfig, readOperatorAccess, signOutHost } from './lib/hostSignIn.mjs';
 import { RELOAD_PRESERVE, createStartAttempt, startOperationGuardFor } from './lib/startOperationGuard.mjs';
 import { obsOperationQueue } from './lib/obsOperationQueue.mjs';
 import { obsSetupSteps } from './lib/obsSetupSteps.mjs';
@@ -638,6 +640,14 @@ export default function HostView() {
         coarsePointer: typeof window.matchMedia === 'function'
             && window.matchMedia('(pointer: coarse)').matches,
     }));
+    // Whether this browser may host, as /api/config reports it. A host on the machine running Nextra (or a trusted
+    // LAN) always may; a host on another computer signs in with the host password first (HostSignInPanel).
+    const [operatorAccess, setOperatorAccess] = useState(ASSUMED_OPERATOR_ACCESS);
+    const [hostSigningOut, setHostSigningOut] = useState(false);
+    // Where focus went last when the start controls and the sign-in panel swapped places: 'start' (the Start
+    // Sharing button, after a sign-in) or 'password' (the panel's field, after a sign-out). Null until then, so a
+    // page load moves no focus.
+    const [operatorFocusTarget, setOperatorFocusTarget] = useState(null);
 
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -670,6 +680,7 @@ export default function HostView() {
     }
     const obsPasswordRef = useRef('');
     const obsControlChannelRef = useRef(null);
+    const startButtonRef = useRef(null);
     // One per socket, so a start left pending by an unmounted host view still
     // orders its room request and compensation before the next view's start.
     const startGuardRef = useRef(startOperationGuardFor(socket, {
@@ -891,25 +902,72 @@ export default function HostView() {
         byokTurnCredential,
     ]);
 
-    // WHEP enablement is only exposed via the HTTP config endpoint (the
-    // socket server-config payload does not include it), so probe it once.
-    // Everything else here also arrives over 'server-config'.
+    // WHEP enablement and this browser's operator rights are only exposed via
+    // the HTTP config endpoint (the socket server-config payload does not
+    // include them), so probe it once, and again whenever the rights may have
+    // changed. Everything else here also arrives over 'server-config'.
+    // Returns the operator rights it applied, or null when the config could
+    // not be read (the rights shown stay as they were).
+    const applyHostConfig = useCallback((data) => {
+        if (!data) return null;
+        if (typeof data.whepEnabled === 'boolean') setWhepEnabled(data.whepEnabled);
+        const access = readOperatorAccess(data);
+        setOperatorAccess(access);
+        return access;
+    }, []);
+
+    const refreshHostConfig = useCallback(async () => applyHostConfig(await fetchHostConfig()), [applyHostConfig]);
+
     useEffect(() => {
         const controller = new AbortController();
-        fetch('/api/config', {
-            headers: { accept: 'application/json' },
-            credentials: 'same-origin',
-            signal: controller.signal,
-        })
-            .then((response) => (response.ok ? response.json() : null))
-            .then((data) => {
-                if (data) {
-                    if (typeof data.whepEnabled === 'boolean') setWhepEnabled(data.whepEnabled);
-                }
-            })
-            .catch(() => { });
+        fetchHostConfig({ signal: controller.signal }).then((data) => {
+            if (!controller.signal.aborted) applyHostConfig(data);
+        });
         return () => controller.abort();
-    }, []);
+    }, [applyHostConfig]);
+
+    // After a sign-in or sign-out the socket's handshake is out of date: the
+    // server reads the session cookie from it. A new connection carries the
+    // cookie as it is now. Never called while a room is shared.
+    const reconnectSocketForOperatorChange = useCallback(() => {
+        socket.disconnect();
+        socket.connect();
+    }, [socket]);
+
+    // The sign-in panel calls this once the server has set the session
+    // cookie. Resolves to whether this browser now has operator rights.
+    const handleHostSignedIn = useCallback(async () => {
+        const access = await refreshHostConfig();
+        if (!access?.authorized) return false;
+        setError('');
+        setOperatorFocusTarget('start');
+        reconnectSocketForOperatorChange();
+        return true;
+    }, [refreshHostConfig, reconnectSocketForOperatorChange]);
+
+    const handleHostSignOut = useCallback(async () => {
+        setHostSigningOut(true);
+        const result = await signOutHost();
+        if (!result.ok) {
+            setHostSigningOut(false);
+            setError(result.message);
+            return;
+        }
+        setError('');
+        const access = await refreshHostConfig();
+        setHostSigningOut(false);
+        if (access && !access.authorized) setOperatorFocusTarget('password');
+        reconnectSocketForOperatorChange();
+    }, [refreshHostConfig, reconnectSocketForOperatorChange]);
+
+    // The start controls appear when a sign-in removes the panel; put focus
+    // on them, since the field it was in is gone. (The panel focuses its own
+    // field when a sign-out brings it back.)
+    useEffect(() => {
+        if (operatorFocusTarget === 'start' && operatorAccess.authorized) {
+            startButtonRef.current?.focus();
+        }
+    }, [operatorFocusTarget, operatorAccess.authorized]);
 
     useEffect(() => {
         if (!roomCode) return undefined;
@@ -1965,6 +2023,15 @@ export default function HostView() {
             } else {
                 setError(`Failed to start sharing: ${err.message}`);
             }
+            // The server refused the room for lack of operator rights: a
+            // sign-in session that ended since the page read them, or a start
+            // pressed before it had. Read them again so the page offers the
+            // sign-in instead of a start button that cannot work.
+            if (/operator authorization/i.test(String(err?.message || ''))) {
+                refreshHostConfig().then((access) => {
+                    if (access && !access.authorized) setOperatorFocusTarget('password');
+                });
+            }
             // A failure after OBS auto-configuration can leave OBS streaming at
             // the room this catch is about to destroy.
             stopObsIngest(endStartOperation('start-failed'));
@@ -1985,6 +2052,7 @@ export default function HostView() {
         endStartOperation,
         sendHostStopped,
         stopObsIngest,
+        refreshHostConfig,
         runObsConfigure,
         establishObsControlChannel,
         selectedProfile,
@@ -2255,6 +2323,11 @@ export default function HostView() {
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
         : '';
     const totalViewers = viewerCount + whepViewerCount;
+    // A browser without operator rights gets the sign-in panel in place of
+    // the start controls and the room settings. Only while nothing is going
+    // on: a room being shared, or one reclaimed after a reload and waiting for
+    // Resume Sharing, belongs to its host token and stays usable.
+    const showHostSignIn = !operatorAccess.authorized && status === 'idle' && !resumePending;
     const obsIdleSteps = obsSetupSteps({ autoStatus: '', progress: '', whipConnected: false, autoStart: obsAutoStart });
     const obsLiveSteps = obsSetupSteps({
         autoStatus: obsAutoStatus,
@@ -2411,7 +2484,7 @@ export default function HostView() {
                 <div className="host-video-section">
                     <div className="video-container">
                         <video ref={videoRef} autoPlay muted playsInline className="video-player" />
-                        {!isSharing && (
+                        {!isSharing && !showHostSignIn && (
                             <div className="video-overlay host-stage-empty">
                                 <svg className="host-stage-empty-icon" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                     <rect x="3" y="4" width="18" height="13" rx="2" />
@@ -2427,6 +2500,7 @@ export default function HostView() {
                                     )}
                                 <div className="controls">
                                     <button
+                                        ref={startButtonRef}
                                         className="btn btn-primary btn-main"
                                         onClick={handleStartSharing}
                                         disabled={status === 'connecting'}
@@ -2440,6 +2514,20 @@ export default function HostView() {
                                                     : 'Start Sharing'}
                                     </button>
                                 </div>
+                            </div>
+                        )}
+                        {showHostSignIn && (
+                            <div className="video-overlay host-stage-empty">
+                                <svg className="host-stage-empty-icon" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                    <rect x="3" y="4" width="18" height="13" rx="2" />
+                                    <path d="M8 21h8M12 17v4" />
+                                </svg>
+                                <p className="host-stage-empty-title">Nothing is being shared yet</p>
+                                <p className="video-overlay-sub host-stage-empty-sub">
+                                    {operatorAccess.signInAvailable
+                                        ? 'Sign in with the host password to start sharing from this computer.'
+                                        : 'Rooms can only be started on the computer that runs Nextra.'}
+                                </p>
                             </div>
                         )}
                         {isSharing && ingestMode === 'obs' && whipConnected && (
@@ -2610,7 +2698,14 @@ export default function HostView() {
                 </div>
 
                 <div className="host-side-panel">
-                    {status === 'idle' && (
+                    {showHostSignIn && (
+                        <HostSignInPanel
+                            signInAvailable={operatorAccess.signInAvailable}
+                            onSignedIn={handleHostSignedIn}
+                            focusPassword={operatorFocusTarget === 'password'}
+                        />
+                    )}
+                    {status === 'idle' && !showHostSignIn && (
                         <div className={`settings-wrapper host-settings-panel${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
                             <h2 className="visually-hidden">Settings</h2>
                             <div className="host-settings-body">
@@ -2764,6 +2859,20 @@ export default function HostView() {
                                     </div>
                                 </details>
                             </div>
+                        </div>
+                    )}
+
+                    {operatorAccess.session && status === 'idle' && !showHostSignIn && (
+                        <div className="host-session-row">
+                            <span>Signed in with the host password.</span>
+                            <button
+                                type="button"
+                                className="btn btn-outline btn-small"
+                                onClick={handleHostSignOut}
+                                disabled={hostSigningOut}
+                            >
+                                {hostSigningOut ? 'Signing out...' : 'Sign out'}
+                            </button>
                         </div>
                     )}
 

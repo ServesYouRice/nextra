@@ -205,6 +205,10 @@ const config = {
     // CF-Connecting-IP from a loopback peer is Cloudflare's record of the viewer only behind cloudflared; any other
     // proxy passes on the client's own copy. Nextra's own tunnel needs no flag; one you run yourself does.
     TRUST_CLOUDFLARE_CONNECTING_IP: parseBoolEnv(process.env.TRUST_CLOUDFLARE_CONNECTING_IP, false),
+    // Reverse proxies the operator runs on addresses other than loopback (comma-separated IPv4/IPv6 addresses or
+    // CIDRs), for example a Traefik pod network. A TCP peer inside it only ever relays: its X-Forwarded-For, -Proto
+    // and -Host are read as a trusted loopback proxy's are, and its request is never the local operator's.
+    TRUSTED_PROXY_CIDRS: (process.env.TRUSTED_PROXY_CIDRS || '').trim(),
     ALLOW_TRYCLOUDFLARE_ORIGINS: parseBoolEnv(process.env.ALLOW_TRYCLOUDFLARE_ORIGINS, false),
     ALLOW_SOCKET_NO_ORIGIN: parseBoolEnv(process.env.ALLOW_SOCKET_NO_ORIGIN, false),
     EXPOSE_LAN_URL: parseBoolEnv(process.env.EXPOSE_LAN_URL, false),
@@ -448,6 +452,15 @@ function validateConfig(value) {
     }
     if (value.ALLOW_INSECURE_TRUSTED_LAN_RELAY && !value.TRUSTED_LAN_CIDRS) {
         throw new Error('Invalid ALLOW_INSECURE_TRUSTED_LAN_RELAY: declare TRUSTED_LAN_CIDRS first.');
+    }
+    if (value.TRUSTED_PROXY_CIDRS) {
+        // The parser the request identity matches peers with (lib/network.js), loaded only when the setting is
+        // used, so that without it this file still needs nothing from lib/ beyond cloudflareTurn.js.
+        const { parseTrustedProxyCidrs } = require('./lib/network');
+        const [firstInvalid] = parseTrustedProxyCidrs(value.TRUSTED_PROXY_CIDRS).invalid;
+        if (firstInvalid) {
+            throw new Error(`Invalid TRUSTED_PROXY_CIDRS entry "${firstInvalid.entry}": ${firstInvalid.reason}`);
+        }
     }
     if (value.PUBLIC_WHIP_ENABLED && !value.WHIP_ENABLED) {
         throw new Error('Invalid PUBLIC_WHIP_ENABLED: WHIP_ENABLED must also be enabled.');

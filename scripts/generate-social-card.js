@@ -18,7 +18,8 @@ const outputPath = path.join(brandDir, 'nextra-social-card.png');
 // og:image is 1200x630; both Discord and Twitter crop to that ratio.
 const CARD_WIDTH = 1200;
 const CARD_HEIGHT = 630;
-const TAGLINE = 'Peer-to-peer screen sharing — one link, no accounts';
+// Not "peer-to-peer": media always goes through the Nextra server (mediasoup, or the relay), never host to viewer.
+const TAGLINE = 'Self-hosted screen sharing — one link, no accounts';
 
 // The lockup is embedded rather than linked so the render never depends on a
 // file:// fetch resolving inside the headless browser.

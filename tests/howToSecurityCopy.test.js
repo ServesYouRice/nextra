@@ -76,6 +76,28 @@ test('a plain-HTTP local link is unencrypted unless local HTTPS is enabled', () 
     assert.match(sentence, /LOCAL_HTTPS=true/);
 });
 
+// The host sign-in as lib/operatorSessions.js and lib/operatorSignIn.js carry it: the password crosses HTTPS only,
+// the browser then holds an HttpOnly cookie, and a session lasts OPERATOR_SESSION_TTL_MS.
+test('hosting from another computer is described as a host password sent over HTTPS and a cookie scripts cannot read', () => {
+    const { OPERATOR_SESSION_TTL_MS } = require('../lib/operatorSessions');
+    const hours = OPERATOR_SESSION_TTL_MS / (60 * 60 * 1000);
+    const sentences = sentencesOf(securitySection());
+    const password = sentences.find((s) => /host password/i.test(s));
+    assert.ok(password, 'a sentence is about the host password');
+    assert.match(password, /another computer/i);
+    assert.match(password, /over HTTPS only/i);
+    assert.match(password, /cookie that page scripts cannot read/i);
+    const lifetime = sentences.find((s) => /sign-in ends/i.test(s));
+    assert.ok(lifetime, 'a sentence says when the sign-in ends');
+    assert.match(lifetime, new RegExp(`after ${hours} hours`));
+    assert.match(lifetime, /sign out/i);
+    assert.match(lifetime, /restarts/i);
+    // The host steps say the same and name the setting.
+    const page = toText(source);
+    assert.match(page, /sets a host password \(\s*OPERATOR_TOKEN\s*, at least 32 characters\) and serves Nextra over HTTPS/);
+    assert.match(page, new RegExp(`signed in for ${hours} hours`));
+});
+
 test('the rest of the section is unchanged', () => {
     const section = securitySection();
     assert.match(section, /Media is not stored by Nextra\./);

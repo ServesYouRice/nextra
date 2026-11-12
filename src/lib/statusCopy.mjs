@@ -1,5 +1,5 @@
 export const STATUS_ACCESS_RESTRICTED_COPY =
-    'This page only loads metrics from the machine running Nextra. Open it on the host machine; remote API clients must authenticate separately.';
+    'This page only loads metrics for the host. Open it on the host machine, or sign in on the Host page first; remote API clients must authenticate separately.';
 
 export function formatPlainDuration(totalSeconds) {
     const seconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));

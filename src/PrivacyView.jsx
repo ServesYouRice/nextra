@@ -64,7 +64,9 @@ export default function PrivacyView() {
                 <strong>Short-lived session state</strong>
                 <p>
                     Active room state exists only while the room is running. Local logs, crash output, or server
-                    diagnostics may remain on the operator's machine until they are deleted.
+                    diagnostics may remain on the operator's machine until they are deleted. A host who signs in
+                    from another computer gets one sign-in cookie that page scripts cannot read. It holds a random
+                    session number, nothing about the person, and ends after 12 hours or at sign-out.
                 </p>
             </div>
 

@@ -29,6 +29,7 @@
     "test:coverage": "node scripts/coverage-gate.js",
     "package": "npm run release:prep && node scripts/package-app.js",
     "package:artifact": "node scripts/package-app.js",
+    "release:image": "node scripts/release-image.js",
     "oss:check": "node scripts/opensource-preflight.js",
     "audit:prod": "npm audit --omit=dev && npm --prefix poc-mediasoup audit --omit=dev",
     "benchmark:runtime": "node scripts/benchmark-runtime.js",

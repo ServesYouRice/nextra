@@ -17,3 +17,12 @@ test('both brand scripts document that generate-icons.ps1 runs before generate-s
     assert.match(icons, /generate-social-card\.js/);
     assert.match(social, /generate-icons\.ps1/);
 });
+
+// Media always goes through the Nextra server (mediasoup, or the relay), so the card must not call it peer-to-peer.
+test('the social card tagline does not call Nextra peer-to-peer', () => {
+    const social = fs.readFileSync(socialScript, 'utf8');
+    const tagline = /const TAGLINE = '([^']+)';/.exec(social);
+    assert.ok(tagline, 'the script declares its tagline');
+    assert.doesNotMatch(tagline[1], /peer[- ]to[- ]peer|p2p/i);
+    assert.match(tagline[1], /self-hosted screen sharing/i);
+});
