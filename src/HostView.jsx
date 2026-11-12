@@ -460,12 +460,42 @@ function SettingSwitch({ id, label, hint, note, checked, disabled = false, onCha
     );
 }
 
+// m:ss since the room went live, h:mm:ss from one hour.
+function formatLiveTime(totalSeconds) {
+    const seconds = totalSeconds % 60;
+    const minutes = Math.floor(totalSeconds / 60) % 60;
+    const hours = Math.floor(totalSeconds / 3600);
+    const ss = String(seconds).padStart(2, '0');
+    return hours > 0
+        ? `${hours}:${String(minutes).padStart(2, '0')}:${ss}`
+        : `${minutes}:${ss}`;
+}
+
+// The running time of the live status line. It owns its once-a-second state so
+// the host page does not render every second; it mounts when sharing starts.
+// Hidden from assistive technology so it is not announced every second.
+function LiveTimer() {
+    const [seconds, setSeconds] = useState(0);
+    useEffect(() => {
+        const startedAt = Date.now();
+        const timer = setInterval(() => {
+            setSeconds(Math.floor((Date.now() - startedAt) / 1000));
+        }, 1000);
+        return () => clearInterval(timer);
+    }, []);
+    return <span className="live-timer" aria-hidden="true">{formatLiveTime(seconds)}</span>;
+}
+
 export default function HostView() {
     const socket = useContext(SocketContext);
     const [storedByokTurnSession] = useState(() => loadStoredByokTurnSession());
     const [roomCode, setRoomCode] = useState(null);
     const [isSharing, setIsSharing] = useState(false);
     const [viewerCount, setViewerCount] = useState(0);
+    // The quality menu behind the status line's button while sharing.
+    const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
+    const qualityControlRef = useRef(null);
+    const qualityButtonRef = useRef(null);
     const contentMode = 'motion';
     const [allowMediaControl, setAllowMediaControl] = useState(false);
     const [roomPassphrase, setRoomPassphrase] = useState('');
@@ -2109,6 +2139,32 @@ export default function HostView() {
         }
     }, []);
 
+    // The quality menu closes when sharing stops, on a press outside it and on
+    // Escape (focus goes back to its button). It stays open across a resize.
+    const [qualityMenuSharing, setQualityMenuSharing] = useState(isSharing);
+    if (qualityMenuSharing !== isSharing) {
+        setQualityMenuSharing(isSharing);
+        if (!isSharing) setQualityMenuOpen(false);
+    }
+    useEffect(() => {
+        if (!qualityMenuOpen) return undefined;
+        const onPointerDown = (evt) => {
+            if (qualityControlRef.current?.contains(evt.target)) return;
+            setQualityMenuOpen(false);
+        };
+        const onKeyDown = (evt) => {
+            if (evt.key !== 'Escape') return;
+            setQualityMenuOpen(false);
+            qualityButtonRef.current?.focus();
+        };
+        document.addEventListener('pointerdown', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('pointerdown', onPointerDown);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [qualityMenuOpen]);
+
     const localWatchLink = roomCode ? `${lanBaseUrl}/#watch/${roomCode}` : '';
     const publicWatchLink = roomCode && shareBaseUrl ? `${shareBaseUrl}/#watch/${roomCode}` : '';
     const showPublicLink = !!publicWatchLink && publicWatchLink !== localWatchLink;
@@ -2277,59 +2333,92 @@ export default function HostView() {
                     </div>
 
                     {isSharing && (
-                        <div className="controls">
+                        <div className="controls live-status">
+                            <div className="live-status-text">
+                                <span className="live-dot" aria-hidden="true" />
+                                <span className="live-word">Live</span>
+                                <span aria-hidden="true"> · </span>
+                                <LiveTimer />
+                                <span aria-hidden="true"> · </span>
+                                <span className="viewer-count">
+                                    {totalViewers} viewer{totalViewers !== 1 ? 's' : ''}
+                                    {whepViewerCount > 0 && (
+                                        <span className="room-meta">
+                                            {viewerCount} WebRTC · {whepViewerCount} WHEP
+                                        </span>
+                                    )}
+                                </span>
+                            </div>
+                            <div className="quality-control" ref={qualityControlRef}>
                                 <button
-                                    className="btn btn-danger"
-                                    onClick={() => {
-                                        handleStopSharing();
-                                    }}
+                                    type="button"
+                                    ref={qualityButtonRef}
+                                    className="btn btn-secondary quality-button"
+                                    aria-haspopup="true"
+                                    aria-expanded={qualityMenuOpen}
+                                    aria-controls="qualityMenu"
+                                    aria-label={`Quality: ${QUALITY_PROFILES[qualityProfile]?.label || qualityProfile} \u00B7 ${frameRate} fps`}
+                                    onClick={() => setQualityMenuOpen((open) => !open)}
                                 >
-                                    Stop Sharing
+                                    {QUALITY_PROFILES[qualityProfile]?.label || qualityProfile} {'\u00B7'} {frameRate} fps
+                                    <svg className="quality-chevron" viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                        <path d="M3 4.5 6 7.5 9 4.5" />
+                                    </svg>
                                 </button>
-                                {/* Browser-capture resolution is applied live via
-                                    applyQualityProfileToLiveStream, so keep it
-                                    adjustable while streaming (mirrors the live fps
-                                    toggle). OBS resolution is fixed at config time. */}
-                                {ingestMode !== 'obs' && (
-                                    <div className="mode-toggle" role="group" aria-label="Resolution">
-                                        {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                            <button
-                                                key={key}
-                                                type="button"
-                                                className={qualityProfile === key ? 'active' : ''}
-                                                aria-pressed={qualityProfile === key}
-                                                onClick={() => setQualityProfile(key)}
-                                            >
-                                                {profile.label}
-                                            </button>
-                                        ))}
+                                <div id="qualityMenu" className="quality-menu" hidden={!qualityMenuOpen}>
+                                    {/* Browser-capture resolution is applied live via
+                                        applyQualityProfileToLiveStream, so keep it
+                                        adjustable while streaming (mirrors the live fps
+                                        toggle). OBS resolution is fixed at config time. */}
+                                    {ingestMode !== 'obs' && (
+                                        <div className="quality-menu-row">
+                                            <span className="quality-menu-label" aria-hidden="true">Resolution</span>
+                                            <div className="mode-toggle" role="group" aria-label="Resolution">
+                                                {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
+                                                    <button
+                                                        key={key}
+                                                        type="button"
+                                                        className={qualityProfile === key ? 'active' : ''}
+                                                        aria-pressed={qualityProfile === key}
+                                                        onClick={() => setQualityProfile(key)}
+                                                    >
+                                                        {profile.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                    <div className="quality-menu-row">
+                                        <span className="quality-menu-label" aria-hidden="true">Frame rate</span>
+                                        <div className="mode-toggle" role="group" aria-label="Frame rate">
+                                            {[60, 30].map((fps) => (
+                                                <button
+                                                    key={fps}
+                                                    type="button"
+                                                    className={frameRate === fps ? 'active' : ''}
+                                                    aria-pressed={frameRate === fps}
+                                                    onClick={() => setFrameRate(fps)}
+                                                >
+                                                    {fps} fps
+                                                </button>
+                                            ))}
+                                        </div>
                                     </div>
-                                )}
-                                <div className="mode-toggle" role="group" aria-label="Frame rate">
-                                    {[60, 30].map((fps) => (
-                                        <button
-                                            key={fps}
-                                            type="button"
-                                            className={frameRate === fps ? 'active' : ''}
-                                            aria-pressed={frameRate === fps}
-                                            onClick={() => setFrameRate(fps)}
-                                        >
-                                            {fps} fps
-                                        </button>
-                                    ))}
                                 </div>
+                            </div>
                         </div>
                     )}
 
                     {isSharing && (
-                        <div className="status-bar">
-                            <span className="status-dot streaming" /> Streaming ({QUALITY_PROFILES[qualityProfile]?.label || qualityProfile} @ {frameRate}fps)
+                        <div className="visually-hidden" role="status">
+                            Streaming ({QUALITY_PROFILES[qualityProfile]?.label || qualityProfile} @ {frameRate}fps)
                             {relayViewerCount > 0 ? ` | Relay fallback viewers: ${relayViewerCount}` : ''}
                             {relayViewerCount > 0 && relayBitrateLimit !== null
                                 ? ` | Relay lowered to ${(effectiveRelayBitsPerSecond / 1_000_000).toFixed(1)} Mbps (connection too slow for full quality)`
                                 : ''}
                         </div>
                     )}
+
                 </div>
 
                 <div className="host-side-panel">
@@ -2501,16 +2590,6 @@ export default function HostView() {
                                 publicLinkHint={publicLinkHint}
                                 whepPlaybackUrl={whepPlaybackUrl}
                             />
-                            <div className="viewer-count">
-                                <StatusPill tone={totalViewers > 0 ? 'ok' : undefined} pulse={totalViewers > 0}>
-                                    {totalViewers} viewer{totalViewers !== 1 ? 's' : ''}
-                                </StatusPill>
-                                {whepViewerCount > 0 && (
-                                    <span className="room-meta">
-                                        {viewerCount} WebRTC · {whepViewerCount} WHEP
-                                    </span>
-                                )}
-                            </div>
                         </section>
                     {ingestMode === 'obs' && (
                         <div className="obs-whip-setup-panel room-info">
@@ -2607,6 +2686,17 @@ export default function HostView() {
                         </div>
                     )}
                 </div>
+                {isSharing && (
+                    <button
+                        type="button"
+                        className="btn btn-danger-quiet host-stop"
+                        onClick={() => {
+                            handleStopSharing();
+                        }}
+                    >
+                        Stop Sharing
+                    </button>
+                )}
                 <UserErrorAlert error={error} />
                 {preflightWarnings.length > 0 && (
                     <div className="alert alert-warning" role="status">
@@ -2620,6 +2710,10 @@ export default function HostView() {
                 <HostDiagnostics
                     metrics={roomMetrics}
                     obsSummary={obsDiagnosticSummary}
+                    relayViewers={isSharing ? relayViewerCount : 0}
+                    relayBitrate={isSharing && relayViewerCount > 0 && relayBitrateLimit !== null
+                        ? `Lowered to ${(effectiveRelayBitsPerSecond / 1_000_000).toFixed(1)} Mbps (connection too slow for full quality)`
+                        : ''}
                     onDownload={handleDownloadDiagnostics}
                     downloading={diagnosticDownloading}
                     downloadStatus={diagnosticDownloadStatus}

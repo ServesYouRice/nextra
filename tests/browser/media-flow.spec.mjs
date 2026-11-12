@@ -811,6 +811,7 @@ test('the streaming frame-rate control is a labelled group with programmatic sel
     const context = await browser.newContext();
     const page = await context.newPage();
     await startHost(page);
+    await page.getByRole('button', { name: /^Quality/ }).click();
 
     const frameRateGroup = page.getByRole('group', { name: 'Frame rate' });
     const sixty = frameRateGroup.getByRole('button', { name: '60 fps' });
@@ -1251,6 +1252,7 @@ test('a relay viewer that is behind keeps playing across a VP8 recorder restart'
     await viewerPage.evaluate(() => window.__nextraHoldSocket());
     await hostPage.waitForTimeout(1_200);
     // A frame-rate change restarts the recorder: a new generation.
+    await hostPage.getByRole('button', { name: /^Quality/ }).click();
     const frameRate = hostPage.getByRole('group', { name: 'Frame rate' });
     await frameRate.locator('button[aria-pressed="false"]').first().click();
     await expect.poll(async () => (await getRoomByCode(request, code))?.mediaGeneration || 0).toBeGreaterThan(firstGeneration);

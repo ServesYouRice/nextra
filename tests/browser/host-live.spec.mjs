@@ -144,6 +144,44 @@ test.describe('on the shared server: a public and a local link', () => {
 
             await expectLinksOnOneLine(page);
             await expectCardEdgesMatchPreview(page, '1440x900');
+
+            // The status line: Live, a running time and the viewer count.
+            const liveStatus = page.locator('.live-status');
+            await expect(liveStatus).toContainText('Live');
+            const timer = liveStatus.locator('.live-timer');
+            await expect(timer).toHaveText(/\d+:\d{2}/);
+            const firstTime = await timer.innerText();
+            await page.waitForTimeout(2000);
+            await expect.poll(() => timer.innerText()).not.toBe(firstTime);
+            await expect(page.locator('.viewer-count')).toHaveText('0 viewers');
+            await expect(page.locator('.status-bar')).toHaveCount(0);
+            await expect(page.locator('.visually-hidden[role="status"]', { hasText: 'Streaming (' })).toHaveCount(1);
+
+            // Resolution and Frame rate are behind the quality button.
+            const qualityButton = page.getByRole('button', { name: /^Quality/ });
+            await expect(qualityButton).toBeVisible();
+            await expect(page.getByRole('group', { name: 'Frame rate' })).toHaveCount(0);
+            await qualityButton.click();
+            await expect(page.getByRole('group', { name: 'Resolution' })).toBeVisible();
+            await expect(page.getByRole('group', { name: 'Frame rate' })).toBeVisible();
+            await page.getByRole('group', { name: 'Frame rate' }).getByRole('button', { name: '30 fps' }).click();
+            await expect(qualityButton).toHaveText(/30 fps$/);
+            await expect(page.locator('.visually-hidden[role="status"]', { hasText: 'Streaming (' })).toContainText('@ 30fps');
+            await page.keyboard.press('Escape');
+            await expect(page.getByRole('group', { name: 'Frame rate' })).toHaveCount(0);
+            await expect(qualityButton).toBeFocused();
+
+            // Stop is a quiet button under the card, as wide as the card.
+            const stop = page.getByRole('button', { name: 'Stop Sharing' });
+            await expect(stop).toHaveClass(/btn-danger-quiet/);
+            const stopBox = await stop.boundingBox();
+            const cardBox = await card.boundingBox();
+            expect(stopBox.height).toBeGreaterThanOrEqual(44);
+            expect(Math.abs(stopBox.x - cardBox.x), 'Stop and the card: left edges').toBeLessThanOrEqual(1);
+            expect(Math.abs((stopBox.x + stopBox.width) - (cardBox.x + cardBox.width)), 'Stop and the card: right edges')
+                .toBeLessThanOrEqual(1);
+            expect(stopBox.y, 'Stop is under the card').toBeGreaterThanOrEqual(cardBox.y + cardBox.height);
+
             await page.setViewportSize({ width: 1280, height: 720 });
             await expectLinksOnOneLine(page);
             await expectCardEdgesMatchPreview(page, '1280x720');
@@ -169,6 +207,19 @@ test.describe('on the shared server: a public and a local link', () => {
             const copyButton = await page.getByRole('button', { name: 'Copy room code' }).boundingBox();
             expect(copyButton.width).toBeGreaterThanOrEqual(44);
             expect(copyButton.height).toBeGreaterThanOrEqual(44);
+
+            // The status line, the quality button and Stop fit the phone.
+            for (const [label, locator] of [
+                ['the status line', liveStatus],
+                ['the quality button', qualityButton],
+                ['Stop', stop],
+            ]) {
+                const box = await locator.boundingBox();
+                expect(box.x, `${label} starts inside the viewport`).toBeGreaterThanOrEqual(0);
+                expect(box.x + box.width, `${label} ends inside the viewport`).toBeLessThanOrEqual(390);
+            }
+            expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth))
+                .toBeLessThanOrEqual(0);
 
             await stopSharingAndWaitForNoRooms(page, `${baseURL}/api/metrics`);
         } finally {

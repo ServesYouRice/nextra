@@ -1509,16 +1509,146 @@ input.select-input {
   margin-bottom: 1rem;
 }
 
-.status-bar {
+/* ========== LIVE STATUS LINE ==========
+   While sharing, one quiet line under the preview, as wide as the preview: a
+   red dot, Live, the running time and the viewer count on the left, the quality
+   button on the right. It is a .controls row so the rules for the rows under
+   the preview still reach it. The quality button opens a small panel above it
+   with the Resolution and Frame rate groups; the panel is as wide as the line
+   up to 20rem, so it fits a 320px viewport. The sentence "Streaming (...)" is a
+   visually hidden status for assistive technology. */
+.controls.live-status {
+  --live-stage-width: min(
+    100%,
+    var(--media-stage-max-width),
+    max(var(--stage-min-width), (100svh - var(--stage-chrome)) * 16 / 9)
+  );
+  position: relative;
+  box-sizing: border-box;
+  width: var(--live-stage-width);
+  min-height: 2.75rem;
+  margin: 0 auto;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  color: var(--text-2);
+  font-size: var(--fs-small);
+}
+
+.live-status-text {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  justify-content: center;
   flex-wrap: wrap;
-  width: min(100%, var(--media-stage-max-width));
-  margin: 0 auto;
+  gap: 0 0.35rem;
+  min-width: 0;
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  margin-right: 0.15rem;
+  border-radius: 50%;
+  background: var(--err);
+}
+
+.live-word {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.live-timer {
+  font-variant-numeric: tabular-nums;
+}
+
+.live-status .viewer-count {
+  display: inline;
+  padding-top: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+.live-status .room-meta {
+  margin: 0 0 0 0.35rem;
+  font-size: inherit;
+}
+
+.quality-control {
+  margin-left: auto;
+}
+
+.quality-button {
+  min-height: 2.25rem;
+  padding: 0.35rem 0.75rem;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.quality-chevron {
+  flex: none;
+}
+
+.quality-button[aria-expanded="true"] .quality-chevron {
+  transform: rotate(180deg);
+}
+
+.quality-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.5rem);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  box-sizing: border-box;
+  width: min(20rem, 100%);
+  padding: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: var(--surface-glass-accent), var(--surface-glass);
+  box-shadow: var(--shadow-card);
+}
+
+.quality-menu[hidden] {
+  display: none;
+}
+
+.quality-menu-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.quality-menu-label {
   color: var(--text-3);
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
+}
+
+/* The groups fill the panel and size their cells to the panel, not to the
+   6.4rem of the page's other toggles, so three cells fit at 320px. */
+.quality-menu .mode-toggle {
+  display: flex;
+  width: 100%;
+  box-shadow: none;
+}
+
+.quality-menu .mode-toggle button {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 2.25rem;
+  padding: 0.4rem 0.5rem;
+  font-size: var(--fs-small);
+}
+
+/* Stop sits under the invite card, away from the quality button, as wide as the
+   card. A direct row of the host grid: below 900px it follows the card, from
+   900px it is the second row of the card's column (see the invite card rules). */
+.host-stop {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  font-size: var(--fs-small);
 }
 
 .status-dot {
@@ -2055,6 +2185,17 @@ input.select-input {
     width: 21.875rem;
   }
 
+  /* Stop is under the card, in the row of the status line. */
+  .host-layout > .host-stop {
+    grid-column: 2;
+    order: 1;
+    align-self: start;
+  }
+
+  .host-layout:has(.invite-card) > .host-stop {
+    margin-top: 0.5rem;
+  }
+
   .host-side-panel:has(.host-settings-panel) {
     width: var(--host-side-card-width);
   }
@@ -2173,10 +2314,6 @@ input.select-input {
   color: var(--text-3);
   font-size: 13px;
   line-height: 1.4;
-}
-
-.invite-card > .viewer-count {
-  padding-top: 0;
 }
 
 .obs-status-line {
@@ -2763,6 +2900,14 @@ input.select-input {
   .controls {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .quality-button {
+    min-height: 44px;
+  }
+
+  .quality-menu .mode-toggle button {
+    min-height: 44px;
   }
 
   /* A 200px-tall preview has room for the title and the button only. */

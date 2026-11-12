@@ -385,6 +385,7 @@ test('every live toggle cell is fully visible at every tested width while sharin
     await page.goto('/#host');
     await page.getByRole('button', { name: 'Start Sharing' }).click();
     await expect(page.getByText(/Streaming \(/)).toBeVisible();
+    await page.getByRole('button', { name: /^Quality/ }).click();
 
     for (const width of TOGGLE_WIDTHS) {
         await page.setViewportSize({ width, height: 800 });
