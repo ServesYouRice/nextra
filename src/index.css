@@ -1387,7 +1387,7 @@ input.select-input {
    budget is still larger than the viewport is tall, and --stage-min-width keeps
    the stage from collapsing. */
 .watch-video {
-  max-width: 60%;
+  max-width: 100%;
   --stage-chrome: 19rem;
 }
 
@@ -1547,7 +1547,7 @@ input.select-input {
 
 .host-video-section {
   flex: 1;
-  max-width: 720px;
+  max-width: 800px;
   min-width: 0;
 }
 

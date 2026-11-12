@@ -644,15 +644,20 @@ for (const { width, height } of [{ width: 1440, height: 900 }, { width: 1366, he
             expect(host.stage.width, `host at ${width}x${height}`)
                 .toBeCloseTo(stageWidthWithoutFloor(host, { chromeRem: hostChromeRem }), 0);
             expect(host.stage.width).toBeGreaterThan(STAGE_MIN_WIDTH_PX);
+            if (width === 1440) {
+                expect(Math.abs(host.stage.width - 800), `host stage at ${width}x${height}`).toBeLessThanOrEqual(1);
+            }
 
             await page.goto(`/#watch/${code}`);
             await page.getByRole('button', { name: 'Join Room' }).click();
             await expect(page.locator('.watch-video')).toBeVisible();
             const watch = await stageWidths(page);
-            // .watch-video brings its own 19rem of chrome and a 60% cap above 900px.
+            // .watch-video brings its own 19rem of chrome and no width cap.
             expect(watch.stage.width, `watch at ${width}x${height}`)
-                .toBeCloseTo(stageWidthWithoutFloor(watch, { chromeRem: 19, maxWidthShare: 0.6 }), 0);
+                .toBeCloseTo(stageWidthWithoutFloor(watch, { chromeRem: 19 }), 0);
             expect(watch.stage.width).toBeGreaterThan(STAGE_MIN_WIDTH_PX);
+            expect(watch.stage.width, `watch share at ${width}x${height}`)
+                .toBeGreaterThan(watch.containerWidth * 0.6);
         } finally {
             await desktopContext.close();
             await hostContext.close();
