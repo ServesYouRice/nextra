@@ -744,6 +744,43 @@ test('a protected room asks for its passphrase as a focused second step and keep
     await hostContext.close();
 });
 
+test('a wrong room passphrase is reported next to the field and can be corrected', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+    const code = await startHost(hostPage, { passphrase: 'open sesame' });
+
+    await viewerPage.goto(`/#watch/${code}`);
+    const codeInput = viewerPage.getByLabel('Room code');
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+
+    const passphraseInput = viewerPage.getByLabel('Room passphrase');
+    await passphraseInput.fill('wrong');
+    await passphraseInput.press('Enter');
+
+    const alert = viewerPage.getByRole('alert');
+    await expect(alert).toHaveText("That passphrase didn't match. Check it and try again.");
+    await expect(passphraseInput).toHaveAttribute('aria-invalid', 'true');
+    await expect(passphraseInput).toBeFocused();
+    const alertId = await alert.getAttribute('id');
+    expect(await passphraseInput.getAttribute('aria-describedby')).toContain(alertId);
+    expect((await codeInput.inputValue()).replace(/-/g, '')).toBe(code.replace(/-/g, ''));
+
+    await passphraseInput.fill('open sesame');
+    await passphraseInput.press('Enter');
+    await expect(alert).toHaveCount(0);
+    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toBeVisible();
+
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+    await viewerContext.close();
+    await hostContext.close();
+});
+
 test('fullscreen control exposes pressed state and exits fullscreen', async ({ browser, request }) => {
     const hostContext = await browser.newContext();
     const viewerContext = await browser.newContext();

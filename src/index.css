@@ -1764,6 +1764,12 @@ input.select-input {
   border-color: var(--err);
 }
 
+.field-error {
+  color: #f5a3a3;
+  font-size: 0.8rem;
+  text-align: center;
+}
+
 /* The alert is a flex row, so the message and this disclosure sat side by side
    with the margin below shoving the summary out of line. Stack them instead. */
 .alert-error {

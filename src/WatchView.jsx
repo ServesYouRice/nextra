@@ -117,6 +117,7 @@ export default function WatchView({ initialCode = '' }) {
     const [joining, setJoining] = useState(false);
     const [passphrase, setPassphrase] = useState('');
     const [passphraseRequired, setPassphraseRequired] = useState(false);
+    const [passphraseRejected, setPassphraseRejected] = useState(false);
     const [watchLoading, setWatchLoading] = useState(false);
     const [playbackMode, setPlaybackMode] = useState('');
     const [hasTurnServer, setHasTurnServer] = useState(false);
@@ -194,7 +195,7 @@ export default function WatchView({ initialCode = '' }) {
 
     useEffect(() => {
         if (passphraseRequired) passphraseInputRef.current?.focus();
-    }, [passphraseRequired]);
+    }, [passphraseRequired, passphraseRejected]);
 
     useEffect(() => {
         const syncFullscreen = () => {
@@ -1051,6 +1052,9 @@ export default function WatchView({ initialCode = '' }) {
         if (joiningRef.current) return;
         setError('');
         setCodeError(false);
+        setPassphraseRejected(false);
+        // A passphrase sent to a room already known to need one is a real try, not the first prompt.
+        const passphraseWasTried = passphraseRequired && passphrase.length > 0;
         setHostDisconnected(false);
         setHostReconnectingReason('');
         setIngestMode('browser');
@@ -1081,6 +1085,7 @@ export default function WatchView({ initialCode = '' }) {
         const session = viewerSession.begin();
         try {
             await joinRoomAndLoadDevice(code, session);
+            setPassphraseRejected(false);
         } catch (err) {
             // The session ended while the join ran (a room that ended, a transport
             // failure, the view unmounting): whatever ended it has reset the view.
@@ -1094,6 +1099,7 @@ export default function WatchView({ initialCode = '' }) {
             setJoined(false);
             if (err.requiresPassphrase) {
                 setPassphraseRequired(true);
+                setPassphraseRejected(passphraseWasTried);
                 setError('');
             } else {
                 setError(err);
@@ -1102,7 +1108,7 @@ export default function WatchView({ initialCode = '' }) {
             joiningRef.current = false;
             setJoining(false);
         }
-    }, [codeInput, joinRoomAndLoadDevice, socket, viewerSession]);
+    }, [codeInput, joinRoomAndLoadDevice, socket, viewerSession, passphraseRequired, passphrase]);
 
     // Asks the server for the fMP4 relay (fallback-consume-start) and, once it
     // answers, plays it. The start is sent once with a 10 s answer timeout and
@@ -1726,6 +1732,7 @@ export default function WatchView({ initialCode = '' }) {
                                 onChange={(evt) => {
                                     setCodeError(false);
                                     setPassphraseRequired(false);
+                                    setPassphraseRejected(false);
                                     setPassphrase('');
                                     setCodeInput(formatRoomCode(extractRoomCode(evt.target.value)));
                                 }}
@@ -1758,16 +1765,27 @@ export default function WatchView({ initialCode = '' }) {
                                 type="password"
                                 className="input-code"
                                 value={passphrase}
-                                onChange={(evt) => setPassphrase(evt.target.value)}
+                                onChange={(evt) => {
+                                    setPassphraseRejected(false);
+                                    setPassphrase(evt.target.value);
+                                }}
                                 onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
                                 autoComplete="current-password"
                                 disabled={joining}
                                 aria-busy={joining || undefined}
+                                aria-invalid={passphraseRejected || undefined}
+                                aria-describedby={passphraseRejected ? 'passphraseError' : undefined}
                             />
+                            {passphraseRejected && (
+                                <p className="field-error" id="passphraseError" role="alert">
+                                    That passphrase didn't match. Check it and try again.
+                                </p>
+                            )}
                         </div>
                     )}
                     <p className="join-hint" id="joinHint" role="status">
                         {(() => {
+                            if (passphraseRequired) return 'Enter the passphrase the host gave you.';
                             const codeLength = normalizeRoomCode(codeInput).length;
                             return codeLength > 0 && codeLength < 6
                                 ? `${codeLength}/6 characters`
