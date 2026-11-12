@@ -648,8 +648,8 @@ for (const { width, height } of [{ width: 1440, height: 900 }, { width: 1366, he
             await page.goto('/#host');
             await expect(page.locator('.host-side-panel')).toBeVisible();
             const host = await stageWidths(page);
-            // 26rem of chrome from 820px down, 24rem above it.
-            const hostChromeRem = height <= 820 ? 26 : 24;
+            // 18.75rem of chrome from 820px down, 22rem above it.
+            const hostChromeRem = height <= 820 ? 18.75 : 22;
             expect(host.stage.width, `host at ${width}x${height}`)
                 .toBeCloseTo(stageWidthWithoutFloor(host, { chromeRem: hostChromeRem }), 0);
             expect(host.stage.width).toBeGreaterThan(STAGE_MIN_WIDTH_PX);

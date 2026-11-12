@@ -436,6 +436,31 @@ function forgetHostRecoverySession(stored) {
     }
 }
 
+// One switch row of the host settings panel. The checkbox is the switch itself
+// (styled in index.css) and sits inside its label, so the whole row is the click
+// target. The long hint is not shown: it is the label's title and a visually
+// hidden description. A note is shown, for the one thing the host must see.
+function SettingSwitch({ id, label, hint, note, checked, disabled = false, onChange }) {
+    const describedBy = note || hint ? `${id}Hint` : undefined;
+    return (
+        <div className="setting-row setting-row-switch">
+            <label htmlFor={id} className="setting-switch" title={hint || note || undefined}>
+                <span>{label}</span>
+                <input
+                    type="checkbox"
+                    id={id}
+                    checked={checked}
+                    disabled={disabled}
+                    aria-describedby={describedBy}
+                    onChange={onChange}
+                />
+            </label>
+            {note && <span className="setting-note" id={describedBy}>{note}</span>}
+            {!note && hint && <span className="visually-hidden" id={describedBy}>{hint}</span>}
+        </div>
+    );
+}
+
 export default function HostView() {
     const socket = useContext(SocketContext);
     const [storedByokTurnSession] = useState(() => loadStoredByokTurnSession());
@@ -2109,55 +2134,55 @@ export default function HostView() {
             </div>
 
             <div className="host-layout">
-                <div className="host-video-section">
-                    {!isSharing && (
-                        <div className="source-tabs-row">
-                            <div
-                                className="source-tabs"
-                                role="radiogroup"
-                                aria-label="Capture source"
-                                aria-describedby="captureSourceHint"
-                            >
-                                <label className="source-tab">
-                                    <input
-                                        type="radio"
-                                        name="captureSource"
-                                        id="browserMode"
-                                        checked={ingestMode !== 'obs'}
-                                        disabled={resumePending}
-                                        onChange={() => handleIngestModeChange('browser')}
-                                    />
-                                    <svg className="source-tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                        <rect x="3" y="4" width="18" height="13" rx="2" />
-                                        <path d="M8 21h8M12 17v4" />
-                                    </svg>
-                                    This browser
-                                </label>
-                                <label className="source-tab">
-                                    <input
-                                        type="radio"
-                                        name="captureSource"
-                                        id="obsMode"
-                                        checked={ingestMode === 'obs'}
-                                        disabled={resumePending}
-                                        onChange={() => handleIngestModeChange('obs')}
-                                    />
-                                    <svg className="source-tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                        <circle cx="12" cy="12" r="9" />
-                                        <circle cx="12" cy="12" r="3" />
-                                    </svg>
-                                    OBS
-                                </label>
-                            </div>
-                            <p className="source-tabs-hint" id="captureSourceHint">
-                                {resumePending
-                                    ? resumeModeLockHint
-                                    : ingestMode === 'obs'
-                                        ? 'Needs OBS Studio 28 or newer on this computer'
-                                        : 'Viewers just open a link'}
-                            </p>
+                {!isSharing && (
+                    <div className="source-tabs-row">
+                        <div
+                            className="source-tabs"
+                            role="radiogroup"
+                            aria-label="Capture source"
+                            aria-describedby="captureSourceHint"
+                        >
+                            <label className="source-tab">
+                                <input
+                                    type="radio"
+                                    name="captureSource"
+                                    id="browserMode"
+                                    checked={ingestMode !== 'obs'}
+                                    disabled={resumePending}
+                                    onChange={() => handleIngestModeChange('browser')}
+                                />
+                                <svg className="source-tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                    <rect x="3" y="4" width="18" height="13" rx="2" />
+                                    <path d="M8 21h8M12 17v4" />
+                                </svg>
+                                This browser
+                            </label>
+                            <label className="source-tab">
+                                <input
+                                    type="radio"
+                                    name="captureSource"
+                                    id="obsMode"
+                                    checked={ingestMode === 'obs'}
+                                    disabled={resumePending}
+                                    onChange={() => handleIngestModeChange('obs')}
+                                />
+                                <svg className="source-tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                    <circle cx="12" cy="12" r="9" />
+                                    <circle cx="12" cy="12" r="3" />
+                                </svg>
+                                OBS
+                            </label>
                         </div>
-                    )}
+                        <p className="source-tabs-hint" id="captureSourceHint">
+                            {resumePending
+                                ? resumeModeLockHint
+                                : ingestMode === 'obs'
+                                    ? 'Needs OBS Studio 28 or newer on this computer'
+                                    : 'Viewers just open a link'}
+                        </p>
+                    </div>
+                )}
+                <div className="host-video-section">
                     <div className="video-container">
                         <video ref={videoRef} autoPlay muted playsInline className="video-player" />
                         {!isSharing && (
@@ -2201,62 +2226,7 @@ export default function HostView() {
                         )}
                     </div>
 
-                    {!isSharing ? (
-                        <>
-                            <div className="capture-settings">
-                                <div className="setting-row setting-row-inline">
-                                    <span className="setting-row-label">Resolution</span>
-                                    <div className="mode-toggle" role="group" aria-label="Resolution">
-                                        {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                            <button
-                                                key={key}
-                                                type="button"
-                                                className={qualityProfile === key ? 'active' : ''}
-                                                aria-pressed={qualityProfile === key}
-                                                onClick={() => setQualityProfile(key)}
-                                            >
-                                                {profile.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                                <div className="setting-row setting-row-inline">
-                                    <span className="setting-row-label">Frame rate</span>
-                                    <div className="mode-toggle" role="group" aria-label="Frame rate">
-                                        {[60, 30].map((fps) => (
-                                            <button
-                                                key={fps}
-                                                type="button"
-                                                className={frameRate === fps ? 'active' : ''}
-                                                aria-pressed={frameRate === fps}
-                                                onClick={() => setFrameRate(fps)}
-                                            >
-                                                {fps} fps
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                                {ingestMode === 'obs' && obsApplySettings && (
-                                    <div className="setting-row setting-row-inline">
-                                        <span className="setting-row-label">Picture preset</span>
-                                        <div className="mode-toggle" role="group" aria-label="Picture preset">
-                                            {Object.entries(OBS_TUNING_PROFILES).map(([key, tuning]) => (
-                                                <button
-                                                    key={key}
-                                                    type="button"
-                                                    className={obsTuningProfile === key ? 'active' : ''}
-                                                    aria-pressed={obsTuningProfile === key}
-                                                    onClick={() => setObsTuningProfile(key)}
-                                                >
-                                                    {tuning.label}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        </>
-                    ) : (
+                    {isSharing && (
                         <div className="controls">
                                 <button
                                     className="btn btn-danger"
@@ -2314,112 +2284,127 @@ export default function HostView() {
 
                 <div className="host-side-panel">
                     {status === 'idle' && (
-                        <div className={`settings-wrapper${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
-                        <div className="settings-panel">
-                            <h3>Settings</h3>
-                            <div className="advanced-settings advanced-settings-lead">
-                                <div className="setting-row setting-row-toggle">
-                                    <input
-                                        type="checkbox"
-                                        id="allowMediaControl"
-                                        checked={allowMediaControl}
-                                        disabled={!remoteMediaControlEnabled}
-                                        onChange={(evt) => setAllowMediaControl(evt.target.checked)}
-                                    />
-                                    <label htmlFor="allowMediaControl">
-                                        Allow viewers to pause/play media
-                                        <span className="setting-hint">
-                                            {remoteMediaControlEnabled
-                                                ? 'Viewers can remotely press Play/Pause on your keyboard'
-                                                : 'Disabled by the server operator'}
+                        <div className={`settings-wrapper host-settings-panel${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
+                            <h2 className="visually-hidden">Settings</h2>
+                            <div className="host-settings-body">
+                                <div className="settings-group capture-settings">
+                                    <div className="setting-row setting-row-inline">
+                                        <span className="setting-row-label">Resolution</span>
+                                        <div className="mode-toggle mode-toggle-small" role="group" aria-label="Resolution">
+                                            {Object.entries(QUALITY_PROFILES).reverse().map(([key, profile]) => (
+                                                <button
+                                                    key={key}
+                                                    type="button"
+                                                    className={qualityProfile === key ? 'active' : ''}
+                                                    aria-pressed={qualityProfile === key}
+                                                    onClick={() => setQualityProfile(key)}
+                                                >
+                                                    {profile.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className="setting-row setting-row-inline">
+                                        <span className="setting-row-label">Frame rate</span>
+                                        <div className="mode-toggle mode-toggle-small" role="group" aria-label="Frame rate">
+                                            {[30, 60].map((fps) => (
+                                                <button
+                                                    key={fps}
+                                                    type="button"
+                                                    className={frameRate === fps ? 'active' : ''}
+                                                    aria-pressed={frameRate === fps}
+                                                    onClick={() => setFrameRate(fps)}
+                                                >
+                                                    {fps} fps
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    {ingestMode === 'obs' && obsApplySettings && (
+                                        <div className="setting-row setting-row-inline">
+                                            <span className="setting-row-label">Picture preset</span>
+                                            <div className="mode-toggle mode-toggle-small" role="group" aria-label="Picture preset">
+                                                {Object.entries(OBS_TUNING_PROFILES).map(([key, tuning]) => (
+                                                    <button
+                                                        key={key}
+                                                        type="button"
+                                                        className={obsTuningProfile === key ? 'active' : ''}
+                                                        aria-pressed={obsTuningProfile === key}
+                                                        onClick={() => setObsTuningProfile(key)}
+                                                    >
+                                                        {tuning.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="settings-group">
+                                    <div className="setting-row setting-row-inline">
+                                        <label
+                                            htmlFor="roomPassphrase"
+                                            className="setting-row-label"
+                                            title="Viewers must enter it after the room code"
+                                        >
+                                            Optional room passphrase
+                                        </label>
+                                        <input
+                                            id="roomPassphrase"
+                                            type="password"
+                                            value={roomPassphrase}
+                                            maxLength={128}
+                                            autoComplete="new-password"
+                                            placeholder="None"
+                                            aria-describedby="roomPassphraseHint"
+                                            onChange={(evt) => setRoomPassphrase(evt.target.value)}
+                                            className="select-input"
+                                        />
+                                        <span className="visually-hidden" id="roomPassphraseHint">
+                                            Viewers must enter it after the room code
                                         </span>
-                                    </label>
-                                </div>
-                                <div className="setting-row">
-                                    <label htmlFor="roomPassphrase">
-                                        Optional room passphrase
-                                        <span className="setting-hint">Viewers must enter it after the room code</span>
-                                    </label>
-                                    <input
-                                        id="roomPassphrase"
-                                        type="password"
-                                        value={roomPassphrase}
-                                        maxLength={128}
-                                        autoComplete="new-password"
-                                        onChange={(evt) => setRoomPassphrase(evt.target.value)}
-                                        className="select-input"
-                                    />
-                                </div>
-                                <div className="setting-row setting-row-toggle">
-                                    <input
-                                        type="checkbox"
+                                    </div>
+                                    <SettingSwitch
                                         id="reloadRecoveryEnabled"
+                                        label="Allow recovery after reload"
+                                        hint="Keeps this room reclaimable for about 30 seconds; browser capture must be selected again"
                                         checked={reloadRecoveryEnabled}
                                         onChange={(evt) => setReloadRecoveryEnabled(evt.target.checked)}
                                     />
-                                    <label htmlFor="reloadRecoveryEnabled">
-                                        Allow recovery after reload
-                                        <span className="setting-hint">Keeps this room reclaimable for about 30 seconds; browser capture must be selected again</span>
-                                    </label>
                                 </div>
-                            </div>
-                        </div>
-                            <div
-                                className="settings-panel obs-config-panel"
-                                aria-hidden={ingestMode !== 'obs'}
-                                inert={ingestMode !== 'obs' || undefined}
-                            >
-                                    <h3>OBS Configuration</h3>
-                                    <div className="setting-row setting-row-toggle">
-                                        <input
-                                            type="checkbox"
-                                            id="obsApplySettings"
-                                            checked={obsApplySettings}
-                                            disabled={obsAv1Mode}
-                                            onChange={(e) => setObsApplySettings(e.target.checked)}
-                                        />
-                                        <label htmlFor="obsApplySettings">
-                                            Apply recommended output settings
-                                            <span className="setting-hint">
-                                                {selectedProfile.capture.width}x{selectedProfile.capture.height} @ {frameRate}fps, low-latency tuning
-                                            </span>
-                                        </label>
-                                    </div>
-                                    <div className="setting-row setting-row-toggle">
-                                        <input
-                                            type="checkbox"
-                                            id="obsTryAv1"
-                                            checked={obsTryAv1}
-                                            disabled={resumePending || ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported)}
-                                            onChange={(e) => handleObsTryAv1Change(e.target.checked)}
-                                        />
-                                        <label htmlFor="obsTryAv1">
-                                            Use BYOK TURN (AV1)
-                                            <span className="setting-hint">Open TURN setup in a modal and switch OBS rooms to AV1 WebRTC-only mode</span>
-                                            {resumePending && (
-                                                <span className="setting-hint">{resumeModeLockHint}</span>
-                                            )}
-                                            {(publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported && (
-                                                <span className="setting-hint">
-                                                    Disabled for public sharing: configure a reachable public media address first.
-                                                </span>
-                                            )}
-                                        </label>
-                                    </div>
-                                    <div className="setting-row setting-row-toggle">
-                                        <input
-                                            type="checkbox"
-                                            id="obsAutoStart"
-                                            checked={obsAutoStart}
-                                            onChange={(e) => setObsAutoStart(e.target.checked)}
-                                        />
-                                        <label htmlFor="obsAutoStart">
-                                            Auto-start streaming in OBS
-                                            <span className="setting-hint">
-                                                Begin streaming immediately after configuration
-                                            </span>
-                                        </label>
-                                    </div>
+                                <div
+                                    className="settings-group obs-config-panel"
+                                    hidden={ingestMode !== 'obs'}
+                                    inert={ingestMode !== 'obs' || undefined}
+                                >
+                                    <SettingSwitch
+                                        id="obsApplySettings"
+                                        label="Apply recommended output settings"
+                                        hint={`${selectedProfile.capture.width}x${selectedProfile.capture.height} @ ${frameRate}fps, low-latency tuning`}
+                                        checked={obsApplySettings}
+                                        disabled={obsAv1Mode}
+                                        onChange={(e) => setObsApplySettings(e.target.checked)}
+                                    />
+                                    <SettingSwitch
+                                        id="obsTryAv1"
+                                        label="Use BYOK TURN (AV1)"
+                                        hint={[
+                                            'Open TURN setup in a modal and switch OBS rooms to AV1 WebRTC-only mode',
+                                            resumePending ? resumeModeLockHint : '',
+                                            (publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported
+                                                ? 'Disabled for public sharing: configure a reachable public media address first.'
+                                                : '',
+                                        ].filter(Boolean).join(' ')}
+                                        checked={obsTryAv1}
+                                        disabled={resumePending || ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported)}
+                                        onChange={(e) => handleObsTryAv1Change(e.target.checked)}
+                                    />
+                                    <SettingSwitch
+                                        id="obsAutoStart"
+                                        label="Auto-start streaming in OBS"
+                                        hint="Begin streaming immediately after configuration"
+                                        checked={obsAutoStart}
+                                        onChange={(e) => setObsAutoStart(e.target.checked)}
+                                    />
                                     <div className="setting-row setting-row-inline">
                                         <label htmlFor="obsPassword" className="setting-row-label">
                                             WS password
@@ -2434,19 +2419,25 @@ export default function HostView() {
                                         />
                                     </div>
                                 </div>
+                                <details className="host-more-options">
+                                    <summary>More options</summary>
+                                    <div className="settings-group">
+                                        <SettingSwitch
+                                            id="allowMediaControl"
+                                            label="Allow viewers to pause/play media"
+                                            hint={remoteMediaControlEnabled
+                                                ? 'Viewers can remotely press Play/Pause on your keyboard'
+                                                : undefined}
+                                            note={remoteMediaControlEnabled ? undefined : 'Disabled by the server operator'}
+                                            checked={allowMediaControl}
+                                            disabled={!remoteMediaControlEnabled}
+                                            onChange={(evt) => setAllowMediaControl(evt.target.checked)}
+                                        />
+                                    </div>
+                                </details>
+                            </div>
                         </div>
                     )}
-
-                    <UserErrorAlert error={error} />
-                    {preflightWarnings.length > 0 && (
-                        <div className="alert alert-warning" role="status">
-                            <strong>Preflight notice</strong>
-                            <ul>
-                                {preflightWarnings.map((warning) => <li key={warning}>{warning}</li>)}
-                            </ul>
-                        </div>
-                    )}
-                    {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
 
                     {roomCode && (
                         <div className={ingestMode === 'obs' ? 'streaming-info-row' : ''}>
@@ -2579,16 +2570,23 @@ export default function HostView() {
                     )}
                         </div>
                     )}
-                    {/* Stays last in the side panel: the settings card unmounts and
-                        the room card mounts when sharing starts, so anything above
-                        the room card visibly jumps to the top on that swap. */}
-                    <HostDiagnostics
-                        metrics={roomMetrics}
-                        onDownload={handleDownloadDiagnostics}
-                        downloading={diagnosticDownloading}
-                        downloadStatus={diagnosticDownloadStatus}
-                    />
                 </div>
+                <UserErrorAlert error={error} />
+                {preflightWarnings.length > 0 && (
+                    <div className="alert alert-warning" role="status">
+                        <strong>Preflight notice</strong>
+                        <ul>
+                            {preflightWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+                        </ul>
+                    </div>
+                )}
+                {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
+                <HostDiagnostics
+                    metrics={roomMetrics}
+                    onDownload={handleDownloadDiagnostics}
+                    downloading={diagnosticDownloading}
+                    downloadStatus={diagnosticDownloadStatus}
+                />
             </div>
             {showByokTurnModal && (
                 <Modal titleId="byokTurnModalTitle" onClose={() => setShowByokTurnModal(false)}>
