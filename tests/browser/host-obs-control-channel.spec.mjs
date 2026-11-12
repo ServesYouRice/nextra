@@ -386,3 +386,59 @@ test('Leave and Stop during OBS setup stops OBS once it ends, and a host view op
     obs.release();
     await expectOnlyNewSessionStreams(page, obs, { firstConfigure: first.configure, secondWhipUrl });
 });
+
+// The steps in the preview, in order, with the text of each row.
+function obsSteps(page) {
+    return page.locator('.video-container .obs-steps > li');
+}
+
+test('the three OBS setup steps show where a failed setup stopped and recover on retry', async ({ page }) => {
+    const obs = await installObsStub(page);
+    await startObsSharing(page, server.baseUrl);
+
+    const steps = obsSteps(page);
+    await expect(steps).toHaveCount(3);
+    await expect(steps.nth(0)).toContainText('OBS found on this computer');
+    await expect(steps.nth(1)).toContainText('Nextra applies the stream settings');
+    await expect(steps.nth(2)).toContainText('OBS starts streaming');
+    await expect(steps.nth(0)).toContainText('Needs attention');
+    await expect(steps.nth(1)).toContainText('Waiting');
+    await expect(steps.nth(2)).toContainText('Waiting');
+    // The reason is shown once.
+    await expect(page.getByRole('alert').filter({ hasText: /OBS WebSocket/ })).toHaveCount(1);
+
+    const manual = page.locator('details.obs-manual-details');
+    await expect(manual).not.toHaveAttribute('open', '');
+    await page.getByRole('button', { name: 'Set it up by hand' }).click();
+    await expect(manual).toHaveAttribute('open', '');
+    await expect(manual.locator('summary')).toBeFocused();
+    await expect(page.locator('.copy-field', { hasText: 'WHIP URL' })).toBeVisible();
+
+    obs.mode = 'up';
+    await page.getByRole('button', { name: 'Retry Auto-Configure OBS' }).click();
+    await expect(steps.nth(0)).toContainText('Done');
+    await expect(steps.nth(1)).toContainText('Done');
+    await expect(page.locator('.obs-status-line.is-ok')).toContainText('OBS configured');
+
+    await page.getByRole('button', { name: 'Stop Sharing' }).click();
+    await expect.poll(() => obs.live.length, { message: 'open OBS connections' }).toBe(0);
+});
+
+test('the OBS setup steps follow a setup that is held at its settings write', async ({ page }) => {
+    const obs = await installObsStub(page);
+    await page.goto(`${server.baseUrl}/#host`);
+    const { configure } = await startHeldObsConfigure(page, obs);
+
+    const steps = obsSteps(page);
+    await expect(steps.nth(0)).toContainText('Done');
+    await expect(steps.nth(1)).toContainText('Working…');
+    await expect(steps.nth(2)).toContainText('Waiting');
+
+    obs.release();
+    await expect(steps.nth(1)).toContainText('Done');
+    await expect(page.locator('.obs-status-line.is-ok')).toContainText('OBS configured');
+
+    await page.getByRole('button', { name: 'Stop Sharing' }).click();
+    await expect.poll(() => configure.closed, { message: 'configure connection ended' }).toBe(true);
+    await expect.poll(() => obs.live.length, { message: 'open OBS connections' }).toBe(0);
+});

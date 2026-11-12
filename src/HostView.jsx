@@ -4,7 +4,6 @@ import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { configureObsStream, openObsControlChannel, stopObsStream, stopObsThroughChannel } from './lib/obsWebSocket';
 import { getAv1EncoderCandidates } from './lib/obsOutputModel.mjs';
 import CopyField from './components/CopyField';
-import StatusPill from './components/StatusPill';
 import Modal from './components/Modal';
 import HostDiagnostics from './components/HostDiagnostics';
 import UserErrorAlert from './components/UserErrorAlert';
@@ -16,6 +15,7 @@ import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosti
 import { setNavigationGuard } from './lib/navigationGuard.mjs';
 import { RELOAD_PRESERVE, createStartAttempt, startOperationGuardFor } from './lib/startOperationGuard.mjs';
 import { obsOperationQueue } from './lib/obsOperationQueue.mjs';
+import { obsSetupSteps } from './lib/obsSetupSteps.mjs';
 import {
     START_PHASES,
     createCancellableWait,
@@ -486,6 +486,65 @@ function LiveTimer() {
     return <span className="live-timer" aria-hidden="true">{formatLiveTime(seconds)}</span>;
 }
 
+const OBS_STEP_STATE_WORDS = {
+    done: 'Done',
+    working: 'Working\u2026',
+    waiting: 'Waiting',
+    attention: 'Needs attention',
+};
+
+// The round marker of an OBS setup step: its number until it has a state that
+// says more (a check mark, a spinner, an exclamation mark).
+function ObsStepMarker({ state, number }) {
+    if (state === 'done') {
+        return (
+            <svg className="obs-step-marker" viewBox="0 0 22 22" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="10" />
+                <path d="M6.75 11.25 9.6 14l5.65-6" />
+            </svg>
+        );
+    }
+    if (state === 'working') {
+        return (
+            <svg className="obs-step-marker obs-step-spinner" viewBox="0 0 22 22" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="10" opacity="0.3" />
+                <path d="M11 1a10 10 0 0 1 10 10" />
+            </svg>
+        );
+    }
+    if (state === 'attention') {
+        return (
+            <svg className="obs-step-marker" viewBox="0 0 22 22" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="10" />
+                <path d="M11 6.25v6" />
+                <path d="M11 15.75v.01" strokeWidth="2.2" />
+            </svg>
+        );
+    }
+    return <span className="obs-step-marker obs-step-number" aria-hidden="true">{number}</span>;
+}
+
+// The three OBS setup steps (src/lib/obsSetupSteps.mjs). Before sharing they
+// are a plain numbered list; from Start Sharing each row has its state word.
+function ObsSetupStepList({ steps }) {
+    return (
+        <ol className="obs-steps">
+            {steps.map((step, index) => (
+                <li key={step.id} className={`obs-step is-${step.state}`}>
+                    <ObsStepMarker state={step.state} number={index + 1} />
+                    <span className="obs-step-text">
+                        <span className="obs-step-label">{step.label}</span>
+                        {step.hint && <span className="obs-step-hint">{step.hint}</span>}
+                    </span>
+                    {OBS_STEP_STATE_WORDS[step.state] && (
+                        <span className="obs-step-state">{OBS_STEP_STATE_WORDS[step.state]}</span>
+                    )}
+                </li>
+            ))}
+        </ol>
+    );
+}
+
 export default function HostView() {
     const socket = useContext(SocketContext);
     const [storedByokTurnSession] = useState(() => loadStoredByokTurnSession());
@@ -496,6 +555,7 @@ export default function HostView() {
     const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
     const qualityControlRef = useRef(null);
     const qualityButtonRef = useRef(null);
+    const obsManualDetailsRef = useRef(null);
     const contentMode = 'motion';
     const [allowMediaControl, setAllowMediaControl] = useState(false);
     const [roomPassphrase, setRoomPassphrase] = useState('');
@@ -556,6 +616,8 @@ export default function HostView() {
     const [cloudflareTurnAutofillLoading, setCloudflareTurnAutofillLoading] = useState(false);
     const [obsAutoStatus, setObsAutoStatus] = useState(''); // '' | 'configuring' | 'success' | 'error'
     const [obsAutoMessage, setObsAutoMessage] = useState('');
+    // How far the current configure has got: '' | 'connected' | 'configured'.
+    const [obsSetupProgress, setObsSetupProgress] = useState('');
     const [obsPassword, setObsPassword] = useState(() => loadStoredObsPassword());
     const [obsAutoStart, setObsAutoStart] = useState(true);
     const [obsApplySettings, setObsApplySettings] = useState(true);
@@ -750,10 +812,15 @@ export default function HostView() {
     const runObsConfigure = useCallback((token, options) => {
         const guard = startGuardRef.current;
         setObsAutoMessage(obsOperationQueue.pending > 0 ? OBS_WAITING_MESSAGE : OBS_CONNECTING_MESSAGE);
+        setObsSetupProgress('');
         return obsOperationQueue.configure({
             token,
             isCurrent: (session) => guard.isCurrent(session),
-            configure: () => configureObsStream(options),
+            // Progress from a session that is no longer current never reaches the page.
+            configure: () => configureObsStream({
+                ...options,
+                onProgress: (stage) => { if (guard.isCurrent(token)) setObsSetupProgress(stage); },
+            }),
             shouldCompensate: (result) => guard.staleReason(token) !== RELOAD_PRESERVE
                 && (options.autoStart === true || result?.success === true),
             stop: () => stopObsStream({ password: options.password }),
@@ -1080,6 +1147,7 @@ export default function HostView() {
         setRoomHasTurnServer(false);
         setObsAutoStatus('');
         setObsAutoMessage('');
+        setObsSetupProgress('');
         setShowByokTurnModal(false);
         setStatus('idle');
         setTerminalRoomEnded(false);
@@ -2180,6 +2248,20 @@ export default function HostView() {
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
         : '';
     const totalViewers = viewerCount + whepViewerCount;
+    const obsIdleSteps = obsSetupSteps({ autoStatus: '', progress: '', whipConnected: false, autoStart: obsAutoStart });
+    const obsLiveSteps = obsSetupSteps({
+        autoStatus: obsAutoStatus,
+        progress: obsSetupProgress,
+        whipConnected,
+        autoStart: obsAutoStart,
+    });
+    // The stage's "Set it up by hand" opens the manual fields beside it.
+    const openObsManualSetup = () => {
+        const details = obsManualDetailsRef.current;
+        if (!details) return;
+        details.open = true;
+        details.querySelector('summary')?.focus();
+    };
     // The OBS codec and relay fallback state, for the diagnostics section.
     const obsDiagnosticSummary = ingestMode === 'obs' && roomCode
         ? [
@@ -2298,11 +2380,13 @@ export default function HostView() {
                                     <path d="M8 21h8M12 17v4" />
                                 </svg>
                                 <p className="host-stage-empty-title">Nothing is being shared yet</p>
-                                <p className="video-overlay-sub host-stage-empty-sub">
-                                    {ingestMode === 'obs'
-                                        ? 'Nextra sets OBS up and starts the stream.'
-                                        : "You'll choose a screen, window or tab next."}
-                                </p>
+                                {ingestMode === 'obs'
+                                    ? <ObsSetupStepList steps={obsIdleSteps} />
+                                    : (
+                                        <p className="video-overlay-sub host-stage-empty-sub">
+                                            You&apos;ll choose a screen, window or tab next.
+                                        </p>
+                                    )}
                                 <div className="controls">
                                     <button
                                         className="btn btn-primary btn-main"
@@ -2320,14 +2404,80 @@ export default function HostView() {
                                 </div>
                             </div>
                         )}
-                        {isSharing && ingestMode === 'obs' && (
+                        {isSharing && ingestMode === 'obs' && whipConnected && (
                             <div className="video-overlay">
                                 <p>Streaming via OBS</p>
                                 <p className="video-overlay-sub">
-                                    {whipConnected ? 'OBS connected' : 'Waiting for OBS...'}
+                                    OBS connected
                                     {obsVideoCodec ? ` \u00B7 ${obsVideoCodec.toUpperCase()}` : ''}
                                     {totalViewers > 0 ? ` \u00B7 ${totalViewers} viewer${totalViewers !== 1 ? 's' : ''}` : ''}
                                 </p>
+                            </div>
+                        )}
+                        {isSharing && ingestMode === 'obs' && !whipConnected && (
+                            <div className="video-overlay obs-setup-overlay">
+                                <p>Streaming via OBS</p>
+                                <ObsSetupStepList steps={obsLiveSteps} />
+                                {whipHttpStatus !== 'ready' && obsAutoStatus !== 'error' && (
+                                    <div className="obs-status-line is-warn" role="status">
+                                        {whipHttpStatus === 'error'
+                                            ? `OBS WHIP endpoint unavailable: ${whipHttpError || 'HTTP listener failed.'}`
+                                            : 'OBS WHIP endpoint is starting...'}
+                                    </div>
+                                )}
+                                {obsAutoStatus === 'configuring' && (
+                                    <div className="obs-status-line is-info" role="status">{obsAutoMessage}</div>
+                                )}
+                                {obsAutoStatus === 'success' && (
+                                    <div className="obs-status-line is-ok" role="status">{obsAutoMessage}</div>
+                                )}
+                                {obsAutoStatus === 'error' && (
+                                    <div className="obs-status-line is-warn" role="alert">{obsAutoMessage}</div>
+                                )}
+                                {obsAutoStatus === 'error' && (
+                                    <div className="obs-retry-row">
+                                        <button
+                                            type="button"
+                                            className="btn btn-secondary btn-small"
+                                            onClick={() => {
+                                                if (whipHttpStatus !== 'ready') {
+                                                    setObsAutoStatus('error');
+                                                    setObsAutoMessage(whipHttpStatus === 'error'
+                                                        ? `OBS WHIP endpoint is unavailable: ${whipHttpError || 'HTTP listener failed.'}`
+                                                        : 'OBS WHIP endpoint is still starting. Retry in a moment.');
+                                                    socket.emit('request-server-config');
+                                                    return;
+                                                }
+                                                const whipUrl = buildWhipBroadcastUrl(roomCode);
+                                                setObsAutoStatus('configuring');
+                                                const retryOpts = {
+                                                    ...buildObsAutoConfig(whipUrl, hostTokenRef.current),
+                                                };
+                                                // The retry belongs to the start operation that
+                                                // created this session. Stop, a room that ended
+                                                // or the page going away end it while the retry
+                                                // runs, and its result then belongs to no session
+                                                // (the queued configure stops OBS for it).
+                                                const retryOp = startGuardRef.current.activeOperation;
+                                                runObsConfigure(retryOp, retryOpts).then(({ stale, result }) => {
+                                                    if (stale || !startGuardRef.current.isCurrent(retryOp)) return;
+                                                    setObsAutoStatus(result.success ? 'success' : 'error');
+                                                    setObsAutoMessage(result.message);
+                                                    // Whatever the result, as at start: a failed
+                                                    // run can still leave OBS streaming, and a
+                                                    // channel that failed or was never opened
+                                                    // leaves nothing to stop it with.
+                                                    establishObsControlChannel(retryOp);
+                                                });
+                                            }}
+                                        >
+                                            Retry Auto-Configure OBS
+                                        </button>
+                                        <button type="button" className="obs-manual-link" onClick={openObsManualSetup}>
+                                            Set it up by hand
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
@@ -2592,96 +2742,21 @@ export default function HostView() {
                             />
                         </section>
                     {ingestMode === 'obs' && (
-                        <div className="obs-whip-setup-panel room-info">
-                            <h3>OBS WHIP Setup</h3>
-
-                            {whipHttpStatus !== 'ready' && (
-                                <div className="obs-status-line is-warn" role="status">
-                                    {whipHttpStatus === 'error'
-                                        ? `OBS WHIP endpoint unavailable: ${whipHttpError || 'HTTP listener failed.'}`
-                                        : 'OBS WHIP endpoint is starting...'}
+                        <details className="obs-manual-details" ref={obsManualDetailsRef}>
+                            <summary>Set it up by hand</summary>
+                            <div>
+                                <CopyField label="WHIP URL" value={buildWhipBroadcastUrl(roomCode)} />
+                                <CopyField label="Bearer Token" value={hostToken} />
+                                <div className="obs-manual-note">
+                                    In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
                                 </div>
-                            )}
-
-                            {obsAutoStatus === 'configuring' && (
-                                <div className="obs-status-line is-info" role="status">{obsAutoMessage}</div>
-                            )}
-                            {obsAutoStatus === 'success' && (
-                                <div className="obs-status-line is-ok" role="status">{obsAutoMessage}</div>
-                            )}
-                            {obsAutoStatus === 'error' && (
-                                <div className="obs-status-line is-warn" role="alert">{obsAutoMessage}</div>
-                            )}
-                            {roomMetrics?.obsKeyframeIntervalMs > OBS_SLOW_KEYFRAME_MS && (
-                                <div className="obs-status-line is-warn" role="status">
-                                    OBS is sending a keyframe only every {(roomMetrics.obsKeyframeIntervalMs / 1000).toFixed(1)} s, so it is not using the settings Nextra chose: viewers wait that long for a picture. Restart OBS, then start sharing again.
-                                </div>
-                            )}
-
-                            {obsAutoStatus === 'error' && (
-                                <div className="obs-retry-row">
-                                    <button
-                                        type="button"
-                                        className="btn btn-secondary btn-small"
-                                        onClick={() => {
-                                            if (whipHttpStatus !== 'ready') {
-                                                setObsAutoStatus('error');
-                                                setObsAutoMessage(whipHttpStatus === 'error'
-                                                    ? `OBS WHIP endpoint is unavailable: ${whipHttpError || 'HTTP listener failed.'}`
-                                                    : 'OBS WHIP endpoint is still starting. Retry in a moment.');
-                                                socket.emit('request-server-config');
-                                                return;
-                                            }
-                                            const whipUrl = buildWhipBroadcastUrl(roomCode);
-                                            setObsAutoStatus('configuring');
-                                            const retryOpts = {
-                                                ...buildObsAutoConfig(whipUrl, hostTokenRef.current),
-                                            };
-                                            // The retry belongs to the start operation that
-                                            // created this session. Stop, a room that ended
-                                            // or the page going away end it while the retry
-                                            // runs, and its result then belongs to no session
-                                            // (the queued configure stops OBS for it).
-                                            const retryOp = startGuardRef.current.activeOperation;
-                                            runObsConfigure(retryOp, retryOpts).then(({ stale, result }) => {
-                                                if (stale || !startGuardRef.current.isCurrent(retryOp)) return;
-                                                setObsAutoStatus(result.success ? 'success' : 'error');
-                                                setObsAutoMessage(result.message);
-                                                // Whatever the result, as at start: a failed
-                                                // run can still leave OBS streaming, and a
-                                                // channel that failed or was never opened
-                                                // leaves nothing to stop it with.
-                                                establishObsControlChannel(retryOp);
-                                            });
-                                        }}
-                                    >
-                                        Retry Auto-Configure OBS
-                                    </button>
-                                </div>
-                            )}
-
-                            <details className="obs-manual-details">
-                                <summary>Manual setup (if auto-config fails)</summary>
-                                <div>
-                                    <CopyField label="WHIP URL" value={buildWhipBroadcastUrl(roomCode)} />
-                                    <CopyField label="Bearer Token" value={hostToken} />
-                                    <div className="obs-manual-note">
-                                        In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
+                                {(obsAv1Mode || obsVideoCodec === 'av1') && (
+                                    <div className="obs-av1-note">
+                                        Keep AV1 selected in OBS output. This room disables relay fallback and expects viewers to connect over WebRTC.
                                     </div>
-                                    {(obsAv1Mode || obsVideoCodec === 'av1') && (
-                                        <div className="obs-av1-note">
-                                            Keep AV1 selected in OBS output. This room disables relay fallback and expects viewers to connect over WebRTC.
-                                        </div>
-                                    )}
-                                </div>
-                            </details>
-
-                            <div className="obs-connection-status">
-                                {whipConnected
-                                    ? <StatusPill tone="ok" pulse>OBS Connected</StatusPill>
-                                    : <StatusPill tone="warn">Waiting for OBS...</StatusPill>}
+                                )}
                             </div>
-                        </div>
+                        </details>
                     )}
                         </div>
                     )}
@@ -2707,6 +2782,11 @@ export default function HostView() {
                     </div>
                 )}
                 {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
+                {isSharing && ingestMode === 'obs' && roomMetrics?.obsKeyframeIntervalMs > OBS_SLOW_KEYFRAME_MS && (
+                    <div className="alert alert-warning obs-status-line is-warn" role="status">
+                        OBS is sending a keyframe only every {(roomMetrics.obsKeyframeIntervalMs / 1000).toFixed(1)} s, so it is not using the settings Nextra chose: viewers wait that long for a picture. Restart OBS, then start sharing again.
+                    </div>
+                )}
                 <HostDiagnostics
                     metrics={roomMetrics}
                     obsSummary={obsDiagnosticSummary}
