@@ -928,6 +928,44 @@ test('reload recovery keeps the room code and concurrent stop/unmount is idempot
     await context.close();
 });
 
+test('a viewer is told when the host\'s picture stops and sees it return after Resume Sharing', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+
+    await installDeterministicDisplayCapture(hostPage);
+    await hostPage.goto('/#host');
+    await hostPage.getByLabel('Allow recovery after reload').check();
+    await hostPage.getByRole('button', { name: 'Start Sharing' }).click();
+    await expect(hostPage.getByText(/Streaming \(/)).toBeVisible();
+    const code = await readRoomCode(hostPage);
+    await joinAndWatch(viewerPage, code);
+
+    // The reloaded host reclaims the room at once, so the viewer stays in it
+    // with no picture until the host presses Resume Sharing.
+    await hostPage.reload();
+    await expect(viewerPage.getByText('The host dropped out')).toBeVisible({ timeout: 15_000 });
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toHaveCount(0);
+    await expect(viewerPage.getByRole('alert')).toHaveCount(0);
+
+    await hostPage.getByRole('button', { name: 'Resume Sharing' }).click();
+    await expect(hostPage.getByText(/Streaming \(/)).toBeVisible();
+    await expect(viewerPage.getByText('The host dropped out')).toHaveCount(0);
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
+    const resumedAt = await videoTime(viewerPage);
+    await expect.poll(() => videoTime(viewerPage)).toBeGreaterThan(resumedAt + 1);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
 test('delayed relay-first viewers select one fresh recorder generation and clean up after rejoin', async ({ browser, request }, testInfo) => {
     const hostContext = await browser.newContext();
     const firstViewerContext = await browser.newContext();

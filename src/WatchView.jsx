@@ -110,6 +110,7 @@ export default function WatchView({ initialCode = '' }) {
     const [codeError, setCodeError] = useState(false);
     const [hostDisconnected, setHostDisconnected] = useState(false);
     const [hostReconnectingReason, setHostReconnectingReason] = useState('');
+    const [pictureInterrupted, setPictureInterrupted] = useState(false); // WebRTC viewer whose video producer closed
     const [mediaControlStatus, setMediaControlStatus] = useState('');
     const [hasProducer, setHasProducer] = useState(false);
     const [allowMediaControl, setAllowMediaControl] = useState(false);
@@ -316,6 +317,7 @@ export default function WatchView({ initialCode = '' }) {
         });
         consumersRef.current = consumersRef.current.filter((item) => item.kind !== consumer.kind);
         consumersRef.current.push(consumer);
+        if (consumer.kind === 'video') setPictureInterrupted(false);
 
         const existingTracks = mediaStreamRef.current
             ? mediaStreamRef.current.getTracks().filter((track) => track.kind !== consumer.kind && track.readyState !== 'ended')
@@ -890,6 +892,7 @@ export default function WatchView({ initialCode = '' }) {
             dropFallbackClaim();
             fallbackResumeRef.current = false;
             setHostReconnectingReason('');
+            setPictureInterrupted(false);
             cleanupPlayback();
             setWatching(false);
             setWatchLoading(false);
@@ -950,6 +953,11 @@ export default function WatchView({ initialCode = '' }) {
                 const remainingTracks = mediaStreamRef.current.getTracks().filter((track) => track !== closed.track && track.readyState !== 'ended');
                 mediaStreamRef.current = new MediaStream(remainingTracks);
                 if (videoRef.current) videoRef.current.srcObject = mediaStreamRef.current;
+            }
+            // The room stays open but has no picture (the host reloaded and has
+            // not resumed yet): say so instead of an endless spinner.
+            if (watching && playbackMode === 'mediasoup' && !consumersRef.current.some((consumer) => consumer.kind === 'video')) {
+                setPictureInterrupted(true);
             }
         };
         const onWhipStatus = ({ reconnecting }) => setWhipReconnecting(!!reconnecting);
@@ -1293,6 +1301,7 @@ export default function WatchView({ initialCode = '' }) {
         const session = viewerSession.current();
         if (!session) return;
         setError('');
+        setPictureInterrupted(false);
         setWatchLoading(true);
         cleanupPlayback();
 
@@ -1700,15 +1709,19 @@ export default function WatchView({ initialCode = '' }) {
         resetDevice();
     }, [cleanupPlayback, dropFallbackClaim, socket, viewerSession]);
 
+    // Only while a WebRTC playback is running; Leave Room or a relay start ends it.
+    const hostPictureStopped = pictureInterrupted && watching && playbackMode === 'mediasoup' && !fallbackMode;
     const playbackStatus = fallbackMode
         ? `Relay Mode (${fallbackCodec || 'unknown'}) - ${fallbackState || 'initializing'}`
         : watching && playbackMode === 'relay'
             ? 'Compatibility relay mode active (higher latency).'
-            : watching
-                ? ingestMode === 'obs'
-                    ? 'OBS WebRTC mode active (lowest latency).'
-                    : 'WebRTC mode active (lowest latency).'
-                : '';
+            : hostPictureStopped
+                ? 'Waiting for the host\'s picture to come back.'
+                : watching
+                    ? ingestMode === 'obs'
+                        ? 'OBS WebRTC mode active (lowest latency).'
+                        : 'WebRTC mode active (lowest latency).'
+                    : '';
     return (
         <div className="view-container">
             <div className="view-header">
@@ -1833,6 +1846,15 @@ export default function WatchView({ initialCode = '' }) {
                         {hostReconnectingReason && !hostDisconnected && (
                             <div className="video-overlay">
                                 <p>{hostReconnectingReason}</p>
+                            </div>
+                        )}
+
+                        {hostPictureStopped && !hostReconnectingReason && !hostDisconnected && (
+                            <div className="video-overlay" role="status">
+                                <p>The host dropped out</p>
+                                <p className="video-overlay-sub">
+                                    Waiting for the picture to come back. You don&apos;t need to do anything.
+                                </p>
                             </div>
                         )}
 
