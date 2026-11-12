@@ -114,7 +114,6 @@
   --panel-shell-radius: 18px;
   --radius: 8px;
   --radius-lg: 12px;
-  --radius-xl: 14px;
   --radius-pill: 999px;
   --tap-min: 2.75rem;
   --shadow-card:
@@ -174,7 +173,7 @@ code {
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 
 .skip-link {
@@ -187,7 +186,7 @@ code {
   background: var(--bg-3);
   color: var(--text-1);
   text-decoration: none;
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   border: 1px solid var(--border-strong);
   transition: top var(--transition);
 }
@@ -274,7 +273,7 @@ code {
   padding: 0 0.75rem;
   text-decoration: none;
   color: var(--text-2);
-  font-size: 0.9rem;
+  font-size: var(--fs-small);
   font-weight: 500;
   transition: color var(--transition);
 }
@@ -318,7 +317,7 @@ code {
 }
 
 .footer-note {
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
 }
 
@@ -331,7 +330,7 @@ code {
 
 .footer-links a {
   text-decoration: none;
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   font-weight: 500;
   color: var(--text-3);
   transition: color var(--transition);
@@ -363,7 +362,7 @@ code {
   gap: 0.85rem;
   padding: 4rem 1.5rem;
   color: var(--text-3);
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
 }
 
 .spinner {
@@ -438,7 +437,7 @@ code {
   border: none;
   border-radius: var(--radius);
   font-family: inherit;
-  font-size: 0.825rem;
+  font-size: var(--fs-small);
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition);
@@ -518,12 +517,12 @@ code {
 
 .btn-large {
   padding: 0.65rem 1.75rem;
-  font-size: 0.875rem;
+  font-size: var(--fs-small);
 }
 
 .btn-small {
   padding: 0.35rem 0.75rem;
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
 }
 
 /* Quiet Stop on the page. */
@@ -556,7 +555,7 @@ code {
 .select-input {
   min-height: 2.4rem;
   padding: 0.5rem 0.85rem;
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   font-family: inherit;
   background: rgba(12, 13, 18, 0.54);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -584,7 +583,7 @@ input.select-input {
 
 .input-code {
   padding: 0.6rem 1rem;
-  font-size: 1rem;
+  font-size: var(--fs-body);
   font-family: var(--font-mono);
   text-align: center;
   letter-spacing: 0.12em;
@@ -597,7 +596,7 @@ input.select-input {
 }
 
 .input-code::placeholder {
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   letter-spacing: 0;
   color: var(--text-3);
   font-family: var(--font-sans);
@@ -630,7 +629,7 @@ input.select-input {
 }
 
 .panel-heading {
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   font-weight: 700;
   color: #7481ab;
   text-transform: uppercase;
@@ -644,7 +643,7 @@ input.select-input {
   gap: 0.95rem;
   padding: var(--row-pad-block) 1rem;
   margin-top: var(--row-gap);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   background: rgba(255, 255, 255, 0.018);
   border: 1px solid transparent;
   transition: border-color var(--transition), background var(--transition);
@@ -685,7 +684,7 @@ input.select-input {
 }
 
 .setting-row label {
-  font-size: 0.9rem;
+  font-size: var(--fs-small);
   color: #cdd4f0;
   cursor: pointer;
   user-select: none;
@@ -694,7 +693,7 @@ input.select-input {
 
 .setting-row-label {
   color: rgba(236, 236, 240, 0.86);
-  font-size: 0.9rem;
+  font-size: var(--fs-small);
   line-height: 1.38;
 }
 
@@ -715,12 +714,12 @@ input.select-input {
   min-width: 6.4rem;
   padding: 0.55rem 1.1rem;
   font-family: inherit;
-  font-size: 0.95rem;
+  font-size: var(--fs-body);
   font-weight: 600;
   border: 1px solid transparent;
   background: transparent;
   color: #9ea6c7;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   cursor: pointer;
   transition: all var(--transition);
 }
@@ -745,7 +744,7 @@ input.select-input {
   display: flex;
   width: 100%;
   padding: 2px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   box-shadow: none;
 }
 
@@ -753,8 +752,8 @@ input.select-input {
   flex: 1 1 0;
   min-width: 0;
   padding: 5px 6px;
-  font-size: 13px;
-  border-radius: 6px;
+  font-size: var(--fs-small);
+  border-radius: var(--radius);
 }
 
 .mode-toggle-small button.active {
@@ -782,7 +781,7 @@ input.select-input {
   padding: 0.625rem 0.875rem;
   border-radius: var(--radius);
   margin-bottom: 0.75rem;
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
   line-height: 1.5;
 }
 
@@ -825,14 +824,14 @@ input.select-input {
   background: var(--bg-2);
   box-shadow: var(--shadow-lg);
   color: var(--text-1);
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
 }
 
 .notification-success { border-color: rgba(68, 190, 130, 0.35); }
 .notification-error { border-color: rgba(229, 91, 91, 0.4); }
-.notification button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 1.2rem; }
+.notification button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: var(--fs-heading); }
 
-.host-diagnostics, .connection-quality { margin-top: 0.75rem; color: var(--text-2); font-size: 0.75rem; }
+.host-diagnostics, .connection-quality { margin-top: 0.75rem; color: var(--text-2); font-size: var(--fs-label); }
 .host-diagnostics summary, .connection-quality summary { cursor: pointer; color: var(--text-1); }
 .host-diagnostics summary { box-sizing: border-box; min-height: 44px; padding-block: 12px; line-height: 20px; }
 .host-diagnostics dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 0.5rem; }
@@ -848,8 +847,8 @@ input.select-input {
   align-items: center;
   gap: 0.4rem;
   padding: 0.25rem 0.7rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-label);
   font-weight: 500;
   border: 1px solid var(--border);
   background: var(--bg-2);
@@ -895,11 +894,11 @@ input.select-input {
 
 .callout {
   padding: 0.85rem 0.95rem;
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   border: 1px solid var(--border);
   background: var(--bg-2);
   color: var(--text-2);
-  font-size: 0.82rem;
+  font-size: var(--fs-small);
   line-height: 1.55;
   margin: 0.75rem 0;
 }
@@ -940,7 +939,7 @@ input.select-input {
 }
 
 .copy-field-label {
-  font-size: 0.65rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -956,7 +955,7 @@ input.select-input {
   background: none;
   font-family: var(--font-mono);
   color: var(--accent);
-  font-size: 0.78rem;
+  font-size: var(--fs-label);
   text-align: left;
   cursor: pointer;
   word-break: break-all;
@@ -969,7 +968,7 @@ input.select-input {
 }
 
 .copy-field-value.copy-field-strong {
-  font-size: 1.5rem;
+  font-size: var(--fs-title);
   font-weight: 600;
   letter-spacing: 0.08em;
   color: var(--text-1);
@@ -981,7 +980,7 @@ input.select-input {
 }
 
 .copy-field-feedback {
-  font-size: 0.7rem;
+  font-size: var(--fs-label);
   color: var(--ok);
 }
 
@@ -1076,12 +1075,12 @@ input.select-input {
   word-break: break-all;
   user-select: all;
   font-family: var(--font-mono);
-  font-size: 0.78rem;
+  font-size: var(--fs-label);
   color: var(--text-1);
 }
 
 .copy-hint {
-  font-size: 0.7rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
   margin-top: 0.25rem;
 }
@@ -1125,7 +1124,7 @@ input.select-input {
 
 .landing-lead {
   color: var(--text-2);
-  font-size: 1.0625rem;
+  font-size: var(--fs-body);
   line-height: 1.6;
   max-width: 52ch;
 }
@@ -1139,7 +1138,7 @@ input.select-input {
   padding: 1rem;
   background: var(--surface-glass-accent), var(--surface-glass);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
+  border-radius: var(--panel-shell-radius);
   box-shadow: var(--shadow-card);
 }
 
@@ -1202,7 +1201,7 @@ input.select-input {
   aspect-ratio: 16 / 9;
   width: 100%;
   overflow: hidden;
-  border-radius: 18px;
+  border-radius: var(--panel-shell-radius);
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: linear-gradient(135deg, #1c2340, #12141d 60%, #2a1d3d);
   box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.7);
@@ -1215,7 +1214,7 @@ input.select-input {
   flex-direction: column;
   gap: 8%;
   padding: 5%;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: linear-gradient(180deg, #232636, #181a25);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -1223,14 +1222,14 @@ input.select-input {
 .landing-preview-bar {
   height: 8%;
   width: 30%;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: linear-gradient(100deg, #5b8def, #b46cf0);
 }
 
 .landing-preview-line {
   height: 6%;
   width: 90%;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(255, 255, 255, 0.14);
 }
 
@@ -1240,7 +1239,7 @@ input.select-input {
 
 .landing-preview-block {
   flex: 1;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: rgba(91, 141, 239, 0.18);
 }
 
@@ -1249,8 +1248,8 @@ input.select-input {
 .landing-preview-code {
   position: absolute;
   padding: 0.2rem 0.55rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-label);
   font-weight: 600;
   background: rgba(10, 11, 16, 0.72);
   color: #e8eaf2;
@@ -1304,14 +1303,14 @@ input.select-input {
 }
 
 .view-header h1 {
-  font-size: 1.25rem;
+  font-size: var(--fs-heading);
   font-weight: 600;
   margin-bottom: 0.15rem;
 }
 
 .subtitle {
   color: var(--text-3);
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
 }
 
 /* Prose keeps a readable measure while wide blocks - the browser support table -
@@ -1334,7 +1333,7 @@ input.select-input {
 }
 
 .article-container h1 {
-  font-size: clamp(1.5rem, 1.15rem + 1.5vw, 2rem);
+  font-size: var(--fs-title);
   color: var(--text-1);
   margin-bottom: 2rem;
   font-weight: 600;
@@ -1344,7 +1343,7 @@ input.select-input {
 /* Grid items do not margin-collapse, so this pairs with the 1rem bottom margin
    on the preceding block to land on the same 2.5rem gap it had in normal flow. */
 .article-container h2 {
-  font-size: clamp(1.1rem, 1rem + 0.5vw, 1.25rem);
+  font-size: var(--fs-heading);
   color: var(--text-1);
   margin-top: 1.5rem;
   margin-bottom: 1rem;
@@ -1410,7 +1409,7 @@ input.select-input {
 }
 
 .legal-eyebrow {
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-3);
@@ -1462,7 +1461,7 @@ input.select-input {
   border-radius: var(--radius-lg);
   color: var(--text-2);
   font-family: inherit;
-  font-size: 0.95rem;
+  font-size: var(--fs-body);
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
@@ -1551,7 +1550,7 @@ input.select-input {
   height: 3rem;
   background: var(--bg-3);
   border: 1.5px solid var(--border-strong);
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 
 .howto-art-window.is-picked {
@@ -1720,13 +1719,13 @@ input.select-input {
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   color: var(--text-3);
-  font-size: 0.875rem;
+  font-size: var(--fs-small);
   text-align: center;
   padding: 1rem;
 }
 
 .video-overlay-sub {
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
   color: var(--text-3);
 }
 
@@ -1736,12 +1735,6 @@ input.select-input {
   align-items: center;
   gap: 0.6rem;
   color: var(--text-2);
-}
-
-.host-ended {
-  color: var(--err);
-  font-weight: 500;
-  font-size: 1.2rem;
 }
 
 .controls {
@@ -1849,7 +1842,7 @@ input.select-input {
   width: min(20rem, 100%);
   padding: 0.75rem;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--surface-glass-accent), var(--surface-glass);
   box-shadow: var(--shadow-card);
 }
@@ -1923,7 +1916,7 @@ input.select-input {
 .media-status {
   text-align: center;
   color: var(--text-3);
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
   margin-top: 0.25rem;
 }
 
@@ -2431,9 +2424,9 @@ input.select-input {
   min-width: 7.5rem;
   padding: 0 1.1rem;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: #9ea6c7;
-  font-size: 0.95rem;
+  font-size: var(--fs-body);
   font-weight: 600;
   cursor: pointer;
   user-select: none;
@@ -2483,7 +2476,7 @@ input.select-input {
   min-width: 0;
   margin: 0;
   color: var(--text-3);
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
   line-height: 1.38;
 }
 
@@ -2498,7 +2491,7 @@ input.select-input {
 
 .host-stage-empty-title {
   color: var(--text-1);
-  font-size: 1.05rem;
+  font-size: var(--fs-body);
   font-weight: 600;
 }
 
@@ -2585,7 +2578,7 @@ input.select-input {
 
 .host-settings-panel .setting-row .setting-row-label {
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-small);
   line-height: 1.3;
 }
 
@@ -2593,9 +2586,9 @@ input.select-input {
   min-height: 32px;
   height: 32px;
   padding: 0 10px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   box-shadow: none;
-  font-size: 13px;
+  font-size: var(--fs-small);
 }
 
 .host-settings-panel .select-input::placeholder {
@@ -2611,7 +2604,7 @@ input.select-input {
   gap: 10px;
   min-height: 20px;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: var(--fs-label);
   line-height: 1.3;
   cursor: pointer;
 }
@@ -2629,7 +2622,7 @@ input.select-input {
   width: 32px;
   height: 18px;
   margin: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: #33333d;
   cursor: inherit;
   transition: background var(--transition);
@@ -2666,7 +2659,7 @@ input.select-input {
 
 .host-settings-panel .setting-note {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 1.3;
 }
 
@@ -2677,7 +2670,7 @@ input.select-input {
 }
 
 .host-settings-panel .capture-settings > .setting-note {
-  font-size: 13px;
+  font-size: var(--fs-small);
 }
 
 /* Rarely used options: the last row, pinned to the bottom of the panel. */
@@ -2691,7 +2684,7 @@ input.select-input {
   justify-content: space-between;
   min-height: 20px;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: var(--fs-label);
   cursor: pointer;
   list-style: none;
 }
@@ -2745,14 +2738,14 @@ input.select-input {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  font-size: 0.825rem;
+  font-size: var(--fs-small);
   color: var(--text-3);
   padding-top: 0.25rem;
   flex-wrap: wrap;
 }
 
 .room-meta {
-  font-size: 0.7rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
   margin-top: 0.25rem;
 }
@@ -2852,7 +2845,7 @@ input.select-input {
 }
 
 .invite-code .copy-field-label {
-  font-size: 12px;
+  font-size: var(--fs-label);
   color: var(--text-3);
 }
 
@@ -2861,7 +2854,7 @@ input.select-input {
 }
 
 .invite-code > .copy-field-value {
-  font-size: 30px;
+  font-size: var(--fs-title);
   font-weight: 700;
   letter-spacing: 0.08em;
   line-height: 1.2;
@@ -2890,7 +2883,7 @@ input.select-input {
 }
 
 .invite-link .copy-field-label {
-  font-size: 13px;
+  font-size: var(--fs-small);
   color: var(--text-2);
   text-transform: none;
   letter-spacing: 0;
@@ -2900,7 +2893,7 @@ input.select-input {
 }
 
 .invite-link > .copy-field-value {
-  font-size: 12px;
+  font-size: var(--fs-label);
   line-height: 18px;
 }
 
@@ -2908,9 +2901,9 @@ input.select-input {
   flex: none;
   padding: 1px 6px;
   border: 1px solid rgba(60, 203, 127, 0.5);
-  border-radius: 5px;
+  border-radius: var(--radius);
   color: #a9ecc8;
-  font-size: 11px;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.05em;
   line-height: 1.3;
@@ -2928,12 +2921,12 @@ input.select-input {
   padding-top: 10px;
   border-top: var(--invite-hairline);
   color: var(--text-3);
-  font-size: 13px;
+  font-size: var(--fs-small);
   line-height: 1.4;
 }
 
 .obs-status-line {
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   margin-bottom: 0.5rem;
 }
 
@@ -2950,7 +2943,7 @@ input.select-input {
 }
 
 .obs-manual-details {
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   margin-bottom: 0.5rem;
 }
 
@@ -3143,7 +3136,7 @@ input.select-input {
   padding: 1.5rem;
   background: var(--surface-glass-accent), var(--surface-glass);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
+  border-radius: var(--panel-shell-radius);
   box-shadow: var(--shadow-card);
 }
 
@@ -3181,7 +3174,7 @@ input.select-input {
 
 .field-error {
   color: #f5a3a3;
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
   text-align: center;
 }
 
@@ -3226,7 +3219,7 @@ input.select-input {
 /* The six boxes are decoration; the real input lies over them, transparent. */
 .code-entry {
   position: relative;
-  border-radius: 8px;
+  border-radius: var(--radius);
 }
 
 .code-entry:focus-within {
@@ -3250,7 +3243,7 @@ input.select-input {
   justify-content: center;
   background: var(--bg-2);
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border-radius: var(--radius);
   font-family: var(--font-mono);
   font-size: var(--fs-title);
   font-weight: 600;
@@ -3311,12 +3304,6 @@ input.select-input {
   white-space: normal;
 }
 
-.input-group {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
 /* ========== STATUS PAGE ========== */
 .status-container {
   max-width: 960px;
@@ -3335,7 +3322,7 @@ input.select-input {
 }
 
 .status-head h1 {
-  font-size: 1.25rem;
+  font-size: var(--fs-heading);
   font-weight: 600;
 }
 
@@ -3352,13 +3339,13 @@ input.select-input {
 
 .stat-card {
   padding: 1rem 1.1rem;
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: var(--surface-glass-accent), var(--surface-glass);
 }
 
 .stat-value {
-  font-size: 1.6rem;
+  font-size: var(--fs-title);
   font-weight: 650;
   font-family: var(--font-mono);
   color: var(--text-1);
@@ -3366,7 +3353,7 @@ input.select-input {
 }
 
 .stat-label {
-  font-size: 0.72rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -3400,7 +3387,7 @@ input.select-input {
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
 }
 
 .data-table th,
@@ -3412,7 +3399,7 @@ input.select-input {
 }
 
 .data-table th {
-  font-size: 0.68rem;
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-3);
@@ -3438,7 +3425,7 @@ input.select-input {
   padding: 2rem;
   text-align: center;
   color: var(--text-3);
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
 }
 
 .status-health {
@@ -3546,7 +3533,7 @@ input.select-input {
   border: 1px solid var(--border);
   background: var(--bg-1);
   color: var(--text-2);
-  font-size: 0.875rem;
+  font-size: var(--fs-small);
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -3612,7 +3599,7 @@ input.select-input {
   flex-direction: column;
   gap: 0.8rem;
   padding: 1.35rem 1.45rem 1.45rem;
-  border-radius: 24px;
+  border-radius: var(--panel-shell-radius);
   border: 1px solid rgba(255, 255, 255, 0.1);
   background:
     radial-gradient(circle at top right, rgba(91, 141, 239, 0.16), transparent 34%),
@@ -3630,7 +3617,7 @@ input.select-input {
 }
 
 .settings-modal-eyebrow {
-  font-size: 0.72rem;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -3640,13 +3627,13 @@ input.select-input {
 
 .settings-modal-head h3 {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: var(--fs-heading);
   color: var(--text-1);
 }
 
 .settings-modal-head p {
   margin: 0.45rem 0 0;
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   color: rgba(236, 236, 240, 0.66);
   max-width: 42ch;
   line-height: 1.55;
@@ -3689,13 +3676,13 @@ input.select-input {
 }
 
 .center-page h1 {
-  font-size: 1.5rem;
+  font-size: var(--fs-title);
   font-weight: 650;
 }
 
 .center-page p {
   color: var(--text-2);
-  font-size: 0.9rem;
+  font-size: var(--fs-small);
   max-width: 44ch;
 }
 
@@ -3743,7 +3730,7 @@ input.select-input {
 
 .center-page-code {
   font-family: var(--font-mono);
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -3788,7 +3775,7 @@ input.select-input {
   }
 
   .view-header h1 {
-    font-size: 1.1rem;
+    font-size: var(--fs-heading);
   }
 
   .panel-heading {
@@ -3797,7 +3784,7 @@ input.select-input {
 
   .setting-row label,
   .setting-row-label {
-    font-size: 0.84rem;
+    font-size: var(--fs-small);
     line-height: 1.3;
   }
 
@@ -3830,7 +3817,7 @@ input.select-input {
   }
 
   .view-header h1 {
-    font-size: 1rem;
+    font-size: var(--fs-body);
   }
 
   /* Tighter rows in the settings panel: 8px between rows, 4px between a label
@@ -3886,7 +3873,7 @@ input.select-input {
   .settings-modal {
     width: 100%;
     max-height: min(92dvh, 900px);
-    border-radius: 22px 22px 18px 18px;
+    border-radius: var(--panel-shell-radius);
     padding: 1.1rem 1rem 1rem;
   }
 
@@ -3909,12 +3896,7 @@ input.select-input {
 
 @media (max-width: 640px) {
   .copy-field-value.copy-field-strong {
-    font-size: 1.25rem;
-  }
-
-  .input-group {
-    flex-direction: column;
-    width: 100%;
+    font-size: var(--fs-heading);
   }
 
   .input-code {
@@ -4011,19 +3993,11 @@ input.select-input {
 @media (max-width: 400px) {
   .input-code {
     width: 100%;
-    font-size: 0.95rem;
-  }
-
-  .input-group {
-    align-items: stretch;
-  }
-
-  .input-group .btn {
-    width: 100%;
+    font-size: var(--fs-body);
   }
 
   .copy-field-value.copy-field-strong {
-    font-size: 1.1rem;
+    font-size: var(--fs-heading);
   }
 
   .btn-large {
@@ -4031,10 +4005,10 @@ input.select-input {
   }
 
   .video-overlay {
-    font-size: 0.8rem;
+    font-size: var(--fs-small);
   }
 
   .view-header h1 {
-    font-size: 1.5rem;
+    font-size: var(--fs-title);
   }
 }

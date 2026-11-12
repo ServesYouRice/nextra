@@ -77,7 +77,6 @@ test('every foundation token is declared once in :root', () => {
     assert.equal(tokenValue('--radius'), '8px');
     assert.equal(tokenValue('--radius-lg'), '12px');
     assert.equal(tokenValue('--panel-shell-radius'), '18px');
-    assert.ok(rootBlock().includes('--radius-xl:'), '--radius-xl is left for T67 to remove');
 });
 
 test('the button and card gradients are held in tokens with their original values', () => {
@@ -125,4 +124,52 @@ test('the focus ring and the reduced-motion rule stay', () => {
     assert.match(ruleBody(':focus-visible'), /outline:\s*2px solid var\(--accent\);/);
     assert.match(ruleBody(':focus-visible'), /outline-offset:\s*2px;/);
     assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?transition-duration:\s*0\.01ms !important;/);
+});
+
+// Every declaration of `property` in the stylesheet, with the selector it sits in.
+function declarations(property) {
+    const source = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const found = [];
+    const stack = [];
+    let prelude = '';
+    let body = '';
+    for (const char of source) {
+        if (char === '{') {
+            stack.push(prelude.trim());
+            prelude = '';
+            body = '';
+        } else if (char === '}') {
+            stack.pop();
+            prelude = '';
+            body = '';
+        } else if (char === ';') {
+            const match = body.match(new RegExp(`^\\s*${property}\\s*:\\s*([^]*)$`));
+            if (match) found.push({ selector: stack[stack.length - 1], value: match[1].trim() });
+            body = '';
+        } else {
+            prelude += char;
+            body += char;
+        }
+    }
+    return found;
+}
+
+function describe(offenders) {
+    return offenders.map(({ selector, value }) => `${selector} { ${value} }`).join('\n');
+}
+
+test('every font-size uses a text token', () => {
+    const allowed = /^(var\(--fs-(display|title|heading|body|small|label)\)|inherit|-?[\d.]+em|var\(--brand-mark-height,[^]*\))$/;
+    const offenders = declarations('font-size').filter(({ value }) => !allowed.test(value));
+    assert.equal(offenders.length, 0, `${offenders.length} font-size values are off the scale:\n${describe(offenders)}`);
+});
+
+test('every border-radius uses a corner token', () => {
+    const allowed = /^(var\(--radius\)|var\(--radius-lg\)|var\(--panel-shell-radius\)|var\(--radius-pill\)|50%|inherit|0)$/;
+    const offenders = declarations('border-radius').filter(({ value }) => !allowed.test(value));
+    assert.equal(offenders.length, 0, `${offenders.length} border-radius values are off the scale:\n${describe(offenders)}`);
+});
+
+test('--radius-xl is not declared or used', () => {
+    assert.ok(!css.includes('--radius-xl'), '--radius-xl still appears in src/index.css');
 });
