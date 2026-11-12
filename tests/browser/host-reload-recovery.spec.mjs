@@ -432,7 +432,7 @@ test('while a reclaimed browser room waits for Resume Sharing, its ingest mode c
     const code = await shareAndReload(page);
     socketWatch.events.length = 0;
 
-    const obsToggle = page.getByLabel('Use OBS (WHIP ingest)');
+    const obsToggle = page.getByRole('radio', { name: 'OBS', exact: true });
     await expect.soft(obsToggle, 'the OBS toggle while the room waits').toBeDisabled();
     await expect.soft(page.getByText('keeps the ingest mode it was created with').first()).toBeVisible();
     await expect.soft(page.locator('#obsTryAv1'), 'the AV1 toggle while the room waits').toBeDisabled();

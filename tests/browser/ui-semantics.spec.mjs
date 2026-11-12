@@ -290,7 +290,7 @@ for (const width of REFLOW_WIDTHS) {
                 bodyScrollWidth: document.body.scrollWidth,
                 viewportWidth: document.documentElement.clientWidth,
                 stageRight: right('.video-container'),
-                tuningRight: right('.controls .mode-toggle'),
+                tuningRight: right('.capture-settings .mode-toggle[aria-label="Picture preset"]'),
             };
         });
         const label = `host with OBS on at ${width}px (stage right edge ${metrics.stageRight}, tuning toggle ${metrics.tuningRight})`;
@@ -355,7 +355,7 @@ for (const width of TOGGLE_WIDTHS) {
         await settledBox(page, '.video-container');
         await expectHostToggleCellsVisible(
             page,
-            ['OBS tuning profile', 'Resolution', 'Frame rate'],
+            ['Resolution', 'Frame rate', 'Picture preset'],
             `at ${width}px, OBS on`,
         );
     });

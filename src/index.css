@@ -1569,11 +1569,12 @@ input.select-input {
    (three 5.25rem cells, 260px) beside its label needs 332px plus the 1rem page
    padding, so on a viewport narrower than about 365px it was squeezed and the
    1080p cell was cut off with no way to scroll to it (about half of it at 320px).
-   Below 23em (368px: a few pixels over the exact fit, for labels that render
-   wider in a platform's system font, and under the 375px phones) the label sits
-   above its toggle, which then has the row's full width. em in a media query
-   follows the browser's default font size, as the rem cell widths do. */
-@media (max-width: 23em) {
+   The Picture preset label is wider than Resolution, so its row needs about
+   403px. Below 26em (416px, which takes in the 375px and 390px phones) the
+   label sits above its toggle, which then has the row's full width. em in a
+   media query follows the browser's default font size, as the rem cell widths
+   do. */
+@media (max-width: 26em) {
   .capture-settings .setting-row-inline {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.35rem;
@@ -1653,6 +1654,113 @@ input.select-input {
   flex: 1;
   max-width: 800px;
   min-width: 0;
+}
+
+/* The capture source is the first choice on the host page: two tabs above the
+   preview. The radio inputs stay in the tab (invisible, covering it) so a click
+   anywhere on a tab is a click on its radio and the arrow keys move between
+   them. The group looks like .mode-toggle but is not one: the host page's
+   toggle cells are listed by that class. */
+.source-tabs-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.source-tabs {
+  display: inline-flex;
+  padding: 2px;
+  background: rgba(17, 18, 24, 0.58);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-lg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.source-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  min-width: 7.5rem;
+  padding: 0 1.1rem;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: #9ea6c7;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  transition: all var(--transition);
+}
+
+.source-tab input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+
+.source-tab:has(input:checked) {
+  background: var(--surface-button);
+  border-color: rgba(151, 175, 255, 0.22);
+  box-shadow:
+    0 14px 28px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+
+.source-tab:has(input:not(:checked):not(:disabled)):hover {
+  color: var(--text-1);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.source-tab:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.source-tab:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.source-tab-icon {
+  flex: none;
+}
+
+.source-tabs-hint {
+  flex: 1 1 12rem;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-3);
+  font-size: 0.8rem;
+  line-height: 1.38;
+}
+
+/* The empty preview: what will happen, and the page's one main button. */
+.host-stage-empty {
+  gap: 0.5rem;
+}
+
+.host-stage-empty-icon {
+  color: var(--text-3);
+}
+
+.host-stage-empty-title {
+  color: var(--text-1);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.host-stage-empty .controls {
+  margin: 0.5rem 0 0;
 }
 
 .host-side-panel {
@@ -2426,6 +2534,20 @@ input.select-input {
   .controls {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  /* A 200px-tall preview has room for the title and the button only. */
+  .host-stage-empty-icon,
+  .host-stage-empty-sub {
+    display: none;
+  }
+
+  .host-stage-empty .controls {
+    margin-top: 0;
+  }
+
+  .source-tabs-hint {
+    flex-basis: 100%;
   }
 
   .nav-menu-button {

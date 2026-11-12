@@ -2110,15 +2110,83 @@ export default function HostView() {
 
             <div className="host-layout">
                 <div className="host-video-section">
+                    {!isSharing && (
+                        <div className="source-tabs-row">
+                            <div
+                                className="source-tabs"
+                                role="radiogroup"
+                                aria-label="Capture source"
+                                aria-describedby="captureSourceHint"
+                            >
+                                <label className="source-tab">
+                                    <input
+                                        type="radio"
+                                        name="captureSource"
+                                        id="browserMode"
+                                        checked={ingestMode !== 'obs'}
+                                        disabled={resumePending}
+                                        onChange={() => handleIngestModeChange('browser')}
+                                    />
+                                    <svg className="source-tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                        <rect x="3" y="4" width="18" height="13" rx="2" />
+                                        <path d="M8 21h8M12 17v4" />
+                                    </svg>
+                                    This browser
+                                </label>
+                                <label className="source-tab">
+                                    <input
+                                        type="radio"
+                                        name="captureSource"
+                                        id="obsMode"
+                                        checked={ingestMode === 'obs'}
+                                        disabled={resumePending}
+                                        onChange={() => handleIngestModeChange('obs')}
+                                    />
+                                    <svg className="source-tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                        <circle cx="12" cy="12" r="9" />
+                                        <circle cx="12" cy="12" r="3" />
+                                    </svg>
+                                    OBS
+                                </label>
+                            </div>
+                            <p className="source-tabs-hint" id="captureSourceHint">
+                                {resumePending
+                                    ? resumeModeLockHint
+                                    : ingestMode === 'obs'
+                                        ? 'Needs OBS Studio 28 or newer on this computer'
+                                        : 'Viewers just open a link'}
+                            </p>
+                        </div>
+                    )}
                     <div className="video-container">
                         <video ref={videoRef} autoPlay muted playsInline className="video-player" />
-                        {status === 'idle' && (
-                            <div className="video-overlay">
-                                <p>No screen shared yet</p>
-                                <p className="video-overlay-sub">
-                                    Pick a resolution and frame rate below, then press Start Sharing.
-                                    You&apos;ll get a link to send to viewers.
+                        {!isSharing && (
+                            <div className="video-overlay host-stage-empty">
+                                <svg className="host-stage-empty-icon" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                    <rect x="3" y="4" width="18" height="13" rx="2" />
+                                    <path d="M8 21h8M12 17v4" />
+                                </svg>
+                                <p className="host-stage-empty-title">Nothing is being shared yet</p>
+                                <p className="video-overlay-sub host-stage-empty-sub">
+                                    {ingestMode === 'obs'
+                                        ? 'Nextra sets OBS up and starts the stream.'
+                                        : "You'll choose a screen, window or tab next."}
                                 </p>
+                                <div className="controls">
+                                    <button
+                                        className="btn btn-primary btn-main"
+                                        onClick={handleStartSharing}
+                                        disabled={status === 'connecting'}
+                                    >
+                                        {status === 'connecting'
+                                            ? 'Connecting...'
+                                            : resumePending
+                                                ? 'Resume Sharing'
+                                                : terminalRoomEnded
+                                                    ? 'Create new room'
+                                                    : 'Start Sharing'}
+                                    </button>
+                                </div>
                             </div>
                         )}
                         {isSharing && ingestMode === 'obs' && (
@@ -2135,36 +2203,6 @@ export default function HostView() {
 
                     {!isSharing ? (
                         <>
-                            <div className="controls">
-                                <button
-                                    className="btn btn-primary btn-large"
-                                    onClick={handleStartSharing}
-                                    disabled={status === 'connecting'}
-                                >
-                                    {status === 'connecting'
-                                        ? 'Connecting...'
-                                        : resumePending
-                                            ? 'Resume Sharing'
-                                            : terminalRoomEnded
-                                                ? 'Create new room'
-                                                : 'Start Sharing'}
-                                </button>
-                                {ingestMode === 'obs' && obsApplySettings && (
-                                    <div className="mode-toggle" role="group" aria-label="OBS tuning profile">
-                                        {Object.entries(OBS_TUNING_PROFILES).map(([key, tuning]) => (
-                                            <button
-                                                key={key}
-                                                type="button"
-                                                className={obsTuningProfile === key ? 'active' : ''}
-                                                aria-pressed={obsTuningProfile === key}
-                                                onClick={() => setObsTuningProfile(key)}
-                                            >
-                                                {tuning.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
                             <div className="capture-settings">
                                 <div className="setting-row setting-row-inline">
                                     <span className="setting-row-label">Resolution</span>
@@ -2198,6 +2236,24 @@ export default function HostView() {
                                         ))}
                                     </div>
                                 </div>
+                                {ingestMode === 'obs' && obsApplySettings && (
+                                    <div className="setting-row setting-row-inline">
+                                        <span className="setting-row-label">Picture preset</span>
+                                        <div className="mode-toggle" role="group" aria-label="Picture preset">
+                                            {Object.entries(OBS_TUNING_PROFILES).map(([key, tuning]) => (
+                                                <button
+                                                    key={key}
+                                                    type="button"
+                                                    className={obsTuningProfile === key ? 'active' : ''}
+                                                    aria-pressed={obsTuningProfile === key}
+                                                    onClick={() => setObsTuningProfile(key)}
+                                                >
+                                                    {tuning.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         </>
                     ) : (
@@ -2304,24 +2360,6 @@ export default function HostView() {
                                     <label htmlFor="reloadRecoveryEnabled">
                                         Allow recovery after reload
                                         <span className="setting-hint">Keeps this room reclaimable for about 30 seconds; browser capture must be selected again</span>
-                                    </label>
-                                </div>
-                                <div className="setting-row setting-row-toggle">
-                                    <input
-                                        type="checkbox"
-                                        id="obsMode"
-                                        checked={ingestMode === 'obs'}
-                                        disabled={resumePending}
-                                        onChange={(e) => handleIngestModeChange(e.target.checked ? 'obs' : 'browser')}
-                                    />
-                                    <label htmlFor="obsMode">
-                                        Use OBS (WHIP ingest)
-                                        <span className="setting-hint">
-                                            Stream via OBS instead of browser screen capture
-                                        </span>
-                                        {resumePending && (
-                                            <span className="setting-hint">{resumeModeLockHint}</span>
-                                        )}
                                     </label>
                                 </div>
                             </div>
