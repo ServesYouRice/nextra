@@ -10,7 +10,6 @@ import HostDiagnostics from './components/HostDiagnostics';
 import UserErrorAlert from './components/UserErrorAlert';
 import RoomSharePanel from './components/RoomSharePanel';
 import { useHostSessionController } from './hooks/useHostSessionController';
-import { formatBytes } from './lib/formatBytes.mjs';
 import { getLocalStorageSafely, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 import { evaluateHostPreflight } from './lib/hostPreflight.mjs';
 import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
@@ -2119,12 +2118,24 @@ export default function HostView() {
             ? 'Public link is starting automatically. Wait a few seconds and it will appear here.'
             : publicShareStatus === 'error'
                 ? `Public link unavailable on this machine. ${publicShareError || 'Built-in tunnel startup failed.'}`
-                : 'Public link unavailable on this machine. Share the local link instead.';
+                : 'Works for people on your network. There is no public link on this machine.';
     const whepBaseUrl = shareBaseUrl || lanBaseUrl;
     const whepPlaybackUrl = whepEnabled && roomCode && whepBaseUrl
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
         : '';
     const totalViewers = viewerCount + whepViewerCount;
+    // The OBS codec and relay fallback state, for the diagnostics section.
+    const obsDiagnosticSummary = ingestMode === 'obs' && roomCode
+        ? [
+            obsVideoCodec || 'waiting',
+            obsAv1Mode || obsVideoCodec === 'av1'
+                ? `WebRTC-only AV1 room | TURN ${roomHasTurnServer ? 'ready' : 'missing'}`
+                : `Fallback viewers: ${fallbackViewerCount} | ${fallbackAvailable ? 'Fallback active' : 'Fallback inactive'}`,
+            fallbackViewerCount > 0 && roomMetrics?.fallbackVideoKbps > 0 && roomMetrics.fallbackVideoKbps < roomMetrics.fallbackVideoTargetKbps
+                ? `Relay lowered to ${(roomMetrics.fallbackVideoKbps / 1000).toFixed(1)} Mbps (connection too slow for full quality)`
+                : '',
+        ].filter(Boolean).join(' | ')
+        : '';
     // With "Set OBS up for me" off, Nextra sends OBS no picture settings, so the
     // three picture rows have nothing to change.
     const picturesOff = ingestMode === 'obs' && !obsApplySettings;
@@ -2480,9 +2491,10 @@ export default function HostView() {
                     )}
 
                     {roomCode && (
-                        <div className={ingestMode === 'obs' ? 'streaming-info-row' : ''}>
-                        <div className="room-info">
+                        <div className={`invite-column${ingestMode === 'obs' ? ' streaming-info-row' : ''}`}>
+                        <section className="invite-card">
                             <RoomSharePanel
+                                roomCode={roomCode}
                                 localWatchLink={localWatchLink}
                                 publicWatchLink={publicWatchLink}
                                 showPublicLink={showPublicLink}
@@ -2499,23 +2511,7 @@ export default function HostView() {
                                     </span>
                                 )}
                             </div>
-                            {roomMetrics && (
-                                <div className="room-meta">
-                                    WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0, { maxUnit: 'MB' })}
-                                </div>
-                            )}
-                            {ingestMode === 'obs' && (
-                                <div className="room-meta">
-                                    Codec: {obsVideoCodec || 'waiting'} |{' '}
-                                    {obsAv1Mode || obsVideoCodec === 'av1'
-                                        ? `WebRTC-only AV1 room | TURN ${roomHasTurnServer ? 'ready' : 'missing'}`
-                                        : `Fallback viewers: ${fallbackViewerCount} | ${fallbackAvailable ? 'Fallback active' : 'Fallback inactive'}`}
-                                    {fallbackViewerCount > 0 && roomMetrics?.fallbackVideoKbps > 0 && roomMetrics.fallbackVideoKbps < roomMetrics.fallbackVideoTargetKbps
-                                        ? ` | Relay lowered to ${(roomMetrics.fallbackVideoKbps / 1000).toFixed(1)} Mbps (connection too slow for full quality)`
-                                        : ''}
-                                </div>
-                            )}
-                        </div>
+                        </section>
                     {ingestMode === 'obs' && (
                         <div className="obs-whip-setup-panel room-info">
                             <h3>OBS WHIP Setup</h3>
@@ -2623,6 +2619,7 @@ export default function HostView() {
                 {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
                 <HostDiagnostics
                     metrics={roomMetrics}
+                    obsSummary={obsDiagnosticSummary}
                     onDownload={handleDownloadDiagnostics}
                     downloading={diagnosticDownloading}
                     downloadStatus={diagnosticDownloadStatus}

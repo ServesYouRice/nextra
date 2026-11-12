@@ -1,7 +1,7 @@
 import React from 'react';
 import { formatBytes } from '../lib/formatBytes.mjs';
 
-export default function HostDiagnostics({ metrics, onDownload, downloading = false, downloadStatus = '' }) {
+export default function HostDiagnostics({ metrics, obsSummary = '', onDownload, downloading = false, downloadStatus = '' }) {
     const relay = metrics?.relay || {};
     const eventLoop = metrics?.eventLoopDelayMs || {};
     return (
@@ -10,6 +10,11 @@ export default function HostDiagnostics({ metrics, onDownload, downloading = fal
             {metrics ? (
                 <>
                     <dl>
+                        <div><dt>WebRTC viewers connected</dt><dd>{metrics.mediasoupConsumerCount || 0}</dd></div>
+                        <div><dt>Relay sent</dt><dd>{formatBytes(relay.bytesForwarded || 0, { maxUnit: 'MB' })}</dd></div>
+                        {obsSummary && (
+                            <div><dt>OBS codec and fallback</dt><dd>{obsSummary}</dd></div>
+                        )}
                         <div><dt>Fallback restarts</dt><dd>{metrics.fallbackRestartCount || 0}</dd></div>
                         <div><dt>Dropped relay chunks</dt><dd>{relay.droppedOversized || 0}</dd></div>
                         <div><dt>Dropped fallback input</dt><dd>{formatBytes(metrics.fallbackDroppedBytes, { maxUnit: 'MB' })}</dd></div>

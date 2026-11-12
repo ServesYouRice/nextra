@@ -985,6 +985,87 @@ input.select-input {
   color: var(--ok);
 }
 
+/* A copy field with its own square copy button: the label row (label and an
+   optional tag), then the value, with the button beside both; an optional
+   main button spans the row under them. The button shows a tick while the
+   unseen "Copied!" status is announced. */
+.copy-field-split {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 10px;
+}
+
+.copy-field-top {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.copy-field-split > .copy-field-value {
+  grid-column: 1;
+  display: block;
+  min-width: 0;
+  color: var(--text-1);
+  cursor: auto;
+}
+
+.copy-field-split > .copy-field-value:hover {
+  opacity: 1;
+}
+
+/* Cut in the middle: the head takes the line minus the tail's width (in ch of
+   the mono font) and ends in an ellipsis; the tail always shows. The head is
+   inline-block, not a flex item, so the element's text stays the full value
+   on one line. */
+.copy-field-value.copy-field-shortened {
+  overflow: hidden;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+.copy-field-head {
+  display: inline-block;
+  max-width: calc(100% - var(--copy-field-tail, 0ch));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+
+.copy-field-copy {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: var(--radius);
+  background: var(--surface-button-quiet);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  color: #c4c4d0;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+
+.copy-field-copy:hover {
+  color: var(--text-1);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.copy-field-copy.is-copied {
+  color: var(--ok);
+}
+
+.copy-field-main {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
 .code-block {
   display: block;
   padding: 0.5rem 0.65rem;
@@ -1651,10 +1732,6 @@ input.select-input {
   gap: var(--host-panel-gap);
 }
 
-.host-side-panel:has(.streaming-info-row) {
-  width: calc(var(--host-side-card-width) * 2 + var(--host-panel-gap));
-}
-
 /* ========== HOST SETTINGS PANEL ==========
    The one quiet surface on the host page: flat rows, hairlines between groups,
    no shadow and no hover change. Its height is the preview's: height 0 with a
@@ -1865,21 +1942,15 @@ input.select-input {
   border-top: var(--panel-hairline);
 }
 
-.streaming-info-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--host-panel-gap);
-  width: 100%;
+/* The invite card and, in OBS mode, the OBS card under it are items of the
+   side panel's column; their wrapper adds no box. */
+.invite-column {
+  display: contents;
 }
 
-.streaming-info-row>.room-info,
 .streaming-info-row>.obs-whip-setup-panel {
   width: 100%;
-}
-
-.host-side-panel>.room-info {
   margin: 0;
-  width: 100%;
 }
 
 .host-side-panel .room-info {
@@ -1924,19 +1995,6 @@ input.select-input {
   margin: 0 0 0.5rem;
 }
 
-.room-code-display {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-}
-
-.room-links-row {
-  display: flex;
-  gap: 0.85rem 2rem;
-  margin-top: 1rem;
-  flex-wrap: wrap;
-}
-
 .viewer-count {
   display: flex;
   align-items: center;
@@ -1951,6 +2009,174 @@ input.select-input {
   font-size: 0.7rem;
   color: var(--text-3);
   margin-top: 0.25rem;
+}
+
+/* ========== INVITE CARD ==========
+   While a room is open the invite card sits beside the preview, about 350px
+   wide: the room code, then one row per link, the one to share marked and
+   given the page's one main button. From 900px it has the preview's top and
+   bottom, by the technique of the settings panel: the preview alone sets the
+   height of its grid row, so the Stop row and the status line under it become
+   rows of the host grid (the section adds no box), and the card has height 0
+   and a min-height of 100%, so the link list scrolls inside it if it ever
+   overflows. While the settings panel (a room waiting for Resume Sharing) or
+   the OBS card shares the column, the card takes its natural height. */
+@media (min-width: 900px) {
+  .host-layout:has(.invite-card) {
+    row-gap: 0;
+  }
+
+  .host-layout:has(.invite-card) > .host-video-section {
+    display: contents;
+  }
+
+  .host-layout:has(.invite-card) > .host-video-section > * {
+    grid-column: 1;
+    min-width: 0;
+    order: 1;
+  }
+
+  .host-layout:has(.invite-card) > .host-video-section > .video-container {
+    order: 0;
+  }
+
+  /* The rows the grid gap spaced before it was taken out of this layout. */
+  .host-layout:has(.invite-card) > .source-tabs-row {
+    margin-bottom: 0.5rem;
+  }
+
+  .host-layout:has(.invite-card) > .alert,
+  .host-layout:has(.invite-card) > .host-diagnostics {
+    order: 1;
+    margin-top: 0.5rem;
+  }
+
+  .host-side-panel:has(.invite-card) {
+    width: 21.875rem;
+  }
+
+  .host-side-panel:has(.host-settings-panel) {
+    width: var(--host-side-card-width);
+  }
+}
+
+.invite-card {
+  --invite-hairline: 1px solid rgba(255, 255, 255, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  height: 0;
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--panel-shell-radius);
+  background: var(--surface-glass-accent), var(--surface-glass);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.host-side-panel:has(.host-settings-panel, .obs-whip-setup-panel) .invite-card {
+  height: auto;
+  min-height: 0;
+}
+
+.invite-card > * {
+  flex: none;
+}
+
+.invite-card-title {
+  margin: 0;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-1);
+}
+
+.invite-code .copy-field-label {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.invite-code .copy-field-copy {
+  align-self: end;
+}
+
+.invite-code > .copy-field-value {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+/* The 6px of inline padding keeps the main button's ring and the focus rings
+   from being clipped at the scroll edge. */
+.invite-card > .invite-links {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-inline: -6px;
+  padding-inline: 6px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.invite-link {
+  flex: none;
+  padding-block: 10px;
+  border-top: var(--invite-hairline);
+}
+
+.invite-link .copy-field-label {
+  font-size: 13px;
+  color: var(--text-2);
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.invite-link > .copy-field-value {
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.invite-tag {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid rgba(60, 203, 127, 0.5);
+  border-radius: 5px;
+  color: #a9ecc8;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.invite-card .copy-field-main {
+  min-height: 44px;
+  height: 44px;
+  margin-top: 7px;
+}
+
+.invite-note {
+  margin: 0;
+  padding-top: 10px;
+  border-top: var(--invite-hairline);
+  color: var(--text-3);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.invite-card > .viewer-count {
+  padding-top: 0;
 }
 
 .obs-status-line {
@@ -2365,18 +2591,7 @@ input.select-input {
 
    The host page has two tiers: from 900px the video stage and the settings
    panel sit side by side; below that everything is one full-width column. The
-   room cards shown while sharing keep their own, older tiers: below 1280px the
-   OBS pair of cards stacks into one column. */
-@media (max-width: 1279px) {
-  .streaming-info-row {
-    grid-template-columns: 1fr;
-  }
-
-  /* The side panel is one card wide again, so it must not keep reserving two. */
-  .host-side-panel:has(.streaming-info-row) {
-    width: var(--host-side-card-width);
-  }
-}
+   invite card shown while sharing follows the same two tiers (see INVITE CARD). */
 
 /* Laptop-height viewports. The clamps above already shrink the page padding and
    the row rhythm; this trims the fixed chrome around them - nav, footer, page
@@ -2464,12 +2679,10 @@ input.select-input {
   }
 }
 
-/* One column below 900px: the panel fills it and takes its natural height, so
-   nothing scrolls inside it. Matches the :has() rule above on specificity, which
-   a bare .host-side-panel selector does not. */
+/* One column below 900px: the panel and the invite card fill it and take their
+   natural height, so nothing scrolls inside them. */
 @media (max-width: 899px) {
-  .host-side-panel,
-  .host-side-panel:has(.streaming-info-row) {
+  .host-side-panel {
     width: 100%;
     max-width: 100%;
   }
@@ -2481,6 +2694,15 @@ input.select-input {
   }
 
   .host-settings-body {
+    overflow-y: visible;
+  }
+
+  .invite-card {
+    height: auto;
+    min-height: 0;
+  }
+
+  .invite-card > .invite-links {
     overflow-y: visible;
   }
 }
@@ -2523,10 +2745,6 @@ input.select-input {
   .room-info {
     flex-direction: column;
     gap: 0.75rem;
-  }
-
-  .room-code-display {
-    align-items: stretch;
   }
 
   .copy-field-value.copy-field-strong {
@@ -2612,9 +2830,9 @@ input.select-input {
     min-height: 44px;
   }
 
-  .room-links-row {
-    flex-direction: column;
-    gap: 0.85rem;
+  .copy-field-copy {
+    width: 44px;
+    height: 44px;
   }
 }
 
@@ -2644,10 +2862,6 @@ input.select-input {
 
   .video-overlay {
     font-size: 0.8rem;
-  }
-
-  .room-links-row {
-    gap: 1rem;
   }
 
   .view-header h1 {
