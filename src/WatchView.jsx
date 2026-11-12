@@ -16,6 +16,7 @@ import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
 import { createLifecycleController } from './lib/lifecycleController.mjs';
 import { useViewerSessionController } from './hooks/useViewerSessionController';
 import UserErrorAlert from './components/UserErrorAlert';
+import { normalizeRoomCode, extractRoomCode, formatRoomCode } from './lib/roomCode.mjs';
 import { getLocalStorageSafely, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
 import {
     assertAttemptCurrent,
@@ -64,23 +65,6 @@ function toUint8ArraySync(data) {
     return null;
 }
 
-function normalizeRoomCode(value) {
-    return String(value || '').trim().toUpperCase().replace(/-/g, '');
-}
-
-// Viewers usually receive a full watch link; accept a pasted URL as well as a
-// bare code by pulling the code out of a `#watch/CODE` fragment when present.
-function extractRoomCode(value) {
-    const text = String(value || '');
-    const urlMatch = text.match(/#\/?watch\/([A-Za-z0-9-]+)/i);
-    const source = urlMatch ? urlMatch[1] : text;
-    return source.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
-}
-
-function formatRoomCode(code) {
-    return code.length > 3 ? `${code.slice(0, 3)}-${code.slice(3)}` : code;
-}
-
 // What a recovery resumes: the viewer's playback before the first recovery of a
 // chain reset it (see createRecoveryGuard).
 function readResumeIntent(watchingRef, playbackModeRef, fallbackModeRef) {
@@ -102,12 +86,14 @@ function ackFailure(event, response) {
 
 export default function WatchView({ initialCode = '' }) {
     const socket = useSocket();
-    const [codeInput, setCodeInput] = useState(initialCode);
+    const [codeInput, setCodeInput] = useState(formatRoomCode(extractRoomCode(initialCode)));
     const [joined, setJoined] = useState(false);
     const [joinedRoomCode, setJoinedRoomCode] = useState(normalizeRoomCode(initialCode));
     const [watching, setWatching] = useState(false);
     const [error, setError] = useState('');
     const [codeError, setCodeError] = useState(false);
+    const [unknownRoom, setUnknownRoom] = useState(false);
+    const codeInputRef = useRef(null);
     const [hostDisconnected, setHostDisconnected] = useState(false);
     const [hostReconnectingReason, setHostReconnectingReason] = useState('');
     const [pictureInterrupted, setPictureInterrupted] = useState(false); // WebRTC viewer whose video producer closed
@@ -1060,6 +1046,7 @@ export default function WatchView({ initialCode = '' }) {
         if (joiningRef.current) return;
         setError('');
         setCodeError(false);
+        setUnknownRoom(false);
         setPassphraseRejected(false);
         // A passphrase sent to a room already known to need one is a real try, not the first prompt.
         const passphraseWasTried = passphraseRequired && passphrase.length > 0;
@@ -1109,6 +1096,10 @@ export default function WatchView({ initialCode = '' }) {
                 setPassphraseRequired(true);
                 setPassphraseRejected(passphraseWasTried);
                 setError('');
+            } else if (/^room not found/i.test(String(err?.message || err))) {
+                setCodeError(true);
+                setUnknownRoom(true);
+                setError('No room has this code. Codes change each time the host starts sharing, so ask them for the new one.');
             } else {
                 setError(err);
             }
@@ -1724,26 +1715,55 @@ export default function WatchView({ initialCode = '' }) {
                     : '';
     return (
         <div className="view-container">
-            <div className="view-header">
-                <h1>Watch</h1>
-                <p className="subtitle">Join a room to watch a stream</p>
-            </div>
+            {joined && (
+                <>
+                    <div className="view-header">
+                        <h1>Watch</h1>
+                        <p className="subtitle">Join a room to watch a stream</p>
+                    </div>
 
-            <UserErrorAlert error={error} id="watchError" />
+                    <UserErrorAlert error={error} id="watchError" />
+                </>
+            )}
 
             {!joined ? (
-                <div className="join-form">
+                <div className="join-form join-card">
+                    <h1>{passphraseRequired ? 'This room has a passphrase' : 'Join a stream'}</h1>
+                    <p className="join-hint" id="joinHint" role="status">
+                        {(() => {
+                            if (passphraseRequired) return 'Enter the passphrase the host gave you.';
+                            const codeLength = normalizeRoomCode(codeInput).length;
+                            return codeLength > 0 && codeLength < 6
+                                ? `${codeLength}/6 characters`
+                                : 'Enter the 6-character room code from the host.';
+                        })()}
+                    </p>
                     <div className="join-field">
                         <label className="input-label" htmlFor="roomCode">Room code</label>
-                        <div className="input-group">
+                        <div className="code-entry">
+                            <div className="code-boxes" aria-hidden="true">
+                                {Array.from({ length: 6 }, (_, index) => {
+                                    const typed = normalizeRoomCode(codeInput);
+                                    return (
+                                        <span
+                                            key={index}
+                                            className="code-box"
+                                            data-active={index === Math.min(typed.length, 5) || undefined}
+                                        >
+                                            {typed[index] || ''}
+                                        </span>
+                                    );
+                                })}
+                            </div>
                             <input
+                                ref={codeInputRef}
                                 id="roomCode"
                                 type="text"
                                 className="input-code"
-                                placeholder="XXX-XXX"
                                 value={codeInput}
                                 onChange={(evt) => {
                                     setCodeError(false);
+                                    setUnknownRoom(false);
                                     setPassphraseRequired(false);
                                     setPassphraseRejected(false);
                                     setPassphrase('');
@@ -1751,24 +1771,22 @@ export default function WatchView({ initialCode = '' }) {
                                 }}
                                 onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
                                 autoFocus
+                                inputMode="text"
+                                autoCapitalize="characters"
+                                autoComplete="off"
+                                spellCheck={false}
+                                maxLength={64}
                                 aria-describedby={error ? 'joinHint watchError' : 'joinHint'}
                                 aria-invalid={codeError || undefined}
                                 aria-busy={joining || undefined}
                                 disabled={joining}
                             />
-                            <button
-                                className="btn btn-primary"
-                                onClick={handleJoin}
-                                disabled={joining}
-                                aria-busy={joining || undefined}
-                            >
-                                {joining ? 'Joining...' : 'Join Room'}
-                            </button>
                         </div>
                     </div>
+                    <UserErrorAlert error={error} id="watchError" variant="inline" />
                     {passphraseRequired && (
                         <div className="join-field">
-                            <p className="alert alert-info" role="status">
+                            <p className="join-step-note" role="status">
                                 This room requires a passphrase. The room code has been kept; enter the passphrase to continue.
                             </p>
                             <label className="input-label" htmlFor="roomPassphrase">Room passphrase</label>
@@ -1776,7 +1794,7 @@ export default function WatchView({ initialCode = '' }) {
                                 ref={passphraseInputRef}
                                 id="roomPassphrase"
                                 type="password"
-                                className="input-code"
+                                className="select-input join-passphrase"
                                 value={passphrase}
                                 onChange={(evt) => {
                                     setPassphraseRejected(false);
@@ -1796,15 +1814,30 @@ export default function WatchView({ initialCode = '' }) {
                             )}
                         </div>
                     )}
-                    <p className="join-hint" id="joinHint" role="status">
-                        {(() => {
-                            if (passphraseRequired) return 'Enter the passphrase the host gave you.';
-                            const codeLength = normalizeRoomCode(codeInput).length;
-                            return codeLength > 0 && codeLength < 6
-                                ? `${codeLength}/6 characters`
-                                : 'Enter the 6-character room code, or paste the watch link you were sent.';
-                        })()}
-                    </p>
+                    <button
+                        className="btn btn-primary btn-main"
+                        onClick={handleJoin}
+                        disabled={joining}
+                        aria-busy={joining || undefined}
+                    >
+                        {joining ? 'Joining...' : 'Join Room'}
+                    </button>
+                    {unknownRoom && (
+                        <button
+                            type="button"
+                            className="join-link"
+                            onClick={() => {
+                                setCodeInput('');
+                                setError('');
+                                setCodeError(false);
+                                setUnknownRoom(false);
+                                codeInputRef.current?.focus();
+                            }}
+                        >
+                            Try another code
+                        </button>
+                    )}
+                    <p className="join-paste-hint">Or paste the link you were sent.</p>
                 </div>
             ) : (
                 <>

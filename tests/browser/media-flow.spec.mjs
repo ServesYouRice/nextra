@@ -721,12 +721,12 @@ test('a protected room asks for its passphrase as a focused second step and keep
 
     await viewerPage.goto(`/#watch/${code}`);
     const codeInput = viewerPage.getByLabel('Room code');
-    await expect(codeInput).toHaveValue(code);
+    await expect(codeInput).toHaveValue(`${code.slice(0, 3)}-${code.slice(3)}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
 
     const passphraseInput = viewerPage.getByLabel('Room passphrase');
     await expect(viewerPage.getByText(/requires a passphrase.*code has been kept/i)).toBeVisible();
-    await expect(codeInput).toHaveValue(code);
+    await expect(codeInput).toHaveValue(`${code.slice(0, 3)}-${code.slice(3)}`);
     await expect(passphraseInput).toBeFocused();
     await passphraseInput.fill('open sesame');
     await passphraseInput.press('Enter');
