@@ -3553,6 +3553,43 @@ input.select-input {
   align-items: center;
 }
 
+/* ========== TOUCH TARGETS ========== */
+/* A finger needs about 44px. A mouse on a larger screen keeps the compact
+   layout the Host page needs to fit a laptop without scrolling. */
+@media (max-width: 640px), (pointer: coarse) {
+  :where(.btn, .btn-small) {
+    min-height: var(--tap-min);
+  }
+
+  .footer-links a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--tap-min);
+    padding-inline: 0.5rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .site-footer-inner {
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.25rem;
+    text-align: center;
+  }
+
+  .footer-links {
+    flex-wrap: nowrap;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+
+  .footer-links a {
+    font-size: var(--fs-small);
+    color: var(--text-2);
+  }
+}
+
 /* ========== MODAL ========== */
 .modal-backdrop {
   position: fixed;
