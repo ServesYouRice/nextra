@@ -27,3 +27,14 @@ test('WatchView reads storage at module scope only through the safe accessor', (
     assert.doesNotMatch(source, /window\.localStorage/, 'WatchView must not touch window.localStorage directly');
     assert.match(source, /isMediaDebugEnabled\(window\.location, getLocalStorageSafely\(window\)\)/);
 });
+
+test('manualStart is read from the query string and nothing else', async () => {
+    const { isManualStartRequested } = await import('../src/lib/mediaDebug.mjs');
+    assert.equal(isManualStartRequested({ search: '?manualStart' }), true);
+    assert.equal(isManualStartRequested({ search: '?debugMedia&manualStart=1' }), true);
+    assert.equal(isManualStartRequested({ search: '' }), false);
+    assert.equal(isManualStartRequested({ search: '?debugMedia' }), false);
+    assert.equal(isManualStartRequested({ search: '', hash: '#watch/ABC123?manualStart' }), false, 'the hash is not the query');
+    assert.equal(isManualStartRequested(undefined), false);
+    assert.equal(isManualStartRequested({ get search() { throw new Error('denied'); } }), false);
+});

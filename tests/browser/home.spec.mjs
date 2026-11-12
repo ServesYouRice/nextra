@@ -32,6 +32,17 @@ test.describe('home page', () => {
         await expect.poll(async () => (await watchInput.inputValue()).replace(/-/g, '')).toBe('ABC123');
     });
 
+    test('joining from the home page does not ask for a second press', async ({ page }) => {
+        await page.goto('/');
+        await page.getByLabel('Got a room code?').fill('ZZZ999');
+        await page.getByRole('button', { name: 'Join' }).click();
+        await expect(page).toHaveURL(/#watch\/ZZZ999$/);
+        // No room has this code: the answer comes from the join the Watch page
+        // made by itself, with no press on Join Room.
+        await expect(page.getByRole('alert').filter({ hasText: /^No room has this code\./ })).toBeVisible();
+        await expect(page.getByRole('button', { name: 'Join Room' })).toBeVisible();
+    });
+
     test('pulls the code out of a pasted watch link', async ({ page }) => {
         await page.goto('/');
         const input = page.getByLabel('Got a room code?');

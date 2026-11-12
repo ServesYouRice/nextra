@@ -74,10 +74,10 @@ async function installFullscreenStub(page) {
     });
 }
 
-async function joinAndWatch(viewerPage, code) {
-    await viewerPage.goto(`/#watch/${code}`);
+async function joinAndWatch(viewerPage, code, { manualStart = false } = {}) {
+    await viewerPage.goto(manualStart ? `/?manualStart#watch/${code}` : `/#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
-    await viewerPage.getByRole('button', { name: 'Watch Stream' }).click();
+    if (manualStart) await viewerPage.getByRole('button', { name: 'Watch Stream' }).click();
     await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
     await expect.poll(() => viewerPage.locator('video').evaluate((video) => (
         video.videoWidth > 0
@@ -374,7 +374,6 @@ function serverPort(testInfo) {
 async function joinAndWatchRelay(viewerPage, code, testInfo) {
     await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
-    await viewerPage.getByRole('button', { name: 'Watch Stream' }).click();
     await expect(viewerPage.getByText(/relay mode active/i)).toBeVisible();
     await expect.poll(() => viewerPage.locator('video').evaluate((video) => (
         video.videoWidth > 0
@@ -712,6 +711,128 @@ test('a mobile Chrome viewer joins and receives decoded frames', async ({ browse
     await hostContext.close();
 });
 
+test('Join Room starts the picture without a second press', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
+    await expect.poll(() => viewerPage.locator('video').evaluate((video) => (
+        video.videoWidth > 0
+        && video.videoHeight > 0
+        && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+        && video.currentTime > 0
+    ))).toBe(true);
+    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toHaveCount(0);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+test('a viewer who is waiting gets picture and sound by itself when the host resumes', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+
+    await installDeterministicDisplayCapture(hostPage);
+    // The capture carries sound as well: a tone, so the host produces audio a
+    // moment after video, as with a shared tab that plays sound.
+    await hostPage.addInitScript(() => {
+        const captureCanvas = navigator.mediaDevices.getDisplayMedia;
+        navigator.mediaDevices.getDisplayMedia = async (...args) => {
+            const stream = await captureCanvas(...args);
+            const audioContext = new AudioContext();
+            const oscillator = audioContext.createOscillator();
+            const destination = audioContext.createMediaStreamDestination();
+            oscillator.connect(destination);
+            oscillator.start();
+            destination.stream.getAudioTracks().forEach((track) => stream.addTrack(track));
+            return stream;
+        };
+    });
+    await hostPage.goto('/#host');
+    await hostPage.getByLabel('Allow recovery after reload').check();
+    await hostPage.getByRole('button', { name: 'Start Sharing' }).click();
+    await expect(hostPage.getByText(/Streaming \(/)).toBeVisible();
+    const code = await readRoomCode(hostPage);
+    await expect.poll(async () => getRoomByCode(request, code))
+        .toMatchObject({ hasProducer: true, hasAudioProducer: true });
+
+    // The reloaded host keeps the room with no media until Resume Sharing.
+    await hostPage.reload();
+    const resume = hostPage.getByRole('button', { name: 'Resume Sharing' });
+    await expect(resume).toBeVisible();
+    await expect.poll(async () => getRoomByCode(request, code))
+        .toMatchObject({ hasProducer: false, hasAudioProducer: false });
+
+    await viewerPage.goto(`/#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    await expect(viewerPage.getByText('The stream starts here by itself.', { exact: false })).toBeVisible();
+    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toHaveCount(0);
+
+    await resume.click();
+    await expect(hostPage.getByText(/Streaming \(/)).toBeVisible();
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
+    await expect.poll(() => viewerPage.locator('video').evaluate((video) => ({
+        video: video.srcObject?.getVideoTracks().length ?? 0,
+        audio: video.srcObject?.getAudioTracks().length ?? 0,
+    }))).toEqual({ video: 1, audio: 1 });
+    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toHaveCount(0);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
+test('with ?manualStart a joined viewer waits for Watch Stream', async ({ browser, request }) => {
+    const hostContext = await browser.newContext();
+    const viewerContext = await browser.newContext();
+    const hostPage = await hostContext.newPage();
+    const viewerPage = await viewerContext.newPage();
+
+    const code = await startHost(hostPage);
+    await viewerPage.goto(`/?manualStart#watch/${code}`);
+    await viewerPage.getByRole('button', { name: 'Join Room' }).click();
+    const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
+    await expect(watchButton).toBeEnabled();
+    await viewerPage.waitForTimeout(1000);
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toHaveCount(0);
+    await expect(watchButton).toBeEnabled();
+
+    await watchButton.click();
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
+    await expect.poll(() => viewerPage.locator('video').evaluate((video) => (
+        video.videoWidth > 0
+        && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+        && video.currentTime > 0
+    ))).toBe(true);
+
+    await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
+    await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
+    await confirmStopIfPrompted(hostPage);
+    await expect.poll(async () => (await request.get('/api/metrics')).json())
+        .toMatchObject({ rooms: { active: 0 } });
+
+    await viewerContext.close();
+    await hostContext.close();
+});
+
 test('a protected room asks for its passphrase as a focused second step and keeps the code', async ({ browser, request }) => {
     const hostContext = await browser.newContext();
     const viewerContext = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
@@ -730,7 +851,7 @@ test('a protected room asks for its passphrase as a focused second step and keep
     await expect(passphraseInput).toBeFocused();
     await passphraseInput.fill('open sesame');
     await passphraseInput.press('Enter');
-    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toBeVisible();
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
 
     await expect(hostPage.getByText('Local Link')).toBeVisible();
 
@@ -770,7 +891,7 @@ test('a wrong room passphrase is reported next to the field and can be corrected
     await passphraseInput.fill('open sesame');
     await passphraseInput.press('Enter');
     await expect(alert).toHaveCount(0);
-    await expect(viewerPage.getByRole('button', { name: 'Watch Stream' })).toBeVisible();
+    await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
 
     await hostPage.getByRole('button', { name: 'Stop Sharing' }).click();
     await confirmStopIfPrompted(hostPage);
@@ -1083,7 +1204,7 @@ test('a late relay viewer keeps the live chunks that arrive before its get-media
     expect(await hostPage.evaluate(() => window.__nextraRecorders.at(-1).mimeType)).toMatch(/^video\/webm/);
     const generation = (await getRoomByCode(request, code)).mediaGeneration;
 
-    await lateViewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await lateViewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/?manualStart#watch/${code}`);
     await lateViewerPage.getByRole('button', { name: 'Join Room' }).click();
     await lateViewerPage.evaluate(() => { window.__nextraAnswerControl.holdAnswerOf = 'get-media-init'; });
     await lateViewerPage.getByRole('button', { name: 'Watch Stream' }).click();
@@ -1370,7 +1491,7 @@ test('a relay start that falls behind before it plays reports that, not a generi
     await installMediaChunkFlood(viewerPage);
 
     const code = await startHost(hostPage);
-    await viewerPage.goto(`/#watch/${code}`);
+    await viewerPage.goto(`/?manualStart#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
     const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
     await expect(watchButton).toBeEnabled();
@@ -1407,7 +1528,7 @@ test('a relay start superseded by a socket reconnect leaves no stale playback, e
     await installViewerSocketControl(viewerPage);
 
     const code = await startHost(hostPage);
-    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/#watch/${code}`);
+    await viewerPage.goto(`https://nextra.cloudflare.test:${serverPort(testInfo)}/?manualStart#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
     const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
     await expect(watchButton).toBeEnabled();
@@ -1484,7 +1605,7 @@ test('a WebRTC start whose video.play() never settles still times out in its ICE
     await installWebRtcStall(viewerPage);
 
     const code = await startHost(hostPage);
-    await viewerPage.goto(`/#watch/${code}`);
+    await viewerPage.goto(`/?manualStart#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
     const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
     await expect(watchButton).toBeEnabled();
@@ -1618,7 +1739,7 @@ test('a rejoin left behind by Leave Room finishes without undoing the join made 
     await installViewerRequestControl(viewerPage);
 
     const code = await startHost(hostPage);
-    await joinAndWatch(viewerPage, code);
+    await joinAndWatch(viewerPage, code, { manualStart: true });
     await dropWatchingViewerWithRejoinHeld(viewerPage);
 
     await viewerPage.getByRole('button', { name: 'Leave Room' }).click();
@@ -1675,7 +1796,7 @@ test('a Watch Stream start that fails while Leave Room waits for the server star
     await installAnswerControl(viewerPage);
 
     const code = await startHost(hostPage);
-    await viewerPage.goto(`/#watch/${code}`);
+    await viewerPage.goto(`/?manualStart#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
     const watchButton = viewerPage.getByRole('button', { name: 'Watch Stream' });
     await expect(watchButton).toBeEnabled();

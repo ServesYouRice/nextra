@@ -497,7 +497,6 @@ test('a viewer joining while the leave-host dialog is open keeps focus on the bu
         const viewer = await viewerContext.newPage();
         await viewer.goto(`/#watch/${code}`);
         await viewer.getByRole('button', { name: 'Join Room' }).click();
-        await viewer.getByRole('button', { name: 'Watch Stream' }).click();
         await expect(dialog.getByText(/1 viewer is currently watching/)).toBeVisible();
         await expect(leave).toBeFocused();
         await expect(stay).not.toBeFocused();

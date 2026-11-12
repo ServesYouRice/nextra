@@ -1494,6 +1494,14 @@ input.select-input {
   color: var(--text-3);
 }
 
+/* "Starting the picture…": the existing spinner beside one line of text. */
+.video-overlay-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--text-2);
+}
+
 .host-ended {
   color: var(--err);
   font-weight: 500;

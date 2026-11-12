@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useEffectEvent } from 'react';
 import { useSocket } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { createFmp4RelayPlayer } from './lib/fmp4RelayPlayer';
@@ -17,7 +17,8 @@ import { createLifecycleController } from './lib/lifecycleController.mjs';
 import { useViewerSessionController } from './hooks/useViewerSessionController';
 import UserErrorAlert from './components/UserErrorAlert';
 import { normalizeRoomCode, extractRoomCode, formatRoomCode } from './lib/roomCode.mjs';
-import { getLocalStorageSafely, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
+import { getLocalStorageSafely, isManualStartRequested, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
+import { getSessionStorageSafely, takeJoinIntent } from './lib/joinIntent.mjs';
 import {
     assertAttemptCurrent,
     beginPlaybackAttempt,
@@ -39,6 +40,8 @@ import {
 import { abandonStaleJoin, createViewerSession, isStaleViewerSessionError } from './lib/viewerSession.mjs';
 
 const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, getLocalStorageSafely(window));
+// `?manualStart`: Join Room only joins, and the viewer presses Watch Stream.
+const MANUAL_START = isManualStartRequested(window.location);
 
 function mediaDebugLog(...args) {
     if (MEDIA_DEBUG_LOGS) {
@@ -106,6 +109,9 @@ export default function WatchView({ initialCode = '' }) {
     const [passphraseRequired, setPassphraseRequired] = useState(false);
     const [passphraseRejected, setPassphraseRejected] = useState(false);
     const [watchLoading, setWatchLoading] = useState(false);
+    // A Join Room press asked for the picture: it starts by itself once (see the
+    // effect before handleLeave). Off with ?manualStart.
+    const [autoStartArmed, setAutoStartArmed] = useState(false);
     const [playbackMode, setPlaybackMode] = useState('');
     const [hasTurnServer, setHasTurnServer] = useState(false);
     const [roomHasTurnServer, setRoomHasTurnServer] = useState(false);
@@ -148,6 +154,9 @@ export default function WatchView({ initialCode = '' }) {
     // reconnect asks for the relay again.
     const fallbackResumeRef = useRef(false);
     const activePlaybackAttemptRef = useRef(0);
+    // Producers announced while a WebRTC start ran, after it may have read the
+    // producer list; consumed once that start plays (see onNewProducer).
+    const announcedDuringStartRef = useRef([]);
     const joinedRef = useRef(false);
     const joinedRoomCodeRef = useRef(normalizeRoomCode(initialCode));
     const watchingRef = useRef(false);
@@ -867,6 +876,28 @@ export default function WatchView({ initialCode = '' }) {
     }, [joined, socket]);
 
     useEffect(() => {
+        // The producers onNewProducer kept while a WebRTC start ran: once that start
+        // plays, each one it has no consumer for is consumed in its attempt. With
+        // no start running, or the relay playing, they are let go.
+        if (watching || !watchLoading) {
+            const announced = announcedDuringStartRef.current;
+            announcedDuringStartRef.current = [];
+            if (watching && playbackMode === 'mediasoup' && announced.length) {
+                const attemptId = activePlaybackAttemptRef.current;
+                void (async () => {
+                    for (const producerId of announced) {
+                        if (consumersRef.current.some((consumer) => consumer.producerId === producerId)) continue;
+                        try {
+                            await consumeProducer(producerId, attemptId);
+                        } catch (err) {
+                            if (isSupersededAttemptError(err)) return;
+                            console.warn('[Nextra] Failed to consume new producer:', err.message);
+                        }
+                    }
+                })();
+            }
+        }
+
         const onRoomEnded = ({ reason } = {}) => {
             terminalRoomEndedRef.current = true;
             // A join still on its way must not bring the ended room back, and no
@@ -909,6 +940,13 @@ export default function WatchView({ initialCode = '' }) {
             setHasProducer(true);
             setHostDisconnected(false);
 
+            // A start that is running may have read the producer list before this
+            // one existed (the host produces audio a moment after video); it is
+            // consumed when that start plays.
+            if (!watching && watchLoading) {
+                if (producerId) announcedDuringStartRef.current.push(producerId);
+                return;
+            }
             if (!watching || playbackMode !== 'mediasoup') return;
 
             // The playback that is current now; a newer one after an await is not ours to feed.
@@ -970,7 +1008,7 @@ export default function WatchView({ initialCode = '' }) {
             socket.off('room-ended', onRoomEnded);
             socket.off('server-restarting', onRoomEnded);
         };
-    }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback, dropFallbackClaim, recoveryGuard, viewerSession]);
+    }, [socket, watching, watchLoading, playbackMode, consumeProducer, cleanupPlayback, dropFallbackClaim, recoveryGuard, viewerSession]);
 
     // Joins the room as the viewer session `session` (see viewerSession.mjs) and
     // loads the mediasoup device. The session is checked after every await and
@@ -1081,6 +1119,8 @@ export default function WatchView({ initialCode = '' }) {
         try {
             await joinRoomAndLoadDevice(code, session);
             setPassphraseRejected(false);
+            // The press that joined also asks for the picture.
+            if (!MANUAL_START) setAutoStartArmed(true);
         } catch (err) {
             // The session ended while the join ran (a room that ended, a transport
             // failure, the view unmounting): whatever ended it has reset the view.
@@ -1108,6 +1148,19 @@ export default function WatchView({ initialCode = '' }) {
             setJoining(false);
         }
     }, [codeInput, joinRoomAndLoadDevice, socket, viewerSession, passphraseRequired, passphrase]);
+
+    // A viewer who pressed Join on the home page for this code joins here
+    // without pressing Join Room. The note is taken once (see joinIntent.mjs).
+    const joinFromHomePage = useEffectEvent(() => {
+        if (takeJoinIntent(normalizeRoomCode(initialCode), getSessionStorageSafely(window))) void handleJoin();
+    });
+    useEffect(() => {
+        if (MANUAL_START) return undefined;
+        // After the mount has settled: StrictMode's trial unmount in development
+        // ends any join it began, and would take the note with it.
+        const timer = setTimeout(joinFromHomePage, 0);
+        return () => clearTimeout(timer);
+    }, []);
 
     // Asks the server for the fMP4 relay (fallback-consume-start) and, once it
     // answers, plays it. The start is sent once with a 10 s answer timeout and
@@ -1389,6 +1442,25 @@ export default function WatchView({ initialCode = '' }) {
         }
         setTimeout(() => setMediaControlStatus(''), 3500);
     }, [socket]);
+
+    // The start a Join Room press asked for, once: as soon as the host's media is
+    // there (at once, or when the host starts) and nothing is starting or playing.
+    // The request is spent as soon as a start runs, playback plays, the viewer
+    // left (or the join failed) or the room ended; a failed start is not tried
+    // again, Watch Stream is. An OBS room that prefers the relay is started by
+    // the "Auto-enter fallback mode" effect, so this one spends it unused.
+    const autoStartSpent = !joined || hostDisconnected || watching || watchLoading || fallbackMode
+        || (hasProducer && ingestMode === 'obs' && preferRelayFirst);
+    if (autoStartArmed && autoStartSpent) setAutoStartArmed(false);
+    useEffect(() => {
+        if (!autoStartArmed || !hasProducer || autoStartSpent) return undefined;
+        // One task later, like the other state this view changes from an effect.
+        const start = setTimeout(() => {
+            setAutoStartArmed(false);
+            void handleWatch();
+        }, 0);
+        return () => clearTimeout(start);
+    }, [autoStartArmed, hasProducer, autoStartSpent, handleWatch]);
 
     const handleLeave = useCallback(async () => {
         // Before the first await: a join or rejoin still on its way (a reconnect
@@ -1856,7 +1928,12 @@ export default function WatchView({ initialCode = '' }) {
 
                         {!watching && !hostDisconnected && !fallbackMode && (
                             <div className="video-overlay">
-                                {hasProducer ? (
+                                {hasProducer && !MANUAL_START && (autoStartArmed || watchLoading) ? (
+                                    <p className="video-overlay-status" role="status">
+                                        <span className="spinner" aria-hidden="true" />
+                                        Starting the picture…
+                                    </p>
+                                ) : hasProducer ? (
                                     <button
                                         className="btn btn-primary btn-large pulse"
                                         onClick={handleWatch}
@@ -1864,12 +1941,19 @@ export default function WatchView({ initialCode = '' }) {
                                     >
                                         {watchLoading ? 'Connecting...' : 'Watch Stream'}
                                     </button>
-                                ) : (
+                                ) : MANUAL_START ? (
                                     <>
                                         <p>Waiting for host to start sharing...</p>
                                         <p className="video-overlay-sub">
                                             You&apos;re in room {formatRoomCode(joinedRoomCode)}.
                                             A <strong>Watch Stream</strong> button appears here once the host&apos;s media starts.
+                                        </p>
+                                    </>
+                                ) : (
+                                    <>
+                                        <p>Waiting for host to start sharing...</p>
+                                        <p className="video-overlay-sub">
+                                            You&apos;re in room {formatRoomCode(joinedRoomCode)}. The stream starts here by itself.
                                         </p>
                                     </>
                                 )}

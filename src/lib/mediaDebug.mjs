@@ -14,3 +14,12 @@ export function isMediaDebugEnabled(locationLike, storageLike) {
         return false;
     }
 }
+
+// `?manualStart` keeps the two-step viewer flow: Join Room, then Watch Stream.
+export function isManualStartRequested(locationLike) {
+    try {
+        return new URLSearchParams(locationLike?.search || '').has('manualStart');
+    } catch {
+        return false;
+    }
+}
