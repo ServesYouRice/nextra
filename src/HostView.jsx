@@ -2094,7 +2094,7 @@ export default function HostView() {
             ? 'Public link is starting automatically. Wait a few seconds and it will appear here.'
             : publicShareStatus === 'error'
                 ? `Public link unavailable on this machine. ${publicShareError || 'Built-in tunnel startup failed.'}`
-                : 'Public link unavailable on this machine. Share the local link or room code instead.';
+                : 'Public link unavailable on this machine. Share the local link instead.';
     const whepBaseUrl = shareBaseUrl || lanBaseUrl;
     const whepPlaybackUrl = whepEnabled && roomCode && whepBaseUrl
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
@@ -2116,8 +2116,8 @@ export default function HostView() {
                             <div className="video-overlay">
                                 <p>No screen shared yet</p>
                                 <p className="video-overlay-sub">
-                                    Pick your quality in Settings, then press Start Sharing.
-                                    You&apos;ll get a room code and link to send to viewers.
+                                    Pick a resolution and frame rate below, then press Start Sharing.
+                                    You&apos;ll get a link to send to viewers.
                                 </p>
                             </div>
                         )}
