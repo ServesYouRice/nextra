@@ -1431,6 +1431,242 @@ input.select-input {
   margin-bottom: 0.45rem;
 }
 
+/* ========== HOW TO USE ========== */
+/* The guide is an article, so it keeps the article grid. Every rule is scoped
+   under .howto: .article-container, .article-step and the table classes are
+   shared with the Privacy, Copyright and Status pages. */
+.howto {
+  font-size: var(--fs-body);
+}
+
+/* The tab row and the step cards leave the reading measure like the support
+   table does: five tabs do not fit 40rem, and three cards need the room. */
+.howto > .howto-tabs {
+  grid-column: full;
+  justify-self: center;
+  max-width: min(70rem, 100% - var(--shell-pad-inline) * 2);
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+  /* Room for the focus ring, which an overflow box would clip. */
+  padding: 4px;
+  overflow-x: auto;
+}
+
+.howto-tab {
+  flex: none;
+  min-height: var(--tap-min);
+  padding: 0 1.1rem;
+  background: var(--surface-button-quiet);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.howto-tab:hover {
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+.howto-tab[aria-selected='true'] {
+  background: var(--surface-button);
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+/* A panel is a grid with the article's own columns, so its prose keeps the
+   measure while the step cards reach the full width. It spans the whole row
+   and so is as wide as the article: inheriting the template gives the same
+   tracks. display: grid would beat the hidden attribute, hence the rule. */
+.howto > .howto-panel {
+  grid-column: full;
+  display: grid;
+  grid-template-columns: inherit;
+}
+
+.howto > .howto-panel[hidden] {
+  display: none;
+}
+
+.howto-panel > * {
+  grid-column: content;
+}
+
+.howto-panel > .howto-steps {
+  grid-column: full;
+  justify-self: center;
+  width: min(70rem, 100% - var(--shell-pad-inline) * 2);
+}
+
+.howto-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 1rem;
+}
+
+.howto-steps > .article-step {
+  margin-bottom: 0;
+}
+
+.howto-steps .article-step strong {
+  display: block;
+}
+
+.howto-steps .article-step p {
+  margin: 0.35rem 0 0;
+}
+
+/* The pictures are plain elements: no image file to load or to describe. */
+.howto-art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  height: 96px;
+  margin-bottom: 0.75rem;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.howto-art-button {
+  padding: 0.5rem 1rem;
+  background: var(--surface-button);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text-1);
+  font-size: var(--fs-small);
+  font-weight: 500;
+}
+
+.howto-art-window {
+  width: 2.25rem;
+  height: 3rem;
+  background: var(--bg-3);
+  border: 1.5px solid var(--border-strong);
+  border-radius: 4px;
+}
+
+.howto-art-window.is-picked {
+  background: var(--accent-muted);
+  border-color: var(--accent);
+}
+
+.howto-art-chip {
+  padding: 0.4rem 0.9rem;
+  background: var(--bg-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  letter-spacing: 0.08em;
+}
+
+/* A command sits in a box with its Copy button at the top right. The box's top
+   padding keeps the button off the first line; the line itself scrolls sideways
+   inside the box and never wraps. */
+.howto-code {
+  position: relative;
+  margin: 0.75rem 0 1rem;
+  padding-top: 3rem;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.howto-code pre {
+  margin: 0;
+  padding: 0 1rem 1rem;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.howto-copy {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+}
+
+/* Fold-outs: a hairline above each one and one under the last. */
+.howto-folds {
+  margin: 1.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.howto-fold {
+  border-top: 1px solid var(--border);
+}
+
+.howto-fold > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: var(--tap-min);
+  padding-block: 0.5rem;
+  color: var(--text-1);
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  list-style: none;
+}
+
+.howto-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.howto-fold > summary::after {
+  content: '';
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform var(--transition);
+}
+
+.howto-fold[open] > summary::after {
+  transform: translateY(2px) rotate(-135deg);
+}
+
+.howto-fold-body {
+  padding-bottom: 0.5rem;
+}
+
+.howto-fold-body > .article-step {
+  margin-bottom: 1rem;
+}
+
+@media (max-width: 899px) {
+  .howto-steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .howto-code {
+    padding-top: 3.5rem;
+  }
+
+  .howto-copy {
+    min-height: var(--tap-min);
+    min-width: var(--tap-min);
+  }
+}
+
 /* ========== VIDEO STAGE ========== */
 /* The third term bounds the 16:9 stage by the height left over after the page
    chrome, so a short viewport shrinks the stage instead of growing a scrollbar.
