@@ -15,15 +15,13 @@ const CopyrightView = lazy(() => import('./CopyrightView'));
 const StatusView = lazy(() => import('./StatusView'));
 
 const NAV_ITEMS = [
-    { hash: '', label: 'Home' },
-    { hash: '#how-to', label: 'How to Use' },
     { hash: '#host', label: 'Host' },
     { hash: '#watch', label: 'Watch' },
+    { hash: '#how-to', label: 'How to Use' },
     { hash: '#status', label: 'Status' },
 ];
 
 function isNavItemActive(item, route) {
-    if (item.hash === '') return route === '' || route === '#';
     if (item.hash === '#watch') return route.startsWith('#watch');
     return route === item.hash;
 }
@@ -33,7 +31,13 @@ function Router() {
     // Counts user-initiated navigations only, so the initial load never steals
     // focus from where the browser put it.
     const [navigationCount, setNavigationCount] = useState(0);
+    // The menu is open for the route it was opened on, so a route change closes
+    // it without an effect.
+    const [menuRoute, setMenuRoute] = useState(null);
+    const menuOpen = menuRoute === route;
+    const setMenuOpen = (open) => setMenuRoute(open ? route : null);
     const mainRef = useRef(null);
+    const menuButtonRef = useRef(null);
     const routeRef = useRef(route);
 
     useEffect(() => {
@@ -79,6 +83,17 @@ function Router() {
     }, [route]);
 
     useEffect(() => {
+        if (!menuOpen) return undefined;
+        const onKeyDown = (event) => {
+            if (event.key !== 'Escape') return;
+            setMenuRoute(null);
+            menuButtonRef.current?.focus();
+        };
+        document.addEventListener('keydown', onKeyDown);
+        return () => document.removeEventListener('keydown', onKeyDown);
+    }, [menuOpen]);
+
+    useEffect(() => {
         if (navigationCount === 0) return;
         // Focusing <main> on its own scrolls it flush to the viewport top, where
         // the sticky nav then covers the first heading. Scroll the page instead.
@@ -121,7 +136,24 @@ function Router() {
                         <BrandLogo className="brand-logo-nav" />
                     </a>
                 </div>
-                <nav className="nav-links" aria-label="Main">
+                <button
+                    type="button"
+                    className="nav-menu-button"
+                    aria-label="Menu"
+                    aria-expanded={menuOpen}
+                    aria-controls="mainNavLinks"
+                    ref={menuButtonRef}
+                    onClick={() => setMenuOpen(!menuOpen)}
+                >
+                    <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                        <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
+                    </svg>
+                </button>
+                <nav
+                    className={menuOpen ? 'nav-links nav-links-open' : 'nav-links'}
+                    id="mainNavLinks"
+                    aria-label="Main"
+                >
                     {NAV_ITEMS.map((item) => {
                         const active = isNavItemActive(item, route);
                         return (
@@ -130,6 +162,7 @@ function Router() {
                                 href={item.hash || '#'}
                                 className={active ? 'active' : ''}
                                 aria-current={active ? 'page' : undefined}
+                                onClick={() => setMenuOpen(false)}
                             >
                                 {item.label}
                             </a>

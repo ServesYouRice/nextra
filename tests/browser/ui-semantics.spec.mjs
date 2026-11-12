@@ -40,6 +40,15 @@ async function settledBox(page, selector) {
     return previous;
 }
 
+// At phone widths the main links sit behind the Menu button.
+async function mainLink(page, name) {
+    const menuButton = page.getByRole('button', { name: 'Menu' });
+    if ((await menuButton.isVisible()) && (await menuButton.getAttribute('aria-expanded')) !== 'true') {
+        await menuButton.click();
+    }
+    return page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name });
+}
+
 async function horizontalOverflow(page) {
     return page.evaluate(() => ({
         documentScrollWidth: document.documentElement.scrollWidth,
@@ -94,12 +103,12 @@ test('each route sets its own title and user navigation moves focus without stea
     expect(await page.evaluate(() => document.activeElement?.id || '')).not.toBe('main');
     await expect(page.getByTestId('route-announcer')).toHaveText('');
 
-    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'How to Use' }).click();
+    await (await mainLink(page, 'How to Use')).click();
     await expect(page).toHaveTitle('How to Use · Nextra');
     await expect(page.getByTestId('route-announcer')).toHaveText('How to Use');
     await expect.poll(() => page.evaluate(() => document.activeElement?.id || '')).toBe('main');
 
-    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Watch' }).click();
+    await (await mainLink(page, 'Watch')).click();
     await expect(page).toHaveTitle('Watch · Nextra');
     await expect(page.getByTestId('route-announcer')).toHaveText('Watch');
 
@@ -115,7 +124,7 @@ test('the status route renders live metrics instead of the error boundary', asyn
     page.on('pageerror', (err) => pageErrors.push(err.message));
 
     await page.goto('/');
-    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Status' }).click();
+    await (await mainLink(page, 'Status')).click();
 
     await expect(page.getByRole('heading', { name: 'Server Status' })).toBeVisible();
     await expect(page.getByText('Something went wrong')).toHaveCount(0);
