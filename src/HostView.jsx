@@ -4,21 +4,20 @@ import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { configureObsStream, openObsControlChannel, stopObsStream, stopObsThroughChannel } from './lib/obsWebSocket';
 import { getAv1EncoderCandidates } from './lib/obsOutputModel.mjs';
 import CopyField from './components/CopyField';
-import StatusPill from './components/StatusPill';
 import Modal from './components/Modal';
 import HostDiagnostics from './components/HostDiagnostics';
 import UserErrorAlert from './components/UserErrorAlert';
 import RoomSharePanel from './components/RoomSharePanel';
 import HostSignInPanel from './components/HostSignInPanel';
 import { useHostSessionController } from './hooks/useHostSessionController';
-import { formatBytes } from './lib/formatBytes.mjs';
 import { getLocalStorageSafely, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
-import { evaluateHostPreflight } from './lib/hostPreflight.mjs';
+import { evaluateHostPreflight, deviceCannotShare } from './lib/hostPreflight.mjs';
 import { buildDiagnosticBundle, downloadDiagnosticBundle } from './lib/diagnosticBundle.mjs';
 import { setNavigationGuard } from './lib/navigationGuard.mjs';
 import { ASSUMED_OPERATOR_ACCESS, fetchHostConfig, readOperatorAccess, signOutHost } from './lib/hostSignIn.mjs';
 import { RELOAD_PRESERVE, createStartAttempt, startOperationGuardFor } from './lib/startOperationGuard.mjs';
 import { obsOperationQueue } from './lib/obsOperationQueue.mjs';
+import { obsSetupSteps } from './lib/obsSetupSteps.mjs';
 import {
     START_PHASES,
     createCancellableWait,
@@ -438,12 +437,127 @@ function forgetHostRecoverySession(stored) {
     }
 }
 
+// One switch row of the host settings panel. The checkbox is the switch itself
+// (styled in index.css) and sits inside its label, so the whole row is the click
+// target. The long hint is not shown: it is the label's title and a visually
+// hidden description. A note is shown, for the one thing the host must see.
+function SettingSwitch({ id, label, hint, note, checked, disabled = false, onChange }) {
+    const describedBy = note || hint ? `${id}Hint` : undefined;
+    return (
+        <div className="setting-row setting-row-switch">
+            <label htmlFor={id} className="setting-switch" title={hint || note || undefined}>
+                <span>{label}</span>
+                <input
+                    type="checkbox"
+                    id={id}
+                    checked={checked}
+                    disabled={disabled}
+                    aria-describedby={describedBy}
+                    onChange={onChange}
+                />
+            </label>
+            {note && <span className="setting-note" id={describedBy}>{note}</span>}
+            {!note && hint && <span className="visually-hidden" id={describedBy}>{hint}</span>}
+        </div>
+    );
+}
+
+// m:ss since the room went live, h:mm:ss from one hour.
+function formatLiveTime(totalSeconds) {
+    const seconds = totalSeconds % 60;
+    const minutes = Math.floor(totalSeconds / 60) % 60;
+    const hours = Math.floor(totalSeconds / 3600);
+    const ss = String(seconds).padStart(2, '0');
+    return hours > 0
+        ? `${hours}:${String(minutes).padStart(2, '0')}:${ss}`
+        : `${minutes}:${ss}`;
+}
+
+// The running time of the live status line. It owns its once-a-second state so
+// the host page does not render every second; it mounts when sharing starts.
+// Hidden from assistive technology so it is not announced every second.
+function LiveTimer() {
+    const [seconds, setSeconds] = useState(0);
+    useEffect(() => {
+        const startedAt = Date.now();
+        const timer = setInterval(() => {
+            setSeconds(Math.floor((Date.now() - startedAt) / 1000));
+        }, 1000);
+        return () => clearInterval(timer);
+    }, []);
+    return <span className="live-timer" aria-hidden="true">{formatLiveTime(seconds)}</span>;
+}
+
+const OBS_STEP_STATE_WORDS = {
+    done: 'Done',
+    working: 'Working\u2026',
+    waiting: 'Waiting',
+    attention: 'Needs attention',
+};
+
+// The round marker of an OBS setup step: its number until it has a state that
+// says more (a check mark, a spinner, an exclamation mark).
+function ObsStepMarker({ state, number }) {
+    if (state === 'done') {
+        return (
+            <svg className="obs-step-marker" viewBox="0 0 22 22" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="10" />
+                <path d="M6.75 11.25 9.6 14l5.65-6" />
+            </svg>
+        );
+    }
+    if (state === 'working') {
+        return (
+            <svg className="obs-step-marker obs-step-spinner" viewBox="0 0 22 22" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="10" opacity="0.3" />
+                <path d="M11 1a10 10 0 0 1 10 10" />
+            </svg>
+        );
+    }
+    if (state === 'attention') {
+        return (
+            <svg className="obs-step-marker" viewBox="0 0 22 22" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="10" />
+                <path d="M11 6.25v6" />
+                <path d="M11 15.75v.01" strokeWidth="2.2" />
+            </svg>
+        );
+    }
+    return <span className="obs-step-marker obs-step-number" aria-hidden="true">{number}</span>;
+}
+
+// The three OBS setup steps (src/lib/obsSetupSteps.mjs). Before sharing they
+// are a plain numbered list; from Start Sharing each row has its state word.
+function ObsSetupStepList({ steps }) {
+    return (
+        <ol className="obs-steps">
+            {steps.map((step, index) => (
+                <li key={step.id} className={`obs-step is-${step.state}`}>
+                    <ObsStepMarker state={step.state} number={index + 1} />
+                    <span className="obs-step-text">
+                        <span className="obs-step-label">{step.label}</span>
+                        {step.hint && <span className="obs-step-hint">{step.hint}</span>}
+                    </span>
+                    {OBS_STEP_STATE_WORDS[step.state] && (
+                        <span className="obs-step-state">{OBS_STEP_STATE_WORDS[step.state]}</span>
+                    )}
+                </li>
+            ))}
+        </ol>
+    );
+}
+
 export default function HostView() {
     const socket = useContext(SocketContext);
     const [storedByokTurnSession] = useState(() => loadStoredByokTurnSession());
     const [roomCode, setRoomCode] = useState(null);
     const [isSharing, setIsSharing] = useState(false);
     const [viewerCount, setViewerCount] = useState(0);
+    // The quality menu behind the status line's button while sharing.
+    const [qualityMenuOpen, setQualityMenuOpen] = useState(false);
+    const qualityControlRef = useRef(null);
+    const qualityButtonRef = useRef(null);
+    const obsManualDetailsRef = useRef(null);
     const contentMode = 'motion';
     const [allowMediaControl, setAllowMediaControl] = useState(false);
     const [roomPassphrase, setRoomPassphrase] = useState('');
@@ -504,6 +618,8 @@ export default function HostView() {
     const [cloudflareTurnAutofillLoading, setCloudflareTurnAutofillLoading] = useState(false);
     const [obsAutoStatus, setObsAutoStatus] = useState(''); // '' | 'configuring' | 'success' | 'error'
     const [obsAutoMessage, setObsAutoMessage] = useState('');
+    // How far the current configure has got: '' | 'connected' | 'configured'.
+    const [obsSetupProgress, setObsSetupProgress] = useState('');
     const [obsPassword, setObsPassword] = useState(() => loadStoredObsPassword());
     const [obsAutoStart, setObsAutoStart] = useState(true);
     const [obsApplySettings, setObsApplySettings] = useState(true);
@@ -517,6 +633,13 @@ export default function HostView() {
     const [saveByokTurnForSession, setSaveByokTurnForSession] = useState(() => storedByokTurnSession != null);
     const [showByokTurnModal, setShowByokTurnModal] = useState(false);
     const [hostToken, setHostToken] = useState('');
+    // Read once: a touch device whose browser cannot capture a screen is told so
+    // up front instead of being shown host controls that cannot work.
+    const [cannotShare] = useState(() => deviceCannotShare({
+        captureApiAvailable: typeof navigator.mediaDevices?.getDisplayMedia === 'function',
+        coarsePointer: typeof window.matchMedia === 'function'
+            && window.matchMedia('(pointer: coarse)').matches,
+    }));
     // Whether this browser may host, as /api/config reports it. A host on the machine running Nextra (or a trusted
     // LAN) always may; a host on another computer signs in with the host password first (HostSignInPanel).
     const [operatorAccess, setOperatorAccess] = useState(ASSUMED_OPERATOR_ACCESS);
@@ -707,10 +830,15 @@ export default function HostView() {
     const runObsConfigure = useCallback((token, options) => {
         const guard = startGuardRef.current;
         setObsAutoMessage(obsOperationQueue.pending > 0 ? OBS_WAITING_MESSAGE : OBS_CONNECTING_MESSAGE);
+        setObsSetupProgress('');
         return obsOperationQueue.configure({
             token,
             isCurrent: (session) => guard.isCurrent(session),
-            configure: () => configureObsStream(options),
+            // Progress from a session that is no longer current never reaches the page.
+            configure: () => configureObsStream({
+                ...options,
+                onProgress: (stage) => { if (guard.isCurrent(token)) setObsSetupProgress(stage); },
+            }),
             shouldCompensate: (result) => guard.staleReason(token) !== RELOAD_PRESERVE
                 && (options.autoStart === true || result?.success === true),
             stop: () => stopObsStream({ password: options.password }),
@@ -1084,6 +1212,7 @@ export default function HostView() {
         setRoomHasTurnServer(false);
         setObsAutoStatus('');
         setObsAutoMessage('');
+        setObsSetupProgress('');
         setShowByokTurnModal(false);
         setStatus('idle');
         setTerminalRoomEnded(false);
@@ -2153,6 +2282,32 @@ export default function HostView() {
         }
     }, []);
 
+    // The quality menu closes when sharing stops, on a press outside it and on
+    // Escape (focus goes back to its button). It stays open across a resize.
+    const [qualityMenuSharing, setQualityMenuSharing] = useState(isSharing);
+    if (qualityMenuSharing !== isSharing) {
+        setQualityMenuSharing(isSharing);
+        if (!isSharing) setQualityMenuOpen(false);
+    }
+    useEffect(() => {
+        if (!qualityMenuOpen) return undefined;
+        const onPointerDown = (evt) => {
+            if (qualityControlRef.current?.contains(evt.target)) return;
+            setQualityMenuOpen(false);
+        };
+        const onKeyDown = (evt) => {
+            if (evt.key !== 'Escape') return;
+            setQualityMenuOpen(false);
+            qualityButtonRef.current?.focus();
+        };
+        document.addEventListener('pointerdown', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('pointerdown', onPointerDown);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [qualityMenuOpen]);
+
     const localWatchLink = roomCode ? `${lanBaseUrl}/#watch/${roomCode}` : '';
     const publicWatchLink = roomCode && shareBaseUrl ? `${shareBaseUrl}/#watch/${roomCode}` : '';
     const showPublicLink = !!publicWatchLink && publicWatchLink !== localWatchLink;
@@ -2162,7 +2317,7 @@ export default function HostView() {
             ? 'Public link is starting automatically. Wait a few seconds and it will appear here.'
             : publicShareStatus === 'error'
                 ? `Public link unavailable on this machine. ${publicShareError || 'Built-in tunnel startup failed.'}`
-                : 'Public link unavailable on this machine. Share the local link or room code instead.';
+                : 'Works for people on your network. There is no public link on this machine.';
     const whepBaseUrl = shareBaseUrl || lanBaseUrl;
     const whepPlaybackUrl = whepEnabled && roomCode && whepBaseUrl
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
@@ -2173,6 +2328,102 @@ export default function HostView() {
     // on: a room being shared, or one reclaimed after a reload and waiting for
     // Resume Sharing, belongs to its host token and stays usable.
     const showHostSignIn = !operatorAccess.authorized && status === 'idle' && !resumePending;
+    const obsIdleSteps = obsSetupSteps({ autoStatus: '', progress: '', whipConnected: false, autoStart: obsAutoStart });
+    const obsLiveSteps = obsSetupSteps({
+        autoStatus: obsAutoStatus,
+        progress: obsSetupProgress,
+        whipConnected,
+        autoStart: obsAutoStart,
+    });
+    // The stage's "Set it up by hand" opens the manual fields beside it.
+    const openObsManualSetup = () => {
+        const details = obsManualDetailsRef.current;
+        if (!details) return;
+        details.open = true;
+        details.querySelector('summary')?.focus();
+    };
+    // The OBS codec and relay fallback state, for the diagnostics section.
+    const obsDiagnosticSummary = ingestMode === 'obs' && roomCode
+        ? [
+            obsVideoCodec || 'waiting',
+            obsAv1Mode || obsVideoCodec === 'av1'
+                ? `WebRTC-only AV1 room | TURN ${roomHasTurnServer ? 'ready' : 'missing'}`
+                : `Fallback viewers: ${fallbackViewerCount} | ${fallbackAvailable ? 'Fallback active' : 'Fallback inactive'}`,
+            fallbackViewerCount > 0 && roomMetrics?.fallbackVideoKbps > 0 && roomMetrics.fallbackVideoKbps < roomMetrics.fallbackVideoTargetKbps
+                ? `Relay lowered to ${(roomMetrics.fallbackVideoKbps / 1000).toFixed(1)} Mbps (connection too slow for full quality)`
+                : '',
+        ].filter(Boolean).join(' | ')
+        : '';
+    // With "Set OBS up for me" off, Nextra sends OBS no picture settings, so the
+    // three picture rows have nothing to change.
+    const picturesOff = ingestMode === 'obs' && !obsApplySettings;
+    // The room rows: visible rows of the panel in browser mode, inside "More
+    // options" in OBS mode.
+    const roomRows = (
+        <>
+            <div className="setting-row setting-row-inline">
+                <label
+                    htmlFor="roomPassphrase"
+                    className="setting-row-label"
+                    title="Viewers must enter it after the room code"
+                >
+                    Optional room passphrase
+                </label>
+                <input
+                    id="roomPassphrase"
+                    type="password"
+                    value={roomPassphrase}
+                    maxLength={128}
+                    autoComplete="new-password"
+                    placeholder="None"
+                    aria-describedby="roomPassphraseHint"
+                    onChange={(evt) => setRoomPassphrase(evt.target.value)}
+                    className="select-input"
+                />
+                <span className="visually-hidden" id="roomPassphraseHint">
+                    Viewers must enter it after the room code
+                </span>
+            </div>
+            <SettingSwitch
+                id="reloadRecoveryEnabled"
+                label="Allow recovery after reload"
+                hint="Keeps this room reclaimable for about 30 seconds; browser capture must be selected again"
+                checked={reloadRecoveryEnabled}
+                onChange={(evt) => setReloadRecoveryEnabled(evt.target.checked)}
+            />
+        </>
+    );
+
+    if (cannotShare) {
+        return (
+            <div className="view-container">
+                <div className="view-header">
+                    <h1>Host</h1>
+                    <p className="subtitle">Share your screen with viewers</p>
+                </div>
+                <div className="cannot-share">
+                    <svg
+                        width="48"
+                        height="48"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                    >
+                        <rect x="3" y="4" width="18" height="12" rx="2" />
+                        <path d="M2 20h20" />
+                    </svg>
+                    <h2>Sharing needs a computer</h2>
+                    <p>Phone and tablet browsers can't capture the screen. Open Nextra on a laptop or desktop to share.</p>
+                    <a className="btn btn-primary btn-main" href="#watch">Watch a stream instead</a>
+                    <a className="btn btn-outline" href="#how-to">How to Use</a>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="view-container">
@@ -2182,162 +2433,268 @@ export default function HostView() {
             </div>
 
             <div className="host-layout">
+                {!isSharing && (
+                    <div className="source-tabs-row">
+                        <div
+                            className="source-tabs"
+                            role="radiogroup"
+                            aria-label="Capture source"
+                            aria-describedby="captureSourceHint"
+                        >
+                            <label className="source-tab">
+                                <input
+                                    type="radio"
+                                    name="captureSource"
+                                    id="browserMode"
+                                    checked={ingestMode !== 'obs'}
+                                    disabled={resumePending}
+                                    onChange={() => handleIngestModeChange('browser')}
+                                />
+                                <svg className="source-tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                    <rect x="3" y="4" width="18" height="13" rx="2" />
+                                    <path d="M8 21h8M12 17v4" />
+                                </svg>
+                                This browser
+                            </label>
+                            <label className="source-tab">
+                                <input
+                                    type="radio"
+                                    name="captureSource"
+                                    id="obsMode"
+                                    checked={ingestMode === 'obs'}
+                                    disabled={resumePending}
+                                    onChange={() => handleIngestModeChange('obs')}
+                                />
+                                <svg className="source-tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                    <circle cx="12" cy="12" r="9" />
+                                    <circle cx="12" cy="12" r="3" />
+                                </svg>
+                                OBS
+                            </label>
+                        </div>
+                        <p className="source-tabs-hint" id="captureSourceHint">
+                            {resumePending
+                                ? resumeModeLockHint
+                                : ingestMode === 'obs'
+                                    ? 'Needs OBS Studio 28 or newer on this computer'
+                                    : 'Viewers just open a link'}
+                        </p>
+                    </div>
+                )}
                 <div className="host-video-section">
                     <div className="video-container">
                         <video ref={videoRef} autoPlay muted playsInline className="video-player" />
-                        {status === 'idle' && !showHostSignIn && (
-                            <div className="video-overlay">
-                                <p>No screen shared yet</p>
-                                <p className="video-overlay-sub">
-                                    Pick your quality in Settings, then press Start Sharing.
-                                    You&apos;ll get a room code and link to send to viewers.
-                                </p>
+                        {!isSharing && !showHostSignIn && (
+                            <div className="video-overlay host-stage-empty">
+                                <svg className="host-stage-empty-icon" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                    <rect x="3" y="4" width="18" height="13" rx="2" />
+                                    <path d="M8 21h8M12 17v4" />
+                                </svg>
+                                <p className="host-stage-empty-title">Nothing is being shared yet</p>
+                                {ingestMode === 'obs'
+                                    ? <ObsSetupStepList steps={obsIdleSteps} />
+                                    : (
+                                        <p className="video-overlay-sub host-stage-empty-sub">
+                                            You&apos;ll choose a screen, window or tab next.
+                                        </p>
+                                    )}
+                                <div className="controls">
+                                    <button
+                                        ref={startButtonRef}
+                                        className="btn btn-primary btn-main"
+                                        onClick={handleStartSharing}
+                                        disabled={status === 'connecting'}
+                                    >
+                                        {status === 'connecting'
+                                            ? 'Connecting...'
+                                            : resumePending
+                                                ? 'Resume Sharing'
+                                                : terminalRoomEnded
+                                                    ? 'Create new room'
+                                                    : 'Start Sharing'}
+                                    </button>
+                                </div>
                             </div>
                         )}
                         {showHostSignIn && (
-                            <div className="video-overlay">
-                                <p>No screen shared yet</p>
-                                <p className="video-overlay-sub">
+                            <div className="video-overlay host-stage-empty">
+                                <svg className="host-stage-empty-icon" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                    <rect x="3" y="4" width="18" height="13" rx="2" />
+                                    <path d="M8 21h8M12 17v4" />
+                                </svg>
+                                <p className="host-stage-empty-title">Nothing is being shared yet</p>
+                                <p className="video-overlay-sub host-stage-empty-sub">
                                     {operatorAccess.signInAvailable
                                         ? 'Sign in with the host password to start sharing from this computer.'
                                         : 'Rooms can only be started on the computer that runs Nextra.'}
                                 </p>
                             </div>
                         )}
-                        {isSharing && ingestMode === 'obs' && (
+                        {isSharing && ingestMode === 'obs' && whipConnected && (
                             <div className="video-overlay">
                                 <p>Streaming via OBS</p>
                                 <p className="video-overlay-sub">
-                                    {whipConnected ? 'OBS connected' : 'Waiting for OBS...'}
+                                    OBS connected
                                     {obsVideoCodec ? ` \u00B7 ${obsVideoCodec.toUpperCase()}` : ''}
                                     {totalViewers > 0 ? ` \u00B7 ${totalViewers} viewer${totalViewers !== 1 ? 's' : ''}` : ''}
                                 </p>
                             </div>
                         )}
+                        {isSharing && ingestMode === 'obs' && !whipConnected && (
+                            <div className="video-overlay obs-setup-overlay">
+                                <p>Streaming via OBS</p>
+                                <ObsSetupStepList steps={obsLiveSteps} />
+                                {whipHttpStatus !== 'ready' && obsAutoStatus !== 'error' && (
+                                    <div className="obs-status-line is-warn" role="status">
+                                        {whipHttpStatus === 'error'
+                                            ? `OBS WHIP endpoint unavailable: ${whipHttpError || 'HTTP listener failed.'}`
+                                            : 'OBS WHIP endpoint is starting...'}
+                                    </div>
+                                )}
+                                {obsAutoStatus === 'configuring' && (
+                                    <div className="obs-status-line is-info" role="status">{obsAutoMessage}</div>
+                                )}
+                                {obsAutoStatus === 'success' && (
+                                    <div className="obs-status-line is-ok" role="status">{obsAutoMessage}</div>
+                                )}
+                                {obsAutoStatus === 'error' && (
+                                    <div className="obs-status-line is-warn" role="alert">{obsAutoMessage}</div>
+                                )}
+                                {obsAutoStatus === 'error' && (
+                                    <div className="obs-retry-row">
+                                        <button
+                                            type="button"
+                                            className="btn btn-secondary btn-small"
+                                            onClick={() => {
+                                                if (whipHttpStatus !== 'ready') {
+                                                    setObsAutoStatus('error');
+                                                    setObsAutoMessage(whipHttpStatus === 'error'
+                                                        ? `OBS WHIP endpoint is unavailable: ${whipHttpError || 'HTTP listener failed.'}`
+                                                        : 'OBS WHIP endpoint is still starting. Retry in a moment.');
+                                                    socket.emit('request-server-config');
+                                                    return;
+                                                }
+                                                const whipUrl = buildWhipBroadcastUrl(roomCode);
+                                                setObsAutoStatus('configuring');
+                                                const retryOpts = {
+                                                    ...buildObsAutoConfig(whipUrl, hostTokenRef.current),
+                                                };
+                                                // The retry belongs to the start operation that
+                                                // created this session. Stop, a room that ended
+                                                // or the page going away end it while the retry
+                                                // runs, and its result then belongs to no session
+                                                // (the queued configure stops OBS for it).
+                                                const retryOp = startGuardRef.current.activeOperation;
+                                                runObsConfigure(retryOp, retryOpts).then(({ stale, result }) => {
+                                                    if (stale || !startGuardRef.current.isCurrent(retryOp)) return;
+                                                    setObsAutoStatus(result.success ? 'success' : 'error');
+                                                    setObsAutoMessage(result.message);
+                                                    // Whatever the result, as at start: a failed
+                                                    // run can still leave OBS streaming, and a
+                                                    // channel that failed or was never opened
+                                                    // leaves nothing to stop it with.
+                                                    establishObsControlChannel(retryOp);
+                                                });
+                                            }}
+                                        >
+                                            Retry Auto-Configure OBS
+                                        </button>
+                                        <button type="button" className="obs-manual-link" onClick={openObsManualSetup}>
+                                            Set it up by hand
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
 
-                    {showHostSignIn ? null : !isSharing ? (
-                        <>
-                            <div className="controls">
-                                <button
-                                    ref={startButtonRef}
-                                    className="btn btn-primary btn-large"
-                                    onClick={handleStartSharing}
-                                    disabled={status === 'connecting'}
-                                >
-                                    {status === 'connecting'
-                                        ? 'Connecting...'
-                                        : resumePending
-                                            ? 'Resume Sharing'
-                                            : terminalRoomEnded
-                                                ? 'Create new room'
-                                                : 'Start Sharing'}
-                                </button>
-                                {ingestMode === 'obs' && obsApplySettings && (
-                                    <div className="mode-toggle" role="group" aria-label="OBS tuning profile">
-                                        {Object.entries(OBS_TUNING_PROFILES).map(([key, tuning]) => (
-                                            <button
-                                                key={key}
-                                                type="button"
-                                                className={obsTuningProfile === key ? 'active' : ''}
-                                                aria-pressed={obsTuningProfile === key}
-                                                onClick={() => setObsTuningProfile(key)}
-                                            >
-                                                {tuning.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                )}
+                    {isSharing && (
+                        <div className="controls live-status">
+                            <div className="live-status-text">
+                                <span className="live-dot" aria-hidden="true" />
+                                <span className="live-word">Live</span>
+                                <span aria-hidden="true"> · </span>
+                                <LiveTimer />
+                                <span aria-hidden="true"> · </span>
+                                <span className="viewer-count">
+                                    {totalViewers} viewer{totalViewers !== 1 ? 's' : ''}
+                                    {whepViewerCount > 0 && (
+                                        <span className="room-meta">
+                                            {viewerCount} WebRTC · {whepViewerCount} WHEP
+                                        </span>
+                                    )}
+                                </span>
                             </div>
-                            <div className="capture-settings">
-                                <div className="setting-row setting-row-inline">
-                                    <span className="setting-row-label">Resolution</span>
-                                    <div className="mode-toggle" role="group" aria-label="Resolution">
-                                        {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                            <button
-                                                key={key}
-                                                type="button"
-                                                className={qualityProfile === key ? 'active' : ''}
-                                                aria-pressed={qualityProfile === key}
-                                                onClick={() => setQualityProfile(key)}
-                                            >
-                                                {profile.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                                <div className="setting-row setting-row-inline">
-                                    <span className="setting-row-label">Frame rate</span>
-                                    <div className="mode-toggle" role="group" aria-label="Frame rate">
-                                        {[60, 30].map((fps) => (
-                                            <button
-                                                key={fps}
-                                                type="button"
-                                                className={frameRate === fps ? 'active' : ''}
-                                                aria-pressed={frameRate === fps}
-                                                onClick={() => setFrameRate(fps)}
-                                            >
-                                                {fps} fps
-                                            </button>
-                                        ))}
+                            <div className="quality-control" ref={qualityControlRef}>
+                                <button
+                                    type="button"
+                                    ref={qualityButtonRef}
+                                    className="btn btn-secondary quality-button"
+                                    aria-haspopup="true"
+                                    aria-expanded={qualityMenuOpen}
+                                    aria-controls="qualityMenu"
+                                    aria-label={`Quality: ${QUALITY_PROFILES[qualityProfile]?.label || qualityProfile} \u00B7 ${frameRate} fps`}
+                                    onClick={() => setQualityMenuOpen((open) => !open)}
+                                >
+                                    {QUALITY_PROFILES[qualityProfile]?.label || qualityProfile} {'\u00B7'} {frameRate} fps
+                                    <svg className="quality-chevron" viewBox="0 0 12 12" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                        <path d="M3 4.5 6 7.5 9 4.5" />
+                                    </svg>
+                                </button>
+                                <div id="qualityMenu" className="quality-menu" hidden={!qualityMenuOpen}>
+                                    {/* Browser-capture resolution is applied live via
+                                        applyQualityProfileToLiveStream, so keep it
+                                        adjustable while streaming (mirrors the live fps
+                                        toggle). OBS resolution is fixed at config time. */}
+                                    {ingestMode !== 'obs' && (
+                                        <div className="quality-menu-row">
+                                            <span className="quality-menu-label" aria-hidden="true">Resolution</span>
+                                            <div className="mode-toggle" role="group" aria-label="Resolution">
+                                                {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
+                                                    <button
+                                                        key={key}
+                                                        type="button"
+                                                        className={qualityProfile === key ? 'active' : ''}
+                                                        aria-pressed={qualityProfile === key}
+                                                        onClick={() => setQualityProfile(key)}
+                                                    >
+                                                        {profile.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                    <div className="quality-menu-row">
+                                        <span className="quality-menu-label" aria-hidden="true">Frame rate</span>
+                                        <div className="mode-toggle" role="group" aria-label="Frame rate">
+                                            {[60, 30].map((fps) => (
+                                                <button
+                                                    key={fps}
+                                                    type="button"
+                                                    className={frameRate === fps ? 'active' : ''}
+                                                    aria-pressed={frameRate === fps}
+                                                    onClick={() => setFrameRate(fps)}
+                                                >
+                                                    {fps} fps
+                                                </button>
+                                            ))}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                        </>
-                    ) : (
-                        <div className="controls">
-                                <button
-                                    className="btn btn-danger"
-                                    onClick={() => {
-                                        handleStopSharing();
-                                    }}
-                                >
-                                    Stop Sharing
-                                </button>
-                                {/* Browser-capture resolution is applied live via
-                                    applyQualityProfileToLiveStream, so keep it
-                                    adjustable while streaming (mirrors the live fps
-                                    toggle). OBS resolution is fixed at config time. */}
-                                {ingestMode !== 'obs' && (
-                                    <div className="mode-toggle" role="group" aria-label="Resolution">
-                                        {Object.entries(QUALITY_PROFILES).map(([key, profile]) => (
-                                            <button
-                                                key={key}
-                                                type="button"
-                                                className={qualityProfile === key ? 'active' : ''}
-                                                aria-pressed={qualityProfile === key}
-                                                onClick={() => setQualityProfile(key)}
-                                            >
-                                                {profile.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                )}
-                                <div className="mode-toggle" role="group" aria-label="Frame rate">
-                                    {[60, 30].map((fps) => (
-                                        <button
-                                            key={fps}
-                                            type="button"
-                                            className={frameRate === fps ? 'active' : ''}
-                                            aria-pressed={frameRate === fps}
-                                            onClick={() => setFrameRate(fps)}
-                                        >
-                                            {fps} fps
-                                        </button>
-                                    ))}
-                                </div>
                         </div>
                     )}
 
                     {isSharing && (
-                        <div className="status-bar">
-                            <span className="status-dot streaming" /> Streaming ({QUALITY_PROFILES[qualityProfile]?.label || qualityProfile} @ {frameRate}fps)
+                        <div className="visually-hidden" role="status">
+                            Streaming ({QUALITY_PROFILES[qualityProfile]?.label || qualityProfile} @ {frameRate}fps)
                             {relayViewerCount > 0 ? ` | Relay fallback viewers: ${relayViewerCount}` : ''}
                             {relayViewerCount > 0 && relayBitrateLimit !== null
                                 ? ` | Relay lowered to ${(effectiveRelayBitsPerSecond / 1_000_000).toFixed(1)} Mbps (connection too slow for full quality)`
                                 : ''}
                         </div>
                     )}
+
                 </div>
 
                 <div className="host-side-panel">
@@ -2349,144 +2706,159 @@ export default function HostView() {
                         />
                     )}
                     {status === 'idle' && !showHostSignIn && (
-                        <div className={`settings-wrapper${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
-                        <div className="settings-panel">
-                            <h3>Settings</h3>
-                            <div className="advanced-settings advanced-settings-lead">
-                                <div className="setting-row setting-row-toggle">
-                                    <input
-                                        type="checkbox"
-                                        id="allowMediaControl"
-                                        checked={allowMediaControl}
-                                        disabled={!remoteMediaControlEnabled}
-                                        onChange={(evt) => setAllowMediaControl(evt.target.checked)}
-                                    />
-                                    <label htmlFor="allowMediaControl">
-                                        Allow viewers to pause/play media
-                                        <span className="setting-hint">
-                                            {remoteMediaControlEnabled
-                                                ? 'Viewers can remotely press Play/Pause on your keyboard'
-                                                : 'Disabled by the server operator'}
-                                        </span>
-                                    </label>
+                        <div className={`settings-wrapper host-settings-panel${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
+                            <h2 className="visually-hidden">Settings</h2>
+                            <div className="host-settings-body">
+                                <div className="settings-group capture-settings">
+                                    <div className={`setting-row setting-row-inline${picturesOff ? ' setting-row-off' : ''}`}>
+                                        <span className="setting-row-label">Resolution</span>
+                                        <div
+                                            className="mode-toggle mode-toggle-small"
+                                            role="group"
+                                            aria-label="Resolution"
+                                            aria-disabled={picturesOff || undefined}
+                                        >
+                                            {Object.entries(QUALITY_PROFILES).reverse().map(([key, profile]) => (
+                                                <button
+                                                    key={key}
+                                                    type="button"
+                                                    className={qualityProfile === key ? 'active' : ''}
+                                                    aria-pressed={qualityProfile === key}
+                                                    disabled={picturesOff}
+                                                    onClick={() => setQualityProfile(key)}
+                                                >
+                                                    {profile.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className={`setting-row setting-row-inline${picturesOff ? ' setting-row-off' : ''}`}>
+                                        <span className="setting-row-label">Frame rate</span>
+                                        <div
+                                            className="mode-toggle mode-toggle-small"
+                                            role="group"
+                                            aria-label="Frame rate"
+                                            aria-disabled={picturesOff || undefined}
+                                        >
+                                            {[30, 60].map((fps) => (
+                                                <button
+                                                    key={fps}
+                                                    type="button"
+                                                    className={frameRate === fps ? 'active' : ''}
+                                                    aria-pressed={frameRate === fps}
+                                                    disabled={picturesOff}
+                                                    onClick={() => setFrameRate(fps)}
+                                                >
+                                                    {fps} fps
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    {ingestMode === 'obs' && (
+                                        <div className={`setting-row setting-row-inline${picturesOff ? ' setting-row-off' : ''}`}>
+                                            <span className="setting-row-label">Picture preset</span>
+                                            <div
+                                                className="mode-toggle mode-toggle-small"
+                                                role="group"
+                                                aria-label="Picture preset"
+                                                aria-disabled={picturesOff || undefined}
+                                            >
+                                                {Object.entries(OBS_TUNING_PROFILES).map(([key, tuning]) => (
+                                                    <button
+                                                        key={key}
+                                                        type="button"
+                                                        className={obsTuningProfile === key ? 'active' : ''}
+                                                        aria-pressed={obsTuningProfile === key}
+                                                        disabled={picturesOff}
+                                                        onClick={() => setObsTuningProfile(key)}
+                                                    >
+                                                        {tuning.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                    {picturesOff && (
+                                        <span className="setting-note">OBS keeps its own picture settings.</span>
+                                    )}
+                                    <div
+                                        className="obs-config-panel"
+                                        hidden={ingestMode !== 'obs'}
+                                        inert={ingestMode !== 'obs' || undefined}
+                                    >
+                                        <div className="setting-row setting-row-inline">
+                                            <label htmlFor="obsPassword" className="setting-row-label">
+                                                OBS password
+                                            </label>
+                                            <input
+                                                id="obsPassword"
+                                                type="password"
+                                                value={obsPassword}
+                                                onChange={(e) => setObsPassword(e.target.value)}
+                                                placeholder="Leave blank if none"
+                                                className="select-input"
+                                            />
+                                        </div>
+                                    </div>
                                 </div>
-                                <div className="setting-row">
-                                    <label htmlFor="roomPassphrase">
-                                        Optional room passphrase
-                                        <span className="setting-hint">Viewers must enter it after the room code</span>
-                                    </label>
-                                    <input
-                                        id="roomPassphrase"
-                                        type="password"
-                                        value={roomPassphrase}
-                                        maxLength={128}
-                                        autoComplete="new-password"
-                                        onChange={(evt) => setRoomPassphrase(evt.target.value)}
-                                        className="select-input"
-                                    />
-                                </div>
-                                <div className="setting-row setting-row-toggle">
-                                    <input
-                                        type="checkbox"
-                                        id="reloadRecoveryEnabled"
-                                        checked={reloadRecoveryEnabled}
-                                        onChange={(evt) => setReloadRecoveryEnabled(evt.target.checked)}
-                                    />
-                                    <label htmlFor="reloadRecoveryEnabled">
-                                        Allow recovery after reload
-                                        <span className="setting-hint">Keeps this room reclaimable for about 30 seconds; browser capture must be selected again</span>
-                                    </label>
-                                </div>
-                                <div className="setting-row setting-row-toggle">
-                                    <input
-                                        type="checkbox"
-                                        id="obsMode"
-                                        checked={ingestMode === 'obs'}
-                                        disabled={resumePending}
-                                        onChange={(e) => handleIngestModeChange(e.target.checked ? 'obs' : 'browser')}
-                                    />
-                                    <label htmlFor="obsMode">
-                                        Use OBS (WHIP ingest)
-                                        <span className="setting-hint">
-                                            Stream via OBS instead of browser screen capture
-                                        </span>
-                                        {resumePending && (
-                                            <span className="setting-hint">{resumeModeLockHint}</span>
-                                        )}
-                                    </label>
-                                </div>
-                            </div>
-                        </div>
-                            <div
-                                className="settings-panel obs-config-panel"
-                                aria-hidden={ingestMode !== 'obs'}
-                                inert={ingestMode !== 'obs' || undefined}
-                            >
-                                    <h3>OBS Configuration</h3>
-                                    <div className="setting-row setting-row-toggle">
-                                        <input
-                                            type="checkbox"
+                                {ingestMode !== 'obs' && (
+                                    <div className="settings-group">
+                                        {roomRows}
+                                    </div>
+                                )}
+                                <details id="hostMoreOptions" className="host-more-options">
+                                    <summary>More options</summary>
+                                    <div
+                                        className="settings-group"
+                                        hidden={ingestMode !== 'obs'}
+                                        inert={ingestMode !== 'obs' || undefined}
+                                    >
+                                        <SettingSwitch
                                             id="obsApplySettings"
+                                            label="Set OBS up for me"
+                                            hint={`${selectedProfile.capture.width}x${selectedProfile.capture.height} @ ${frameRate}fps, low-latency tuning`}
                                             checked={obsApplySettings}
                                             disabled={obsAv1Mode}
                                             onChange={(e) => setObsApplySettings(e.target.checked)}
                                         />
-                                        <label htmlFor="obsApplySettings">
-                                            Apply recommended output settings
-                                            <span className="setting-hint">
-                                                {selectedProfile.capture.width}x{selectedProfile.capture.height} @ {frameRate}fps, low-latency tuning
-                                            </span>
-                                        </label>
-                                    </div>
-                                    <div className="setting-row setting-row-toggle">
-                                        <input
-                                            type="checkbox"
+                                        <SettingSwitch
+                                            id="obsAutoStart"
+                                            label="Start stream for me"
+                                            hint="Begin streaming immediately after configuration"
+                                            checked={obsAutoStart}
+                                            onChange={(e) => setObsAutoStart(e.target.checked)}
+                                        />
+                                        <SettingSwitch
                                             id="obsTryAv1"
+                                            label="AV1 with my own TURN server"
+                                            hint={[
+                                                'Open TURN setup in a modal and switch OBS rooms to AV1 WebRTC-only mode',
+                                                resumePending ? resumeModeLockHint : '',
+                                                (publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported
+                                                    ? 'Disabled for public sharing: configure a reachable public media address first.'
+                                                    : '',
+                                            ].filter(Boolean).join(' ')}
                                             checked={obsTryAv1}
                                             disabled={resumePending || ((publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported)}
                                             onChange={(e) => handleObsTryAv1Change(e.target.checked)}
                                         />
-                                        <label htmlFor="obsTryAv1">
-                                            Use BYOK TURN (AV1)
-                                            <span className="setting-hint">Open TURN setup in a modal and switch OBS rooms to AV1 WebRTC-only mode</span>
-                                            {resumePending && (
-                                                <span className="setting-hint">{resumeModeLockHint}</span>
-                                            )}
-                                            {(publicShareStatus === 'active' || publicShareStatus === 'manual') && !publicAv1Supported && (
-                                                <span className="setting-hint">
-                                                    Disabled for public sharing: configure a reachable public media address first.
-                                                </span>
-                                            )}
-                                        </label>
                                     </div>
-                                    <div className="setting-row setting-row-toggle">
-                                        <input
-                                            type="checkbox"
-                                            id="obsAutoStart"
-                                            checked={obsAutoStart}
-                                            onChange={(e) => setObsAutoStart(e.target.checked)}
-                                        />
-                                        <label htmlFor="obsAutoStart">
-                                            Auto-start streaming in OBS
-                                            <span className="setting-hint">
-                                                Begin streaming immediately after configuration
-                                            </span>
-                                        </label>
-                                    </div>
-                                    <div className="setting-row setting-row-inline">
-                                        <label htmlFor="obsPassword" className="setting-row-label">
-                                            WS password
-                                        </label>
-                                        <input
-                                            id="obsPassword"
-                                            type="password"
-                                            value={obsPassword}
-                                            onChange={(e) => setObsPassword(e.target.value)}
-                                            placeholder="(leave empty if no auth)"
-                                            className="select-input"
+                                    <div className={`settings-group${ingestMode === 'obs' ? ' more-options-room' : ''}`}>
+                                        {ingestMode === 'obs' && roomRows}
+                                        <SettingSwitch
+                                            id="allowMediaControl"
+                                            label="Allow viewers to pause/play media"
+                                            hint={remoteMediaControlEnabled
+                                                ? 'Viewers can remotely press Play/Pause on your keyboard'
+                                                : undefined}
+                                            note={remoteMediaControlEnabled ? undefined : 'Disabled by the server operator'}
+                                            checked={allowMediaControl}
+                                            disabled={!remoteMediaControlEnabled}
+                                            onChange={(evt) => setAllowMediaControl(evt.target.checked)}
                                         />
                                     </div>
-                                </div>
+                                </details>
+                            </div>
                         </div>
                     )}
 
@@ -2504,158 +2876,75 @@ export default function HostView() {
                         </div>
                     )}
 
-                    <UserErrorAlert error={error} />
-                    {preflightWarnings.length > 0 && (
-                        <div className="alert alert-warning" role="status">
-                            <strong>Preflight notice</strong>
-                            <ul>
-                                {preflightWarnings.map((warning) => <li key={warning}>{warning}</li>)}
-                            </ul>
-                        </div>
-                    )}
-                    {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
-
                     {roomCode && (
-                        <div className={ingestMode === 'obs' ? 'streaming-info-row' : ''}>
-                        <div className="room-info">
+                        <div className={`invite-column${ingestMode === 'obs' ? ' streaming-info-row' : ''}`}>
+                        <section className="invite-card">
                             <RoomSharePanel
+                                roomCode={roomCode}
                                 localWatchLink={localWatchLink}
                                 publicWatchLink={publicWatchLink}
                                 showPublicLink={showPublicLink}
                                 publicLinkHint={publicLinkHint}
                                 whepPlaybackUrl={whepPlaybackUrl}
                             />
-                            <div className="viewer-count">
-                                <StatusPill tone={totalViewers > 0 ? 'ok' : undefined} pulse={totalViewers > 0}>
-                                    {totalViewers} viewer{totalViewers !== 1 ? 's' : ''}
-                                </StatusPill>
-                                {whepViewerCount > 0 && (
-                                    <span className="room-meta">
-                                        {viewerCount} WebRTC · {whepViewerCount} WHEP
-                                    </span>
+                        </section>
+                    {ingestMode === 'obs' && (
+                        <details className="obs-manual-details" ref={obsManualDetailsRef}>
+                            <summary>Set it up by hand</summary>
+                            <div>
+                                <CopyField label="WHIP URL" value={buildWhipBroadcastUrl(roomCode)} />
+                                <CopyField label="Bearer Token" value={hostToken} />
+                                <div className="obs-manual-note">
+                                    In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
+                                </div>
+                                {(obsAv1Mode || obsVideoCodec === 'av1') && (
+                                    <div className="obs-av1-note">
+                                        Keep AV1 selected in OBS output. This room disables relay fallback and expects viewers to connect over WebRTC.
+                                    </div>
                                 )}
                             </div>
-                            {roomMetrics && (
-                                <div className="room-meta">
-                                    WebRTC consumers: {roomMetrics.mediasoupConsumerCount || 0} | Relay out: {formatBytes(roomMetrics.relay?.bytesForwarded || 0, { maxUnit: 'MB' })}
-                                </div>
-                            )}
-                            {ingestMode === 'obs' && (
-                                <div className="room-meta">
-                                    Codec: {obsVideoCodec || 'waiting'} |{' '}
-                                    {obsAv1Mode || obsVideoCodec === 'av1'
-                                        ? `WebRTC-only AV1 room | TURN ${roomHasTurnServer ? 'ready' : 'missing'}`
-                                        : `Fallback viewers: ${fallbackViewerCount} | ${fallbackAvailable ? 'Fallback active' : 'Fallback inactive'}`}
-                                    {fallbackViewerCount > 0 && roomMetrics?.fallbackVideoKbps > 0 && roomMetrics.fallbackVideoKbps < roomMetrics.fallbackVideoTargetKbps
-                                        ? ` | Relay lowered to ${(roomMetrics.fallbackVideoKbps / 1000).toFixed(1)} Mbps (connection too slow for full quality)`
-                                        : ''}
-                                </div>
-                            )}
-                        </div>
-                    {ingestMode === 'obs' && (
-                        <div className="obs-whip-setup-panel room-info">
-                            <h3>OBS WHIP Setup</h3>
-
-                            {whipHttpStatus !== 'ready' && (
-                                <div className="obs-status-line is-warn" role="status">
-                                    {whipHttpStatus === 'error'
-                                        ? `OBS WHIP endpoint unavailable: ${whipHttpError || 'HTTP listener failed.'}`
-                                        : 'OBS WHIP endpoint is starting...'}
-                                </div>
-                            )}
-
-                            {obsAutoStatus === 'configuring' && (
-                                <div className="obs-status-line is-info" role="status">{obsAutoMessage}</div>
-                            )}
-                            {obsAutoStatus === 'success' && (
-                                <div className="obs-status-line is-ok" role="status">{obsAutoMessage}</div>
-                            )}
-                            {obsAutoStatus === 'error' && (
-                                <div className="obs-status-line is-warn" role="alert">{obsAutoMessage}</div>
-                            )}
-                            {roomMetrics?.obsKeyframeIntervalMs > OBS_SLOW_KEYFRAME_MS && (
-                                <div className="obs-status-line is-warn" role="status">
-                                    OBS is sending a keyframe only every {(roomMetrics.obsKeyframeIntervalMs / 1000).toFixed(1)} s, so it is not using the settings Nextra chose: viewers wait that long for a picture. Restart OBS, then start sharing again.
-                                </div>
-                            )}
-
-                            {obsAutoStatus === 'error' && (
-                                <div className="obs-retry-row">
-                                    <button
-                                        type="button"
-                                        className="btn btn-secondary btn-small"
-                                        onClick={() => {
-                                            if (whipHttpStatus !== 'ready') {
-                                                setObsAutoStatus('error');
-                                                setObsAutoMessage(whipHttpStatus === 'error'
-                                                    ? `OBS WHIP endpoint is unavailable: ${whipHttpError || 'HTTP listener failed.'}`
-                                                    : 'OBS WHIP endpoint is still starting. Retry in a moment.');
-                                                socket.emit('request-server-config');
-                                                return;
-                                            }
-                                            const whipUrl = buildWhipBroadcastUrl(roomCode);
-                                            setObsAutoStatus('configuring');
-                                            const retryOpts = {
-                                                ...buildObsAutoConfig(whipUrl, hostTokenRef.current),
-                                            };
-                                            // The retry belongs to the start operation that
-                                            // created this session. Stop, a room that ended
-                                            // or the page going away end it while the retry
-                                            // runs, and its result then belongs to no session
-                                            // (the queued configure stops OBS for it).
-                                            const retryOp = startGuardRef.current.activeOperation;
-                                            runObsConfigure(retryOp, retryOpts).then(({ stale, result }) => {
-                                                if (stale || !startGuardRef.current.isCurrent(retryOp)) return;
-                                                setObsAutoStatus(result.success ? 'success' : 'error');
-                                                setObsAutoMessage(result.message);
-                                                // Whatever the result, as at start: a failed
-                                                // run can still leave OBS streaming, and a
-                                                // channel that failed or was never opened
-                                                // leaves nothing to stop it with.
-                                                establishObsControlChannel(retryOp);
-                                            });
-                                        }}
-                                    >
-                                        Retry Auto-Configure OBS
-                                    </button>
-                                </div>
-                            )}
-
-                            <details className="obs-manual-details">
-                                <summary>Manual setup (if auto-config fails)</summary>
-                                <div>
-                                    <CopyField label="WHIP URL" value={buildWhipBroadcastUrl(roomCode)} />
-                                    <CopyField label="Bearer Token" value={hostToken} />
-                                    <div className="obs-manual-note">
-                                        In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
-                                    </div>
-                                    {(obsAv1Mode || obsVideoCodec === 'av1') && (
-                                        <div className="obs-av1-note">
-                                            Keep AV1 selected in OBS output. This room disables relay fallback and expects viewers to connect over WebRTC.
-                                        </div>
-                                    )}
-                                </div>
-                            </details>
-
-                            <div className="obs-connection-status">
-                                {whipConnected
-                                    ? <StatusPill tone="ok" pulse>OBS Connected</StatusPill>
-                                    : <StatusPill tone="warn">Waiting for OBS...</StatusPill>}
-                            </div>
-                        </div>
+                        </details>
                     )}
                         </div>
                     )}
-                    {/* Stays last in the side panel: the settings card unmounts and
-                        the room card mounts when sharing starts, so anything above
-                        the room card visibly jumps to the top on that swap. */}
-                    <HostDiagnostics
-                        metrics={roomMetrics}
-                        onDownload={handleDownloadDiagnostics}
-                        downloading={diagnosticDownloading}
-                        downloadStatus={diagnosticDownloadStatus}
-                    />
                 </div>
+                {isSharing && (
+                    <button
+                        type="button"
+                        className="btn btn-danger-quiet host-stop"
+                        onClick={() => {
+                            handleStopSharing();
+                        }}
+                    >
+                        Stop Sharing
+                    </button>
+                )}
+                <UserErrorAlert error={error} />
+                {preflightWarnings.length > 0 && (
+                    <div className="alert alert-warning" role="status">
+                        <strong>Preflight notice</strong>
+                        <ul>
+                            {preflightWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+                        </ul>
+                    </div>
+                )}
+                {bandwidthWarning && <div className="alert alert-warning" role="status">{bandwidthWarning}</div>}
+                {isSharing && ingestMode === 'obs' && roomMetrics?.obsKeyframeIntervalMs > OBS_SLOW_KEYFRAME_MS && (
+                    <div className="alert alert-warning obs-status-line is-warn" role="status">
+                        OBS is sending a keyframe only every {(roomMetrics.obsKeyframeIntervalMs / 1000).toFixed(1)} s, so it is not using the settings Nextra chose: viewers wait that long for a picture. Restart OBS, then start sharing again.
+                    </div>
+                )}
+                <HostDiagnostics
+                    metrics={roomMetrics}
+                    obsSummary={obsDiagnosticSummary}
+                    relayViewers={isSharing ? relayViewerCount : 0}
+                    relayBitrate={isSharing && relayViewerCount > 0 && relayBitrateLimit !== null
+                        ? `Lowered to ${(effectiveRelayBitsPerSecond / 1_000_000).toFixed(1)} Mbps (connection too slow for full quality)`
+                        : ''}
+                    onDownload={handleDownloadDiagnostics}
+                    downloading={diagnosticDownloading}
+                    downloadStatus={diagnosticDownloadStatus}
+                />
             </div>
             {showByokTurnModal && (
                 <Modal titleId="byokTurnModalTitle" onClose={() => setShowByokTurnModal(false)}>

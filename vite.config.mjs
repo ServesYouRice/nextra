@@ -75,7 +75,15 @@ export default defineConfig(({ mode, command }) => {
       allowedHosts: [...allowedHosts],
       proxy,
     },
-    build: { outDir: 'dist', sourcemap: false },
+    build: {
+      outDir: 'dist',
+      sourcemap: false,
+      // The server's content security policy allows fonts and styles from the
+      // app's own origin only (fontSrc and styleSrc are 'self'). Vite inlines
+      // assets under 4 KB into the CSS as data: URIs, which the browser would
+      // refuse for a small font subset, so inlining is off.
+      assetsInlineLimit: 0,
+    },
     optimizeDeps: {
       include: ['mediasoup-client', 'socket.io-client'],
     },

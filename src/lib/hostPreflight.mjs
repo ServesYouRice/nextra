@@ -92,3 +92,9 @@ export function evaluateHostPreflight({
 
     return { blockers, warnings };
 }
+
+// A phone or tablet browser that cannot capture a screen has nothing to share
+// with, so the host page says so instead of showing controls that cannot work.
+export function deviceCannotShare({ captureApiAvailable, coarsePointer }) {
+    return !captureApiAvailable && !!coarsePointer;
+}

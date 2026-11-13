@@ -163,7 +163,7 @@ test('a host on the machine running Nextra sees the host page as before, with a 
     await page.goto(`${secureServer.localUrl}/#host`);
     await expect(startButton(page)).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
-    await expect(page.getByText('Pick your quality in Settings, then press Start Sharing.')).toBeVisible();
+    await expect(page.getByText('You\'ll choose a screen, window or tab next.')).toBeVisible();
     const config = await readConfig(page);
     expect(config.operatorAuthorized).toBe(true);
     expect(config.operatorSignInAvailable).toBe(false);
@@ -353,7 +353,7 @@ test('a session that ended while the page was open brings the panel back when a 
     await expect(page.getByRole('heading', { name: 'Host sign-in' })).toBeVisible();
     await expect(passwordField(page)).toBeFocused();
     await expect(startButton(page)).toHaveCount(0);
-    await expect(page.locator('.host-side-panel > [role="alert"]')).toContainText('Operator authorization is required');
+    await expect(page.locator('.host-layout > [role="alert"]')).toContainText('Operator authorization is required');
 
     // Signing in again restores the host page and the start works.
     await signIn(page);

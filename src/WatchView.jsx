@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useEffectEvent } from 'react';
 import { useSocket } from './context/SocketContext';
 import { getDevice, resetDevice, socketRequest } from './lib/mediasoupClient';
 import { createFmp4RelayPlayer } from './lib/fmp4RelayPlayer';
@@ -16,7 +16,11 @@ import { summarizeConnectionQuality } from './lib/connectionQuality.mjs';
 import { createLifecycleController } from './lib/lifecycleController.mjs';
 import { useViewerSessionController } from './hooks/useViewerSessionController';
 import UserErrorAlert from './components/UserErrorAlert';
-import { getLocalStorageSafely, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
+import StatusPill from './components/StatusPill';
+import { describeViewerStatus } from './lib/viewerStatus.mjs';
+import { normalizeRoomCode, extractRoomCode, formatRoomCode } from './lib/roomCode.mjs';
+import { getLocalStorageSafely, isManualStartRequested, isMediaDebugEnabled } from './lib/mediaDebug.mjs';
+import { getSessionStorageSafely, takeJoinIntent } from './lib/joinIntent.mjs';
 import {
     assertAttemptCurrent,
     beginPlaybackAttempt,
@@ -38,6 +42,11 @@ import {
 import { abandonStaleJoin, createViewerSession, isStaleViewerSessionError } from './lib/viewerSession.mjs';
 
 const MEDIA_DEBUG_LOGS = isMediaDebugEnabled(window.location, getLocalStorageSafely(window));
+// `?manualStart`: Join Room only joins, and the viewer presses Watch Stream.
+const MANUAL_START = isManualStartRequested(window.location);
+// The control bar on the picture fades this long after the last pointer move,
+// key press or touch on the stage.
+const CONTROLS_REST_MS = 3000;
 
 function mediaDebugLog(...args) {
     if (MEDIA_DEBUG_LOGS) {
@@ -64,23 +73,6 @@ function toUint8ArraySync(data) {
     return null;
 }
 
-function normalizeRoomCode(value) {
-    return String(value || '').trim().toUpperCase().replace(/-/g, '');
-}
-
-// Viewers usually receive a full watch link; accept a pasted URL as well as a
-// bare code by pulling the code out of a `#watch/CODE` fragment when present.
-function extractRoomCode(value) {
-    const text = String(value || '');
-    const urlMatch = text.match(/#\/?watch\/([A-Za-z0-9-]+)/i);
-    const source = urlMatch ? urlMatch[1] : text;
-    return source.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
-}
-
-function formatRoomCode(code) {
-    return code.length > 3 ? `${code.slice(0, 3)}-${code.slice(3)}` : code;
-}
-
 // What a recovery resumes: the viewer's playback before the first recovery of a
 // chain reset it (see createRecoveryGuard).
 function readResumeIntent(watchingRef, playbackModeRef, fallbackModeRef) {
@@ -99,17 +91,65 @@ function ackFailure(event, response) {
     return error;
 }
 
+const CONTROL_ICON_PATHS = {
+    sound: ['M11 5 6 9H3v6h3l5 4V5z', 'M15.5 8.5a5 5 0 0 1 0 7', 'M18.5 5.5a9 9 0 0 1 0 13'],
+    muted: ['M11 5 6 9H3v6h3l5 4V5z', 'M16 9l6 6', 'M22 9l-6 6'],
+    fit: ['M3 5h18v14H3z', 'M8 9h8v6H8z'],
+    fill: ['M3 5h18v14H3z', 'M5 12h4M5 12l2-2M5 12l2 2', 'M19 12h-4M19 12l-2-2M19 12l-2 2'],
+    fullscreen: ['M4 9V4h5', 'M20 9V4h-5', 'M4 15v5h5', 'M20 15v5h-5'],
+    exitFullscreen: ['M9 4v5H4', 'M15 4v5h5', 'M9 20v-5H4', 'M15 20v-5h5'],
+    leave: ['M15 17l5-5-5-5', 'M20 12H9', 'M9 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h4'],
+};
+
+// The icons of the viewer's control bar. The button's own text is its name.
+function ControlIcon({ name }) {
+    return (
+        <svg className="watch-icon" width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            {CONTROL_ICON_PATHS[name].map((d) => (
+                <path key={d} d={d} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            ))}
+        </svg>
+    );
+}
+
+// Copies the frame the <video> shows now onto the stage's last-frame canvas, so
+// the picture stays, dimmed, behind "The host dropped out" once its track is
+// gone. A <video> with no frame leaves an earlier copy as it is. Never throws:
+// it runs inside the socket handlers.
+function drawLastFrame(video, canvas) {
+    try {
+        if (!video || !canvas || !(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
+    } catch (err) {
+        console.warn('[Nextra] Could not keep the last picture:', err?.message);
+        clearLastFrame(canvas);
+    }
+}
+
+// A canvas 0 wide holds no frame and is not shown (see .watch-last-frame).
+function clearLastFrame(canvas) {
+    if (!canvas) return;
+    canvas.width = 0;
+    canvas.height = 0;
+}
 
 export default function WatchView({ initialCode = '' }) {
     const socket = useSocket();
-    const [codeInput, setCodeInput] = useState(initialCode);
+    const [codeInput, setCodeInput] = useState(formatRoomCode(extractRoomCode(initialCode)));
     const [joined, setJoined] = useState(false);
     const [joinedRoomCode, setJoinedRoomCode] = useState(normalizeRoomCode(initialCode));
     const [watching, setWatching] = useState(false);
     const [error, setError] = useState('');
     const [codeError, setCodeError] = useState(false);
+    const [unknownRoom, setUnknownRoom] = useState(false);
+    const codeInputRef = useRef(null);
     const [hostDisconnected, setHostDisconnected] = useState(false);
+    // The server's reason the room ended, or '' when it gave none.
+    const [roomEndedReason, setRoomEndedReason] = useState('');
     const [hostReconnectingReason, setHostReconnectingReason] = useState('');
+    const [pictureInterrupted, setPictureInterrupted] = useState(false); // WebRTC viewer whose video producer closed
     const [mediaControlStatus, setMediaControlStatus] = useState('');
     const [hasProducer, setHasProducer] = useState(false);
     const [allowMediaControl, setAllowMediaControl] = useState(false);
@@ -117,7 +157,11 @@ export default function WatchView({ initialCode = '' }) {
     const [joining, setJoining] = useState(false);
     const [passphrase, setPassphrase] = useState('');
     const [passphraseRequired, setPassphraseRequired] = useState(false);
+    const [passphraseRejected, setPassphraseRejected] = useState(false);
     const [watchLoading, setWatchLoading] = useState(false);
+    // A Join Room press asked for the picture: it starts by itself once (see the
+    // effect before handleLeave). Off with ?manualStart.
+    const [autoStartArmed, setAutoStartArmed] = useState(false);
     const [playbackMode, setPlaybackMode] = useState('');
     const [hasTurnServer, setHasTurnServer] = useState(false);
     const [roomHasTurnServer, setRoomHasTurnServer] = useState(false);
@@ -131,8 +175,20 @@ export default function WatchView({ initialCode = '' }) {
     const [whipReconnecting, setWhipReconnecting] = useState(false);
     const [connectionQuality, setConnectionQuality] = useState(null);
     const [isFullscreen, setIsFullscreen] = useState(false);
+    // The control bar on the picture: whether the viewer used the stage in the
+    // last CONTROLS_REST_MS, "Fit to page", the status chip's panel, and a muted
+    // start the browser forced (playVideoElement), which shows "Tap for sound".
+    const [controlsAwake, setControlsAwake] = useState(true);
+    const [isFitToPage, setIsFitToPage] = useState(false);
+    const [statusPanelOpen, setStatusPanelOpen] = useState(false);
+    const [soundBlocked, setSoundBlocked] = useState(false);
 
     const videoRef = useRef(null);
+    const lastFrameRef = useRef(null);
+    const stageRef = useRef(null);
+    const controlsTimerRef = useRef(null);
+    const statusChipRef = useRef(null);
+    const statusPanelRef = useRef(null);
     const passphraseInputRef = useRef(null);
     const deviceRef = useRef(null);
     const recvTransportRef = useRef(null);
@@ -160,6 +216,9 @@ export default function WatchView({ initialCode = '' }) {
     // reconnect asks for the relay again.
     const fallbackResumeRef = useRef(false);
     const activePlaybackAttemptRef = useRef(0);
+    // Producers announced while a WebRTC start ran, after it may have read the
+    // producer list; consumed once that start plays (see onNewProducer).
+    const announcedDuringStartRef = useRef([]);
     const joinedRef = useRef(false);
     const joinedRoomCodeRef = useRef(normalizeRoomCode(initialCode));
     const watchingRef = useRef(false);
@@ -194,12 +253,16 @@ export default function WatchView({ initialCode = '' }) {
 
     useEffect(() => {
         if (passphraseRequired) passphraseInputRef.current?.focus();
-    }, [passphraseRequired]);
+    }, [passphraseRequired, passphraseRejected]);
 
+    // The stage is what goes full screen, so the control bar stays with the
+    // picture; the <video> itself only where the stage cannot (see
+    // handleToggleFullscreen).
     useEffect(() => {
         const syncFullscreen = () => {
             const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
-            setIsFullscreen(fullscreenElement === videoRef.current);
+            setIsFullscreen(Boolean(fullscreenElement)
+                && (fullscreenElement === stageRef.current || fullscreenElement === videoRef.current));
         };
         document.addEventListener('fullscreenchange', syncFullscreen);
         document.addEventListener('webkitfullscreenchange', syncFullscreen);
@@ -208,6 +271,54 @@ export default function WatchView({ initialCode = '' }) {
             document.removeEventListener('webkitfullscreenchange', syncFullscreen);
         };
     }, []);
+
+    const handleToggleFullscreen = useCallback(async () => {
+        const stage = stageRef.current;
+        const player = videoRef.current;
+        if (!stage || !player) return;
+        try {
+            if (isFullscreen) {
+                if (document.exitFullscreen) await document.exitFullscreen();
+                else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
+            } else if (stage.requestFullscreen) await stage.requestFullscreen();
+            else if (stage.webkitRequestFullscreen) await stage.webkitRequestFullscreen();
+            else if (player.requestFullscreen) await player.requestFullscreen();
+            else if (player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
+            else if (player.msRequestFullscreen) await player.msRequestFullscreen();
+        } catch (err) {
+            setError(err);
+        }
+    }, [isFullscreen]);
+
+    // A pointer move, key press or touch on the stage shows the control bar for
+    // CONTROLS_REST_MS. Only the first one after a rest re-renders.
+    const wakeControls = useCallback(() => {
+        setControlsAwake(true);
+        clearTimeout(controlsTimerRef.current);
+        controlsTimerRef.current = setTimeout(() => setControlsAwake(false), CONTROLS_REST_MS);
+    }, []);
+
+    useEffect(() => () => clearTimeout(controlsTimerRef.current), []);
+
+    // The status chip's panel closes on Escape and on a press anywhere else.
+    useEffect(() => {
+        if (!statusPanelOpen) return undefined;
+        const onPointerDown = (evt) => {
+            if (statusPanelRef.current?.contains(evt.target) || statusChipRef.current?.contains(evt.target)) return;
+            setStatusPanelOpen(false);
+        };
+        const onKeyDown = (evt) => {
+            if (evt.key !== 'Escape') return;
+            setStatusPanelOpen(false);
+            statusChipRef.current?.focus();
+        };
+        document.addEventListener('pointerdown', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.removeEventListener('pointerdown', onPointerDown);
+            document.removeEventListener('keydown', onKeyDown);
+        };
+    }, [statusPanelOpen]);
 
     const cleanupPlayback = useViewerSessionController({
         socket,
@@ -258,6 +369,7 @@ export default function WatchView({ initialCode = '' }) {
         } catch (err) {
             if (err?.name === 'NotAllowedError' && isCurrent() && videoRef.current) {
                 syncMutedState(true);
+                setSoundBlocked(true);
                 try {
                     await videoRef.current.play();
                 } catch {
@@ -315,6 +427,7 @@ export default function WatchView({ initialCode = '' }) {
         });
         consumersRef.current = consumersRef.current.filter((item) => item.kind !== consumer.kind);
         consumersRef.current.push(consumer);
+        if (consumer.kind === 'video') setPictureInterrupted(false);
 
         const existingTracks = mediaStreamRef.current
             ? mediaStreamRef.current.getTracks().filter((track) => track.kind !== consumer.kind && track.readyState !== 'ended')
@@ -878,6 +991,28 @@ export default function WatchView({ initialCode = '' }) {
     }, [joined, socket]);
 
     useEffect(() => {
+        // The producers onNewProducer kept while a WebRTC start ran: once that start
+        // plays, each one it has no consumer for is consumed in its attempt. With
+        // no start running, or the relay playing, they are let go.
+        if (watching || !watchLoading) {
+            const announced = announcedDuringStartRef.current;
+            announcedDuringStartRef.current = [];
+            if (watching && playbackMode === 'mediasoup' && announced.length) {
+                const attemptId = activePlaybackAttemptRef.current;
+                void (async () => {
+                    for (const producerId of announced) {
+                        if (consumersRef.current.some((consumer) => consumer.producerId === producerId)) continue;
+                        try {
+                            await consumeProducer(producerId, attemptId);
+                        } catch (err) {
+                            if (isSupersededAttemptError(err)) return;
+                            console.warn('[Nextra] Failed to consume new producer:', err.message);
+                        }
+                    }
+                })();
+            }
+        }
+
         const onRoomEnded = ({ reason } = {}) => {
             terminalRoomEndedRef.current = true;
             // A join still on its way must not bring the ended room back, and no
@@ -889,6 +1024,7 @@ export default function WatchView({ initialCode = '' }) {
             dropFallbackClaim();
             fallbackResumeRef.current = false;
             setHostReconnectingReason('');
+            setPictureInterrupted(false);
             cleanupPlayback();
             setWatching(false);
             setWatchLoading(false);
@@ -896,11 +1032,13 @@ export default function WatchView({ initialCode = '' }) {
             setFallbackState(null);
             setWhipReconnecting(false);
             setHostDisconnected(true);
+            setRoomEndedReason(reason || '');
             setError(reason || 'This room ended. Leave it and join a new room to continue.');
         };
 
         const onHostDisconnected = ({ reason, recoverable } = {}) => {
             if (recoverable) {
+                drawLastFrame(videoRef.current, lastFrameRef.current);
                 setHostReconnectingReason(reason || 'Host reconnecting...');
                 return;
             }
@@ -919,6 +1057,13 @@ export default function WatchView({ initialCode = '' }) {
             setHasProducer(true);
             setHostDisconnected(false);
 
+            // A start that is running may have read the producer list before this
+            // one existed (the host produces audio a moment after video); it is
+            // consumed when that start plays.
+            if (!watching && watchLoading) {
+                if (producerId) announcedDuringStartRef.current.push(producerId);
+                return;
+            }
             if (!watching || playbackMode !== 'mediasoup') return;
 
             // The playback that is current now; a newer one after an await is not ours to feed.
@@ -942,6 +1087,8 @@ export default function WatchView({ initialCode = '' }) {
             console.log('Producer closed for consumer:', consumerId);
             const closed = consumersRef.current.find((consumer) => consumer.id === consumerId);
             if (!closed) return;
+            // Before the track goes: the stream rebuilt without it has no frame.
+            if (closed.kind === 'video') drawLastFrame(videoRef.current, lastFrameRef.current);
             try { closed.close(); } catch { }
             try { closed.track?.stop(); } catch { }
             consumersRef.current = consumersRef.current.filter((consumer) => consumer.id !== consumerId);
@@ -949,6 +1096,11 @@ export default function WatchView({ initialCode = '' }) {
                 const remainingTracks = mediaStreamRef.current.getTracks().filter((track) => track !== closed.track && track.readyState !== 'ended');
                 mediaStreamRef.current = new MediaStream(remainingTracks);
                 if (videoRef.current) videoRef.current.srcObject = mediaStreamRef.current;
+            }
+            // The room stays open but has no picture (the host reloaded and has
+            // not resumed yet): say so instead of an endless spinner.
+            if (watching && playbackMode === 'mediasoup' && !consumersRef.current.some((consumer) => consumer.kind === 'video')) {
+                setPictureInterrupted(true);
             }
         };
         const onWhipStatus = ({ reconnecting }) => setWhipReconnecting(!!reconnecting);
@@ -975,7 +1127,7 @@ export default function WatchView({ initialCode = '' }) {
             socket.off('room-ended', onRoomEnded);
             socket.off('server-restarting', onRoomEnded);
         };
-    }, [socket, watching, playbackMode, consumeProducer, cleanupPlayback, dropFallbackClaim, recoveryGuard, viewerSession]);
+    }, [socket, watching, watchLoading, playbackMode, consumeProducer, cleanupPlayback, dropFallbackClaim, recoveryGuard, viewerSession]);
 
     // Joins the room as the viewer session `session` (see viewerSession.mjs) and
     // loads the mediasoup device. The session is checked after every await and
@@ -1051,6 +1203,10 @@ export default function WatchView({ initialCode = '' }) {
         if (joiningRef.current) return;
         setError('');
         setCodeError(false);
+        setUnknownRoom(false);
+        setPassphraseRejected(false);
+        // A passphrase sent to a room already known to need one is a real try, not the first prompt.
+        const passphraseWasTried = passphraseRequired && passphrase.length > 0;
         setHostDisconnected(false);
         setHostReconnectingReason('');
         setIngestMode('browser');
@@ -1081,6 +1237,9 @@ export default function WatchView({ initialCode = '' }) {
         const session = viewerSession.begin();
         try {
             await joinRoomAndLoadDevice(code, session);
+            setPassphraseRejected(false);
+            // The press that joined also asks for the picture.
+            if (!MANUAL_START) setAutoStartArmed(true);
         } catch (err) {
             // The session ended while the join ran (a room that ended, a transport
             // failure, the view unmounting): whatever ended it has reset the view.
@@ -1094,7 +1253,12 @@ export default function WatchView({ initialCode = '' }) {
             setJoined(false);
             if (err.requiresPassphrase) {
                 setPassphraseRequired(true);
+                setPassphraseRejected(passphraseWasTried);
                 setError('');
+            } else if (/^room not found/i.test(String(err?.message || err))) {
+                setCodeError(true);
+                setUnknownRoom(true);
+                setError('No room has this code. Codes change each time the host starts sharing, so ask them for the new one.');
             } else {
                 setError(err);
             }
@@ -1102,7 +1266,20 @@ export default function WatchView({ initialCode = '' }) {
             joiningRef.current = false;
             setJoining(false);
         }
-    }, [codeInput, joinRoomAndLoadDevice, socket, viewerSession]);
+    }, [codeInput, joinRoomAndLoadDevice, socket, viewerSession, passphraseRequired, passphrase]);
+
+    // A viewer who pressed Join on the home page for this code joins here
+    // without pressing Join Room. The note is taken once (see joinIntent.mjs).
+    const joinFromHomePage = useEffectEvent(() => {
+        if (takeJoinIntent(normalizeRoomCode(initialCode), getSessionStorageSafely(window))) void handleJoin();
+    });
+    useEffect(() => {
+        if (MANUAL_START) return undefined;
+        // After the mount has settled: StrictMode's trial unmount in development
+        // ends any join it began, and would take the note with it.
+        const timer = setTimeout(joinFromHomePage, 0);
+        return () => clearTimeout(timer);
+    }, []);
 
     // Asks the server for the fMP4 relay (fallback-consume-start) and, once it
     // answers, plays it. The start is sent once with a 10 s answer timeout and
@@ -1287,6 +1464,7 @@ export default function WatchView({ initialCode = '' }) {
         const session = viewerSession.current();
         if (!session) return;
         setError('');
+        setPictureInterrupted(false);
         setWatchLoading(true);
         cleanupPlayback();
 
@@ -1383,6 +1561,25 @@ export default function WatchView({ initialCode = '' }) {
         }
         setTimeout(() => setMediaControlStatus(''), 3500);
     }, [socket]);
+
+    // The start a Join Room press asked for, once: as soon as the host's media is
+    // there (at once, or when the host starts) and nothing is starting or playing.
+    // The request is spent as soon as a start runs, playback plays, the viewer
+    // left (or the join failed) or the room ended; a failed start is not tried
+    // again, Watch Stream is. An OBS room that prefers the relay is started by
+    // the "Auto-enter fallback mode" effect, so this one spends it unused.
+    const autoStartSpent = !joined || hostDisconnected || watching || watchLoading || fallbackMode
+        || (hasProducer && ingestMode === 'obs' && preferRelayFirst);
+    if (autoStartArmed && autoStartSpent) setAutoStartArmed(false);
+    useEffect(() => {
+        if (!autoStartArmed || !hasProducer || autoStartSpent) return undefined;
+        // One task later, like the other state this view changes from an effect.
+        const start = setTimeout(() => {
+            setAutoStartArmed(false);
+            void handleWatch();
+        }, 0);
+        return () => clearTimeout(start);
+    }, [autoStartArmed, hasProducer, autoStartSpent, handleWatch]);
 
     const handleLeave = useCallback(async () => {
         // Before the first await: a join or rejoin still on its way (a reconnect
@@ -1694,61 +1891,119 @@ export default function WatchView({ initialCode = '' }) {
         resetDevice();
     }, [cleanupPlayback, dropFallbackClaim, socket, viewerSession]);
 
+    // Only while a WebRTC playback is running; Leave Room or a relay start ends it.
+    const hostPictureStopped = pictureInterrupted && watching && playbackMode === 'mediasoup' && !fallbackMode;
     const playbackStatus = fallbackMode
         ? `Relay Mode (${fallbackCodec || 'unknown'}) - ${fallbackState || 'initializing'}`
         : watching && playbackMode === 'relay'
             ? 'Compatibility relay mode active (higher latency).'
-            : watching
-                ? ingestMode === 'obs'
-                    ? 'OBS WebRTC mode active (lowest latency).'
-                    : 'WebRTC mode active (lowest latency).'
-                : '';
+            : hostPictureStopped
+                ? 'Waiting for the host\'s picture to come back.'
+                : watching
+                    ? ingestMode === 'obs'
+                        ? 'OBS WebRTC mode active (lowest latency).'
+                        : 'WebRTC mode active (lowest latency).'
+                    : '';
+    // A picture is on the screen: the LIVE badge shows, and the control bar may rest.
+    const pictureLive = (watching && !hostPictureStopped && !hostReconnectingReason)
+        || (fallbackMode && fallbackState === 'playing');
+    const viewerStatus = describeViewerStatus({
+        watching,
+        playbackMode,
+        fallbackMode,
+        fallbackState,
+        quality: connectionQuality?.quality,
+        pictureInterrupted: hostPictureStopped,
+    });
+    const statusPanelShown = statusPanelOpen && Boolean(viewerStatus);
+    const controlsShown = !pictureLive || controlsAwake || statusPanelShown;
+    const playing = watching || fallbackMode;
+    const showSoundChip = soundBlocked && isMuted && playing;
+    // An ended room says why in its own overlay, so the notice stack leaves it out.
+    const hasStageNotice = (Boolean(error) && !hostDisconnected) || whipReconnecting
+        || (ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported);
+    const pictureStarting = hasProducer && !MANUAL_START && (autoStartArmed || watchLoading);
+    // Either "The host dropped out" overlay is on screen, over the last picture.
+    const hostDroppedOut = !hostDisconnected && (Boolean(hostReconnectingReason) || hostPictureStopped);
+
+    // The last picture goes once neither overlay is up: the picture is back,
+    // the room ended or playback stopped. In the commit, not after it: a
+    // reconnected host's producer-closed often follows within milliseconds and
+    // draws again, which a passive effect still pending would wipe.
+    useLayoutEffect(() => {
+        if (!hostDroppedOut) clearLastFrame(lastFrameRef.current);
+    }, [hostDroppedOut]);
+
+    // Once a picture shows, the bar rests CONTROLS_REST_MS after the last input.
+    useEffect(() => {
+        if (!pictureLive) return undefined;
+        const wake = setTimeout(wakeControls, 0);
+        return () => clearTimeout(wake);
+    }, [pictureLive, wakeControls]);
+
     return (
-        <div className="view-container">
-            <div className="view-header">
-                <h1>Watch</h1>
-                <p className="subtitle">Join a room to watch a stream</p>
-            </div>
-
-            <UserErrorAlert error={error} id="watchError" />
-
+        <div className={joined ? 'view-container watch-live' : 'view-container'}>
             {!joined ? (
-                <div className="join-form">
+                <div className="join-form join-card">
+                    <h1>{passphraseRequired ? 'This room has a passphrase' : 'Join a stream'}</h1>
+                    <p className="join-hint" id="joinHint" role="status">
+                        {(() => {
+                            if (passphraseRequired) return 'Enter the passphrase the host gave you.';
+                            const codeLength = normalizeRoomCode(codeInput).length;
+                            return codeLength > 0 && codeLength < 6
+                                ? `${codeLength}/6 characters`
+                                : 'Enter the 6-character room code from the host.';
+                        })()}
+                    </p>
                     <div className="join-field">
                         <label className="input-label" htmlFor="roomCode">Room code</label>
-                        <div className="input-group">
+                        <div className="code-entry">
+                            <div className="code-boxes" aria-hidden="true">
+                                {Array.from({ length: 6 }, (_, index) => {
+                                    const typed = normalizeRoomCode(codeInput);
+                                    return (
+                                        <span
+                                            key={index}
+                                            className="code-box"
+                                            data-active={index === Math.min(typed.length, 5) || undefined}
+                                        >
+                                            {typed[index] || ''}
+                                        </span>
+                                    );
+                                })}
+                            </div>
                             <input
+                                ref={codeInputRef}
                                 id="roomCode"
                                 type="text"
                                 className="input-code"
-                                placeholder="XXX-XXX"
                                 value={codeInput}
                                 onChange={(evt) => {
                                     setCodeError(false);
+                                    setUnknownRoom(false);
                                     setPassphraseRequired(false);
+                                    setPassphraseRejected(false);
                                     setPassphrase('');
                                     setCodeInput(formatRoomCode(extractRoomCode(evt.target.value)));
                                 }}
                                 onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
                                 autoFocus
+                                inputMode="text"
+                                autoCapitalize="characters"
+                                autoComplete="off"
+                                spellCheck={false}
+                                maxLength={64}
                                 aria-describedby={error ? 'joinHint watchError' : 'joinHint'}
                                 aria-invalid={codeError || undefined}
                                 aria-busy={joining || undefined}
                                 disabled={joining}
                             />
-                            <button
-                                className="btn btn-primary"
-                                onClick={handleJoin}
-                                disabled={joining}
-                                aria-busy={joining || undefined}
-                            >
-                                {joining ? 'Joining...' : 'Join Room'}
-                            </button>
                         </div>
                     </div>
+                    <UserErrorAlert error={error} id="watchError" variant="inline" />
                     {passphraseRequired && (
                         <div className="join-field">
-                            <p className="alert alert-info" role="status">
+                            <p className="join-step-note" role="status">
                                 This room requires a passphrase. The room code has been kept; enter the passphrase to continue.
                             </p>
                             <label className="input-label" htmlFor="roomPassphrase">Room passphrase</label>
@@ -1756,163 +2011,321 @@ export default function WatchView({ initialCode = '' }) {
                                 ref={passphraseInputRef}
                                 id="roomPassphrase"
                                 type="password"
-                                className="input-code"
+                                className="select-input join-passphrase"
                                 value={passphrase}
-                                onChange={(evt) => setPassphrase(evt.target.value)}
+                                onChange={(evt) => {
+                                    setPassphraseRejected(false);
+                                    setPassphrase(evt.target.value);
+                                }}
                                 onKeyDown={(evt) => evt.key === 'Enter' && !joining && handleJoin()}
                                 autoComplete="current-password"
                                 disabled={joining}
                                 aria-busy={joining || undefined}
+                                aria-invalid={passphraseRejected || undefined}
+                                aria-describedby={passphraseRejected ? 'passphraseError' : undefined}
                             />
+                            {passphraseRejected && (
+                                <p className="field-error" id="passphraseError" role="alert">
+                                    That passphrase didn't match. Check it and try again.
+                                </p>
+                            )}
                         </div>
                     )}
-                    <p className="join-hint" id="joinHint" role="status">
-                        {(() => {
-                            const codeLength = normalizeRoomCode(codeInput).length;
-                            return codeLength > 0 && codeLength < 6
-                                ? `${codeLength}/6 characters`
-                                : 'Enter the 6-character room code, or paste the watch link you were sent.';
-                        })()}
-                    </p>
+                    <button
+                        className="btn btn-primary btn-main"
+                        onClick={handleJoin}
+                        disabled={joining}
+                        aria-busy={joining || undefined}
+                    >
+                        {joining ? 'Joining...' : 'Join Room'}
+                    </button>
+                    {unknownRoom && (
+                        <button
+                            type="button"
+                            className="join-link"
+                            onClick={() => {
+                                setCodeInput('');
+                                setError('');
+                                setCodeError(false);
+                                setUnknownRoom(false);
+                                codeInputRef.current?.focus();
+                            }}
+                        >
+                            Try another code
+                        </button>
+                    )}
+                    <p className="join-paste-hint">Or paste the link you were sent.</p>
                 </div>
             ) : (
                 <>
-                    <div className="video-container watch-video">
-                        <video
-                            ref={videoRef}
-                            className="video-player"
-                            controls
-                            autoPlay
-                            playsInline
-                            muted={isMuted}
-                            onPlay={() => { userPausedRef.current = false; }}
-                            onPause={() => { userPausedRef.current = true; }}
-                            onVolumeChange={(evt) => setIsMuted(evt.target.muted)}
-                        />
+                    <div
+                        ref={stageRef}
+                        className={[
+                            'video-container watch-video',
+                            isFitToPage && 'is-fit',
+                            controlsShown && 'controls-shown',
+                        ].filter(Boolean).join(' ')}
+                        onPointerMove={wakeControls}
+                        onPointerDown={wakeControls}
+                        onKeyDown={wakeControls}
+                    >
+                        <div className="watch-picture">
+                            <video
+                                ref={videoRef}
+                                className="video-player"
+                                autoPlay
+                                playsInline
+                                muted={isMuted}
+                                onPlay={() => { userPausedRef.current = false; }}
+                                onPause={() => { userPausedRef.current = true; }}
+                                onVolumeChange={(evt) => setIsMuted(evt.target.muted)}
+                            />
 
-                        {!watching && !hostDisconnected && !fallbackMode && (
-                            <div className="video-overlay">
-                                {hasProducer ? (
-                                    <button
-                                        className="btn btn-primary btn-large pulse"
-                                        onClick={handleWatch}
-                                        disabled={watchLoading}
-                                    >
-                                        {watchLoading ? 'Connecting...' : 'Watch Stream'}
-                                    </button>
-                                ) : (
-                                    <>
-                                        <p>Waiting for host to start sharing...</p>
-                                        <p className="video-overlay-sub">
-                                            You&apos;re in room {formatRoomCode(joinedRoomCode)}.
-                                            A <strong>Watch Stream</strong> button appears here once the host&apos;s media starts.
+                            {/* The last picture behind "The host dropped out"; drawn by
+                                drawLastFrame, empty (0 wide) otherwise. */}
+                            <canvas
+                                ref={lastFrameRef}
+                                className="watch-last-frame"
+                                aria-hidden="true"
+                                width={0}
+                                height={0}
+                                hidden={!hostDroppedOut}
+                            />
+
+                            {!watching && !hostDisconnected && !fallbackMode && (
+                                <div
+                                    className="video-overlay watch-state"
+                                    role={hasProducer && !pictureStarting ? undefined : 'status'}
+                                >
+                                    {pictureStarting ? (
+                                        <p className="video-overlay-status watch-state-title">
+                                            <span className="spinner" aria-hidden="true" />
+                                            Starting the picture…
                                         </p>
-                                    </>
+                                    ) : hasProducer ? (
+                                        <button
+                                            className="btn btn-primary btn-main"
+                                            onClick={handleWatch}
+                                            disabled={watchLoading}
+                                        >
+                                            {watchLoading ? 'Connecting...' : 'Watch Stream'}
+                                        </button>
+                                    ) : MANUAL_START ? (
+                                        <>
+                                            <p className="watch-state-title">Waiting for the host</p>
+                                            <p className="watch-state-sub">
+                                                You&apos;re in room {formatRoomCode(joinedRoomCode)}.
+                                                A <strong>Watch Stream</strong> button appears here once the host&apos;s media starts.
+                                            </p>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <p className="watch-state-title">Waiting for the host</p>
+                                            <p className="watch-state-sub">
+                                                You&apos;re in room {formatRoomCode(joinedRoomCode)}. The stream starts here by itself.
+                                            </p>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+
+                            {hostReconnectingReason && !hostDisconnected && (
+                                <div className="video-overlay watch-state" role="status">
+                                    <p className="watch-state-title">The host dropped out</p>
+                                    <p className="watch-state-sub">
+                                        Trying to reconnect. You don&apos;t need to do anything.
+                                    </p>
+                                </div>
+                            )}
+
+                            {hostPictureStopped && !hostReconnectingReason && !hostDisconnected && (
+                                <div className="video-overlay watch-state" role="status">
+                                    <p className="watch-state-title">The host dropped out</p>
+                                    <p className="watch-state-sub">
+                                        Waiting for the picture to come back. You don&apos;t need to do anything.
+                                    </p>
+                                </div>
+                            )}
+
+                            {/* Ending is normal: no red, and two ways forward. The title is
+                                the page's one alert, with the server's reason. */}
+                            {hostDisconnected && (
+                                <div className="video-overlay watch-state">
+                                    <p className="watch-state-title" role="alert" id="watchError">
+                                        {roomEndedReason || 'This room has ended'}
+                                    </p>
+                                    {roomEndedReason && (
+                                        <p className="watch-state-sub">This room has ended.</p>
+                                    )}
+                                    <div className="watch-state-actions">
+                                        <button className="btn btn-primary btn-main" type="button" onClick={handleLeave}>
+                                            Join another room
+                                        </button>
+                                        <a href="#" className="btn btn-outline">Home</a>
+                                    </div>
+                                </div>
+                            )}
+
+                            {(hasStageNotice || mediaControlStatus || showSoundChip) && (
+                                <div className="watch-top">
+                                    {hasStageNotice && (
+                                        <div className="watch-notices">
+                                            {!hostDisconnected && <UserErrorAlert error={error} id="watchError" />}
+
+                                            {whipReconnecting && (
+                                                <div className="alert alert-warning" role="status">
+                                                    OBS disconnected — waiting for reconnection...
+                                                </div>
+                                            )}
+
+                                            {ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported && (
+                                                <div className="alert alert-error" role="alert">
+                                                    This browser&apos;s WebRTC receive capabilities do not include video/AV1. This AV1 room has no relay fallback.
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {mediaControlStatus && (
+                                        <div className="media-status watch-control-status" role="status">{mediaControlStatus}</div>
+                                    )}
+
+                                    {showSoundChip && (
+                                        <button
+                                            type="button"
+                                            className="watch-sound-chip"
+                                            onClick={() => {
+                                                setSoundBlocked(false);
+                                                syncMutedState(false);
+                                            }}
+                                        >
+                                            <ControlIcon name="sound" />
+                                            Tap for sound
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="watch-controls">
+                            <div className="watch-controls-info">
+                                {pictureLive && <span className="watch-live-badge">LIVE</span>}
+                                <span className="watch-room-code" title="Room code">{formatRoomCode(joinedRoomCode)}</span>
+                                {viewerStatus && (
+                                    <div className="watch-status">
+                                        <button
+                                            ref={statusChipRef}
+                                            type="button"
+                                            className="watch-status-chip"
+                                            aria-expanded={statusPanelShown}
+                                            aria-controls="watchStatusPanel"
+                                            onClick={() => setStatusPanelOpen(!statusPanelShown)}
+                                        >
+                                            <StatusPill tone={viewerStatus.tone}>{viewerStatus.label}</StatusPill>
+                                        </button>
+                                        <div
+                                            ref={statusPanelRef}
+                                            id="watchStatusPanel"
+                                            className="watch-status-panel"
+                                            hidden={!statusPanelShown}
+                                        >
+                                            {statusPanelShown && (
+                                                <>
+                                                    {connectionQuality && (
+                                                        <dl className="watch-status-numbers">
+                                                            <div>
+                                                                <dt>RTT</dt>
+                                                                <dd>{connectionQuality.rttMs == null ? 'n/a' : `${connectionQuality.rttMs.toFixed(0)} ms`}</dd>
+                                                            </div>
+                                                            <div>
+                                                                <dt>Jitter</dt>
+                                                                <dd>{connectionQuality.jitterMs == null ? 'n/a' : `${connectionQuality.jitterMs.toFixed(1)} ms`}</dd>
+                                                            </div>
+                                                            <div>
+                                                                <dt>Packets lost</dt>
+                                                                <dd>{connectionQuality.packetsLost}</dd>
+                                                            </div>
+                                                        </dl>
+                                                    )}
+                                                    {playbackStatus && <p className="watch-status-sentence">{playbackStatus}</p>}
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
                                 )}
                             </div>
-                        )}
 
-                        {hostReconnectingReason && !hostDisconnected && (
-                            <div className="video-overlay">
-                                <p>{hostReconnectingReason}</p>
-                            </div>
-                        )}
+                            <div className="watch-controls-actions">
+                                {playing && allowMediaControl && (
+                                    <button className="btn btn-secondary watch-btn" type="button" onClick={handleToggleMedia}>
+                                        Play/Pause Host Media
+                                    </button>
+                                )}
 
-                        {hostDisconnected && (
-                            <div className="video-overlay">
-                                <p className="host-ended">
-                                    This room has ended
-                                </p>
+                                {watching && !fallbackMode && playbackMode === 'mediasoup' && ingestMode === 'obs' && relayAllowed && !codecUnsupported && (
+                                    <button className="btn btn-secondary watch-btn" type="button" onClick={enterFallbackMode}>
+                                        Switch to Relay Mode
+                                    </button>
+                                )}
+                                {fallbackMode && (
+                                    <button className="btn btn-secondary watch-btn" type="button" onClick={handleTryMediasoup} disabled={watchLoading}>
+                                        Try WebRTC
+                                    </button>
+                                )}
+
+                                {playing && (
+                                    <button
+                                        className="btn btn-secondary watch-btn watch-btn-icon watch-btn-main"
+                                        type="button"
+                                        title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+                                        onClick={() => {
+                                            if (!videoRef.current) return;
+                                            setSoundBlocked(false);
+                                            syncMutedState(!videoRef.current.muted);
+                                        }}
+                                    >
+                                        <ControlIcon name={isMuted ? 'muted' : 'sound'} />
+                                        <span className="watch-btn-text">{isMuted ? 'Unmute Audio' : 'Mute Audio'}</span>
+                                    </button>
+                                )}
+
+                                <button
+                                    className="btn btn-secondary watch-btn watch-btn-icon watch-btn-fit"
+                                    type="button"
+                                    aria-pressed={isFitToPage}
+                                    title={isFitToPage ? 'Fill window' : 'Fit to page'}
+                                    onClick={() => setIsFitToPage(!isFitToPage)}
+                                >
+                                    <ControlIcon name={isFitToPage ? 'fill' : 'fit'} />
+                                    <span className="watch-btn-text">{isFitToPage ? 'Fill window' : 'Fit to page'}</span>
+                                </button>
+
+                                {playing && (
+                                    <button
+                                        className="btn btn-secondary watch-btn watch-btn-icon watch-btn-main"
+                                        type="button"
+                                        aria-pressed={isFullscreen}
+                                        title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+                                        onClick={handleToggleFullscreen}
+                                    >
+                                        <ControlIcon name={isFullscreen ? 'exitFullscreen' : 'fullscreen'} />
+                                        <span className="watch-btn-text">{isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}</span>
+                                    </button>
+                                )}
+
+                                <button className="btn btn-secondary watch-btn watch-btn-main" type="button" onClick={handleLeave}>
+                                    <ControlIcon name="leave" />
+                                    <span>Leave Room</span>
+                                </button>
                             </div>
-                        )}
+
+                            <p className="watch-turn-hint">
+                                Turn your phone sideways, or press Fullscreen, for a bigger picture.
+                            </p>
+                        </div>
                     </div>
 
-                    {whipReconnecting && (
-                        <div className="alert alert-warning" role="status">
-                            OBS disconnected — waiting for reconnection...
-                        </div>
-                    )}
-
-                    {ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported && (
-                        <div className="alert alert-error" role="alert">
-                            This browser&apos;s WebRTC receive capabilities do not include video/AV1. This AV1 room has no relay fallback.
-                        </div>
-                    )}
-
-                    <div className="controls">
-                        {(watching || fallbackMode) && (
-                            <button
-                                className={`btn ${isMuted ? 'btn-primary' : 'btn-secondary'}`}
-                                onClick={() => {
-                                    if (!videoRef.current) return;
-                                    syncMutedState(!videoRef.current.muted);
-                                }}
-                            >
-                                {isMuted ? 'Unmute Audio' : 'Mute Audio'}
-                            </button>
-                        )}
-
-                        {(watching || fallbackMode) && allowMediaControl && (
-                            <button className="btn btn-secondary" onClick={handleToggleMedia}>
-                                Play/Pause Host Media
-                            </button>
-                        )}
-
-                        {(watching || fallbackMode) && (
-                            <button
-                                className="btn btn-primary"
-                                type="button"
-                                aria-pressed={isFullscreen}
-                                onClick={async () => {
-                                    const player = videoRef.current;
-                                    if (!player) return;
-                                    try {
-                                        if (isFullscreen) {
-                                            if (document.exitFullscreen) await document.exitFullscreen();
-                                            else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
-                                        } else if (player.requestFullscreen) await player.requestFullscreen();
-                                        else if (player.webkitRequestFullscreen) await player.webkitRequestFullscreen();
-                                        else if (player.msRequestFullscreen) await player.msRequestFullscreen();
-                                    } catch (err) {
-                                        setError(err);
-                                    }
-                                }}
-                            >
-                                {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-                            </button>
-                        )}
-
-                        {watching && !fallbackMode && playbackMode === 'mediasoup' && ingestMode === 'obs' && relayAllowed && !codecUnsupported && (
-                            <button className="btn btn-secondary" onClick={enterFallbackMode}>
-                                Switch to Relay Mode
-                            </button>
-                        )}
-                        {fallbackMode && (
-                            <button className="btn btn-primary" onClick={handleTryMediasoup} disabled={watchLoading}>
-                                Try WebRTC
-                            </button>
-                        )}
-
-                        <button className="btn btn-outline" onClick={handleLeave}>
-                            Leave Room
-                        </button>
-
-                    </div>
-
-                    {playbackStatus && <div className="media-status" role="status">{playbackStatus}</div>}
-
-                    {connectionQuality && (
-                        <details className="connection-quality">
-                            <summary>Connection quality: {connectionQuality.quality}</summary>
-                            <span>RTT {connectionQuality.rttMs == null ? 'n/a' : `${connectionQuality.rttMs.toFixed(0)} ms`}</span>
-                            <span>Jitter {connectionQuality.jitterMs == null ? 'n/a' : `${connectionQuality.jitterMs.toFixed(1)} ms`}</span>
-                            <span>Packets lost {connectionQuality.packetsLost}</span>
-                        </details>
-                    )}
-
-                    {mediaControlStatus && (
-                        <div className="media-status" role="status">{mediaControlStatus}</div>
-                    )}
+                    {playbackStatus && <div className="media-status visually-hidden" role="status">{playbackStatus}</div>}
                 </>
             )}
         </div>

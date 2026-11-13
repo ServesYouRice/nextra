@@ -2551,3 +2551,64 @@ test('AV1 is refused, and OBS left as it was, when OBS has no AV1 encoder', asyn
     assert.match(result.message, /OBS has no AV1 encoder on this machine/);
     assert.equal(obs.profile.get('AdvOut/Encoder'), 'obs_nvenc_h264_tex');
 });
+
+test('configureObsStream reports connected, then configured, and stops reporting when the setup fails', async () => {
+    const { configureObsStream } = await obsWebSocketModule;
+    const previousWebSocket = globalThis.WebSocket;
+    const options = {
+        whipUrl: 'http://127.0.0.1:8889/whip/broadcast/ABC123',
+        bearerToken: 'token',
+        autoStart: false,
+        videoSettings: { outputWidth: 1280, outputHeight: 720, fpsNumerator: 60, fpsDenominator: 1 },
+    };
+    const succeedingObs = fakeObsWebSocket(withStream((ws, request) => {
+        if (request.requestType === 'GetVideoSettings') {
+            queueMicrotask(() => ws.respond(request, { outputWidth: 1920, outputHeight: 1080 }));
+            return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    }));
+    const refusingObs = fakeObsWebSocket((ws, request) => {
+        const { requestType } = request;
+        if (requestType === 'GetStreamStatus') {
+            queueMicrotask(() => ws.respond(request, { outputActive: true, outputReconnecting: false }));
+            return;
+        }
+        if (requestType === 'StopStream') {
+            queueMicrotask(() => ws.respond(request, {}, { result: false, comment: 'output busy' }));
+            return;
+        }
+        queueMicrotask(() => ws.respond(request));
+    });
+
+    try {
+        globalThis.WebSocket = succeedingObs;
+        const succeeded = [];
+        const success = await configureObsStream({ ...options, onProgress: (stage) => succeeded.push(stage) });
+        assert.equal(success.success, true);
+        assert.deepEqual(succeeded, ['connected', 'configured']);
+
+        globalThis.WebSocket = refusingObs;
+        const refused = [];
+        const failure = await configureObsStream({ ...options, onProgress: (stage) => refused.push(stage) });
+        assert.equal(failure.success, false);
+        assert.match(failure.message, /still streaming to a previous target/);
+        assert.deepEqual(refused, ['connected']);
+
+        // A callback that throws is only a display problem; the setup goes on.
+        globalThis.WebSocket = succeedingObs;
+        const thrown = [];
+        const despiteThrow = await configureObsStream({
+            ...options,
+            onProgress: (stage) => {
+                thrown.push(stage);
+                throw new Error('render failed');
+            },
+        });
+        assert.equal(despiteThrow.success, true);
+        assert.match(despiteThrow.message, /OBS configured/);
+        assert.deepEqual(thrown, ['connected', 'configured']);
+    } finally {
+        globalThis.WebSocket = previousWebSocket;
+    }
+});

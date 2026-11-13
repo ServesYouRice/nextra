@@ -17,6 +17,19 @@
   --bg-4: #2c2c33;
   --surface-glass: linear-gradient(180deg, rgba(35, 36, 46, 0.98), rgba(24, 24, 31, 0.98));
   --surface-glass-accent: radial-gradient(circle at top right, rgba(91, 141, 239, 0.12), transparent 38%);
+  --surface-button:
+    radial-gradient(circle at top right, rgba(130, 167, 255, 0.2), transparent 48%),
+    linear-gradient(135deg, rgba(57, 61, 83, 0.98), rgba(73, 82, 122, 0.98));
+  --surface-button-hover:
+    radial-gradient(circle at top right, rgba(147, 181, 255, 0.24), transparent 52%),
+    linear-gradient(135deg, rgba(64, 69, 94, 0.98), rgba(82, 94, 138, 0.98));
+  --surface-button-quiet: linear-gradient(180deg, rgba(35, 36, 46, 0.98), rgba(24, 24, 31, 0.98));
+  --surface-button-stop:
+    radial-gradient(circle at top right, rgba(255, 150, 150, 0.18), transparent 48%),
+    linear-gradient(135deg, rgba(104, 40, 46, 0.98), rgba(150, 52, 58, 0.98));
+  --surface-button-stop-hover:
+    radial-gradient(circle at top right, rgba(255, 160, 160, 0.22), transparent 52%),
+    linear-gradient(135deg, rgba(116, 44, 51, 0.98), rgba(164, 58, 64, 0.98));
 
   /* Borders */
   --border: rgba(255, 255, 255, 0.07);
@@ -26,7 +39,7 @@
   /* Text */
   --text-1: #ececf0;
   --text-2: #a2a2b0;
-  --text-3: #6c6c7e;
+  --text-3: #9494a8;
 
   /* Accent + semantic */
   --accent: #5b8def;
@@ -55,8 +68,8 @@
      scrollbar; they use vh rather than dvh so a mobile URL bar sliding away does
      not reflow the page mid-scroll. */
   --media-stage-max-width: 1680px;
-  --host-panel-gap: clamp(0.85rem, 1.6vh, 1.5rem);
-  --host-side-card-width: clamp(19rem, 17vw, 26rem);
+  --host-panel-gap: 1.125rem;
+  --host-side-card-width: 16.25rem;
   --shell-pad-inline: clamp(1rem, 6vw, 8rem);
   --stage-pad-inline: clamp(1rem, 2.5vw, 2.5rem);
   --shell-pad-block: clamp(1.25rem, 3.5vh, 3rem);
@@ -64,25 +77,45 @@
   --panel-pad-inline: clamp(1rem, 1.5vw, 1.45rem);
   --row-pad-block: clamp(0.5rem, 1vh, 0.9rem);
   --row-gap: clamp(0.3rem, 0.7vh, 0.55rem);
-  /* Everything above the video stage on the host page: nav, page padding, page
-     header, the start controls, the capture rows, and the footer. The stage is
-     bounded by whatever height is left over, so on a laptop-height viewport it
-     does not push the page into a scrollbar. On a viewport shorter than this
-     budget plus --stage-min-width of video (a landscape phone) nothing is left
-     over, so the stage stops shrinking at the floor below and the page scrolls
-     instead. Measured, not guessed - see the card. */
-  --stage-chrome: 24rem;
+  /* Everything on the host page that is not the video stage: nav, page padding,
+     page header, the source tabs, the diagnostics row, and the footer. The
+     settings panel sits beside the stage and is as tall as it, so it adds
+     nothing. The stage is bounded by whatever height is left over, so on a
+     laptop-height viewport it does not push the page into a scrollbar. On a
+     viewport shorter than this budget plus --stage-min-width of video (a
+     landscape phone) nothing is left over, so the stage stops shrinking at the
+     floor below and the page scrolls instead. Measured, not guessed: 22rem
+     is the page's 21.8rem of chrome at 1440x900. */
+  --stage-chrome: 22rem;
   /* The narrowest the height-bounded stage gets. Without it the height term of
      .video-container is zero or a sliver once the viewport is no taller than
      the chrome budget. The container's own width still caps it. */
   --stage-min-width: 18rem;
   --article-measure: 40rem;
 
+  /* Type scale */
+  --fs-display: clamp(1.75rem, 3vw, 2.75rem);
+  --fs-title: 1.75rem;
+  --fs-heading: 1.25rem;
+  --fs-body: 1rem;
+  --fs-small: 0.875rem;
+  --fs-label: 0.75rem;
+
+  /* Spacing scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-12: 3rem;
+
   /* Shape + motion */
   --panel-shell-radius: 18px;
   --radius: 8px;
   --radius-lg: 12px;
-  --radius-xl: 14px;
+  --radius-pill: 999px;
+  --tap-min: 2.75rem;
   --shadow-card:
     0 24px 50px rgba(0, 0, 0, 0.22),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -92,8 +125,8 @@
   --transition: 180ms ease;
   --transition-panel: 420ms cubic-bezier(0.22, 1, 0.36, 1);
 
-  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', Menlo, monospace;
+  --font-sans: 'Inter Variable', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'Cascadia Code', Menlo, monospace;
 
   accent-color: var(--accent);
 }
@@ -140,7 +173,7 @@ code {
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 
 .skip-link {
@@ -153,7 +186,7 @@ code {
   background: var(--bg-3);
   color: var(--text-1);
   text-decoration: none;
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   border: 1px solid var(--border-strong);
   transition: top var(--transition);
 }
@@ -201,7 +234,7 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 1rem var(--shell-pad-inline);
+  padding: 0.5rem var(--shell-pad-inline);
   background: rgba(21, 21, 24, 0.9);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -221,38 +254,52 @@ code {
   color: var(--text-1);
   display: flex;
   align-items: center;
-  min-width: 0;
+  justify-content: center;
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
 }
 
 .nav-links {
   display: flex;
-  gap: 1.75rem;
+  gap: 0.5rem;
   align-items: center;
   flex-wrap: wrap;
 }
 
 .nav-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap-min);
+  padding: 0 0.75rem;
   text-decoration: none;
-  color: var(--text-3);
-  font-size: 0.9rem;
+  color: var(--text-2);
+  font-size: var(--fs-small);
   font-weight: 500;
-  padding: 0.25rem 0;
   transition: color var(--transition);
 }
 
 .nav-links a:hover {
-  color: var(--text-2);
+  color: var(--text-1);
 }
 
-/* The current tab takes the mark's upstroke gradient, cyan -> blue. `color` is
-   the fallback wherever background-clip: text is unsupported. */
-.nav-links a.active,
+/* The current page is brighter and underlined, not recoloured. */
 .nav-links a[aria-current='page'] {
-  color: var(--brand-blue);
-  background-image: linear-gradient(100deg, var(--brand-cyan), var(--brand-blue));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  color: var(--text-1);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.nav-menu-button {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--tap-min);
+  height: var(--tap-min);
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--text-1);
+  cursor: pointer;
 }
 
 .site-footer {
@@ -270,7 +317,7 @@ code {
 }
 
 .footer-note {
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
 }
 
@@ -283,7 +330,7 @@ code {
 
 .footer-links a {
   text-decoration: none;
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   font-weight: 500;
   color: var(--text-3);
   transition: color var(--transition);
@@ -315,7 +362,7 @@ code {
   gap: 0.85rem;
   padding: 4rem 1.5rem;
   color: var(--text-3);
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
 }
 
 .spinner {
@@ -390,7 +437,7 @@ code {
   border: none;
   border-radius: var(--radius);
   font-family: inherit;
-  font-size: 0.825rem;
+  font-size: var(--fs-small);
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition);
@@ -404,9 +451,7 @@ code {
 }
 
 .btn-primary {
-  background:
-    radial-gradient(circle at top right, rgba(130, 167, 255, 0.2), transparent 48%),
-    linear-gradient(135deg, rgba(57, 61, 83, 0.98), rgba(73, 82, 122, 0.98));
+  background: var(--surface-button);
   border: 1px solid rgba(151, 175, 255, 0.22);
   box-shadow:
     0 14px 28px rgba(0, 0, 0, 0.24),
@@ -415,9 +460,7 @@ code {
 }
 
 .btn-primary:hover:not(:disabled) {
-  background:
-    radial-gradient(circle at top right, rgba(147, 181, 255, 0.24), transparent 52%),
-    linear-gradient(135deg, rgba(64, 69, 94, 0.98), rgba(82, 94, 138, 0.98));
+  background: var(--surface-button-hover);
   border-color: rgba(173, 194, 255, 0.3);
   box-shadow:
     0 18px 34px rgba(0, 0, 0, 0.28),
@@ -425,22 +468,27 @@ code {
 }
 
 .btn-danger {
-  background: var(--err);
+  background: var(--surface-button-stop);
   color: #fff;
+  box-shadow:
+    0 14px 28px rgba(0, 0, 0, 0.24),
+    inset 0 0 0 1px rgba(255, 160, 160, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: #d04a4a;
+  background: var(--surface-button-stop-hover);
 }
 
 .btn-secondary {
-  background: var(--bg-3);
-  color: var(--text-2);
-  border: 1px solid var(--border);
+  background: var(--surface-button-quiet);
+  color: var(--text-1);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: var(--bg-4);
+  border-color: var(--border-strong);
   color: var(--text-1);
 }
 
@@ -469,19 +517,45 @@ code {
 
 .btn-large {
   padding: 0.65rem 1.75rem;
-  font-size: 0.875rem;
+  font-size: var(--fs-small);
 }
 
 .btn-small {
   padding: 0.35rem 0.75rem;
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
+}
+
+/* Quiet Stop on the page. */
+.btn-danger-quiet {
+  background: var(--surface-button-quiet);
+  color: #ff9a9a;
+  border: 1px solid rgba(229, 91, 91, 0.45);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.btn-danger-quiet:hover:not(:disabled) {
+  border-color: rgba(229, 91, 91, 0.7);
+}
+
+/* The one main button per screen: used together with .btn .btn-primary. */
+.btn-main {
+  min-height: 3.375rem;
+  padding: 0 1.625rem;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  border-color: rgba(173, 194, 255, 0.55);
+  box-shadow:
+    0 0 0 4px rgba(91, 141, 239, 0.16),
+    0 10px 34px -4px rgba(91, 141, 239, 0.62),
+    0 14px 28px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 /* ========== FORMS ========== */
 .select-input {
   min-height: 2.4rem;
   padding: 0.5rem 0.85rem;
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   font-family: inherit;
   background: rgba(12, 13, 18, 0.54);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -489,8 +563,6 @@ code {
   color: var(--text-1);
   width: 100%;
   cursor: pointer;
-  text-align: center;
-  text-align-last: center;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
   transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
 }
@@ -511,7 +583,7 @@ input.select-input {
 
 .input-code {
   padding: 0.6rem 1rem;
-  font-size: 1rem;
+  font-size: var(--fs-body);
   font-family: var(--font-mono);
   text-align: center;
   letter-spacing: 0.12em;
@@ -524,7 +596,7 @@ input.select-input {
 }
 
 .input-code::placeholder {
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   letter-spacing: 0;
   color: var(--text-3);
   font-family: var(--font-sans);
@@ -556,39 +628,8 @@ input.select-input {
   pointer-events: none;
 }
 
-.settings-panel {
-  max-width: 500px;
-  margin: 0 auto 1.25rem;
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  isolation: isolate;
-  background: var(--surface-glass-accent), var(--surface-glass);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--panel-shell-radius);
-  padding: var(--panel-pad-block) var(--panel-pad-inline);
-  box-shadow: var(--shadow-card);
-  transition: border-color var(--transition-panel), box-shadow var(--transition-panel);
-}
-
-.settings-panel::before {
-  content: '';
-  position: absolute;
-  inset: 0 0 auto;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
-  opacity: 0.7;
-}
-
-.settings-panel:hover {
-  border-color: var(--border-strong);
-  box-shadow: var(--shadow-card-hover);
-}
-
-.settings-panel h3,
 .panel-heading {
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   font-weight: 700;
   color: #7481ab;
   text-transform: uppercase;
@@ -602,7 +643,7 @@ input.select-input {
   gap: 0.95rem;
   padding: var(--row-pad-block) 1rem;
   margin-top: var(--row-gap);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   background: rgba(255, 255, 255, 0.018);
   border: 1px solid transparent;
   transition: border-color var(--transition), background var(--transition);
@@ -621,16 +662,6 @@ input.select-input {
 .setting-row-inline {
   grid-template-columns: minmax(108px, 132px) minmax(0, 1fr);
   align-items: center;
-}
-
-/* Side-panel cards are one column of a two-column panel, never wide enough for a
-   label column and a control side by side - the OBS password input lost its
-   placeholder to the card edge. Stack them; the modal is wide enough to keep the
-   inline form. */
-.settings-panel .setting-row-inline {
-  grid-template-columns: minmax(0, 1fr);
-  align-items: stretch;
-  gap: 0.4rem;
 }
 
 .setting-row input[type='checkbox'] {
@@ -652,12 +683,8 @@ input.select-input {
   color: rgba(205, 212, 240, 0.58);
 }
 
-.setting-row input[type='checkbox']:disabled+label .setting-hint {
-  color: rgba(164, 169, 194, 0.5);
-}
-
 .setting-row label {
-  font-size: 0.9rem;
+  font-size: var(--fs-small);
   color: #cdd4f0;
   cursor: pointer;
   user-select: none;
@@ -666,92 +693,8 @@ input.select-input {
 
 .setting-row-label {
   color: rgba(236, 236, 240, 0.86);
-  font-size: 0.9rem;
+  font-size: var(--fs-small);
   line-height: 1.38;
-}
-
-.setting-row .setting-hint {
-  font-size: 0.78rem;
-  color: rgba(164, 169, 194, 0.72);
-  display: block;
-  margin-top: 0.28rem;
-  max-width: 34ch;
-}
-
-.settings-wrapper {
-  position: relative;
-  width: var(--host-side-card-width);
-  overflow: clip;
-  transition: width var(--transition-panel);
-}
-
-.settings-wrapper .settings-panel {
-  min-width: 0;
-  width: var(--host-side-card-width);
-  max-width: none;
-  margin: 0;
-  align-self: stretch;
-}
-
-.settings-wrapper .settings-panel.obs-config-panel {
-  position: absolute;
-  left: calc(var(--host-side-card-width) + var(--host-panel-gap));
-  top: 0;
-  bottom: 0;
-  width: var(--host-side-card-width);
-  overflow: clip;
-  opacity: 0;
-  visibility: hidden;
-  transform: translateX(-26px) scale(0.96);
-  clip-path: inset(0 100% 0 0 round 18px);
-  filter: blur(8px) saturate(0.86);
-  pointer-events: none;
-  transition:
-    opacity var(--transition-panel),
-    transform var(--transition-panel),
-    clip-path var(--transition-panel),
-    filter 260ms ease,
-    visibility 0s linear var(--transition-panel);
-}
-
-.settings-wrapper.settings-expanded .settings-panel.obs-config-panel {
-  position: relative;
-  left: auto;
-  top: auto;
-  bottom: auto;
-  width: 100%;
-  height: 100%;
-  opacity: 1;
-  visibility: visible;
-  transform: translateX(0) scale(1);
-  clip-path: inset(0 0 0 0 round 18px);
-  filter: none;
-  pointer-events: auto;
-  transition:
-    opacity var(--transition-panel),
-    transform var(--transition-panel),
-    clip-path var(--transition-panel),
-    filter 260ms ease,
-    visibility 0s linear 0s;
-}
-
-.settings-wrapper.settings-expanded {
-  display: grid;
-  grid-template-columns: repeat(2, var(--host-side-card-width));
-  align-items: stretch;
-  gap: var(--host-panel-gap);
-  width: calc(var(--host-side-card-width) * 2 + var(--host-panel-gap));
-}
-
-.settings-wrapper.settings-expanded .settings-panel {
-  width: var(--host-side-card-width);
-  height: 100%;
-}
-
-/* Both cards stretch to the taller one, so let the OBS rows share the leftover
-   height instead of stacking at the top over an empty strip. */
-.settings-wrapper.settings-expanded .settings-panel.obs-config-panel .setting-row {
-  flex: 1 1 auto;
 }
 
 /* ========== MODE TOGGLE ========== */
@@ -771,20 +714,18 @@ input.select-input {
   min-width: 6.4rem;
   padding: 0.55rem 1.1rem;
   font-family: inherit;
-  font-size: 0.95rem;
+  font-size: var(--fs-body);
   font-weight: 600;
   border: 1px solid transparent;
   background: transparent;
   color: #9ea6c7;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   cursor: pointer;
   transition: all var(--transition);
 }
 
 .mode-toggle button.active {
-  background:
-    radial-gradient(circle at top right, rgba(130, 167, 255, 0.2), transparent 48%),
-    linear-gradient(135deg, rgba(57, 61, 83, 0.98), rgba(73, 82, 122, 0.98));
+  background: var(--surface-button);
   border: 1px solid rgba(151, 175, 255, 0.22);
   box-shadow:
     0 14px 28px rgba(0, 0, 0, 0.24),
@@ -795,6 +736,28 @@ input.select-input {
 .mode-toggle button:not(.active):hover {
   color: var(--text-1);
   background: rgba(255, 255, 255, 0.035);
+}
+
+/* The small variant in the host settings panel: a quiet segmented control that
+   fills its row. */
+.mode-toggle-small {
+  display: flex;
+  width: 100%;
+  padding: 2px;
+  border-radius: var(--radius);
+  box-shadow: none;
+}
+
+.mode-toggle-small button {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 5px 6px;
+  font-size: var(--fs-small);
+  border-radius: var(--radius);
+}
+
+.mode-toggle-small button.active {
+  box-shadow: none;
 }
 
 /* Three 6.4rem cells (the OBS tuning profiles, or the live resolution toggle)
@@ -818,7 +781,7 @@ input.select-input {
   padding: 0.625rem 0.875rem;
   border-radius: var(--radius);
   margin-bottom: 0.75rem;
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
   line-height: 1.5;
 }
 
@@ -861,15 +824,16 @@ input.select-input {
   background: var(--bg-2);
   box-shadow: var(--shadow-lg);
   color: var(--text-1);
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
 }
 
 .notification-success { border-color: rgba(68, 190, 130, 0.35); }
 .notification-error { border-color: rgba(229, 91, 91, 0.4); }
-.notification button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 1.2rem; }
+.notification button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: var(--fs-heading); }
 
-.host-diagnostics, .connection-quality { margin-top: 0.75rem; color: var(--text-2); font-size: 0.75rem; }
+.host-diagnostics, .connection-quality { margin-top: 0.75rem; color: var(--text-2); font-size: var(--fs-label); }
 .host-diagnostics summary, .connection-quality summary { cursor: pointer; color: var(--text-1); }
+.host-diagnostics summary { box-sizing: border-box; min-height: 44px; padding-block: 12px; line-height: 20px; }
 .host-diagnostics dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 0.5rem; }
 .host-diagnostics dl div { padding: 0.5rem; border-radius: var(--radius); background: var(--bg-3); }
 .host-diagnostics dt { color: var(--text-3); }
@@ -883,8 +847,8 @@ input.select-input {
   align-items: center;
   gap: 0.4rem;
   padding: 0.25rem 0.7rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-label);
   font-weight: 500;
   border: 1px solid var(--border);
   background: var(--bg-2);
@@ -930,11 +894,11 @@ input.select-input {
 
 .callout {
   padding: 0.85rem 0.95rem;
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
   border: 1px solid var(--border);
   background: var(--bg-2);
   color: var(--text-2);
-  font-size: 0.82rem;
+  font-size: var(--fs-small);
   line-height: 1.55;
   margin: 0.75rem 0;
 }
@@ -975,7 +939,7 @@ input.select-input {
 }
 
 .copy-field-label {
-  font-size: 0.65rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -991,7 +955,7 @@ input.select-input {
   background: none;
   font-family: var(--font-mono);
   color: var(--accent);
-  font-size: 0.78rem;
+  font-size: var(--fs-label);
   text-align: left;
   cursor: pointer;
   word-break: break-all;
@@ -1004,7 +968,7 @@ input.select-input {
 }
 
 .copy-field-value.copy-field-strong {
-  font-size: 1.5rem;
+  font-size: var(--fs-title);
   font-weight: 600;
   letter-spacing: 0.08em;
   color: var(--text-1);
@@ -1016,8 +980,89 @@ input.select-input {
 }
 
 .copy-field-feedback {
-  font-size: 0.7rem;
+  font-size: var(--fs-label);
   color: var(--ok);
+}
+
+/* A copy field with its own square copy button: the label row (label and an
+   optional tag), then the value, with the button beside both; an optional
+   main button spans the row under them. The button shows a tick while the
+   unseen "Copied!" status is announced. */
+.copy-field-split {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 10px;
+}
+
+.copy-field-top {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.copy-field-split > .copy-field-value {
+  grid-column: 1;
+  display: block;
+  min-width: 0;
+  color: var(--text-1);
+  cursor: auto;
+}
+
+.copy-field-split > .copy-field-value:hover {
+  opacity: 1;
+}
+
+/* Cut in the middle: the head takes the line minus the tail's width (in ch of
+   the mono font) and ends in an ellipsis; the tail always shows. The head is
+   inline-block, not a flex item, so the element's text stays the full value
+   on one line. */
+.copy-field-value.copy-field-shortened {
+  overflow: hidden;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+.copy-field-head {
+  display: inline-block;
+  max-width: calc(100% - var(--copy-field-tail, 0ch));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+
+.copy-field-copy {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: var(--radius);
+  background: var(--surface-button-quiet);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  color: #c4c4d0;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition);
+}
+
+.copy-field-copy:hover {
+  color: var(--text-1);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.copy-field-copy.is-copied {
+  color: var(--ok);
+}
+
+.copy-field-main {
+  grid-column: 1 / -1;
+  width: 100%;
 }
 
 .code-block {
@@ -1030,12 +1075,12 @@ input.select-input {
   word-break: break-all;
   user-select: all;
   font-family: var(--font-mono);
-  font-size: 0.78rem;
+  font-size: var(--fs-label);
   color: var(--text-1);
 }
 
 .copy-hint {
-  font-size: 0.7rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
   margin-top: 0.25rem;
 }
@@ -1049,109 +1094,199 @@ input.select-input {
   padding: clamp(2rem, 6vh, 4rem) var(--stage-pad-inline);
 }
 
-.landing-content {
-  max-width: 880px;
+.landing-grid {
   width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 3rem;
+  max-width: 1200px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2.5rem;
 }
 
-.landing-hero {
-  text-align: center;
+.landing-copy {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 1.35rem;
+  align-items: flex-start;
+  gap: 1.25rem;
+  min-width: 0;
 }
 
-/* The hero steps logo -> headline -> lead -> cards so each level is clearly
-   larger than the one under it instead of everything landing near 1rem. */
-.landing-hero h1 {
-  font-size: clamp(1.45rem, 2.9vw, 2rem);
-  font-weight: 600;
-  line-height: 1.15;
+.landing-copy .brand-logo-hero {
+  --brand-mark-height: 2.25rem;
+}
+
+.landing-copy h1 {
+  font-size: var(--fs-display);
+  font-weight: 700;
+  line-height: 1.1;
   letter-spacing: -0.02em;
   color: var(--text-1);
 }
 
-.landing-hero p {
+.landing-lead {
   color: var(--text-2);
-  font-size: 1.0625rem;
+  font-size: var(--fs-body);
   line-height: 1.6;
-  max-width: 56ch;
+  max-width: 52ch;
 }
 
-/* auto-fit drops to one column on its own when the cards stop fitting, which is
-   the same job the 640px override used to do by hand. */
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
-  gap: 1.25rem;
-  max-width: 720px;
-  width: 100%;
-  margin: 0 auto;
-}
-
-.card {
+.landing-join {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 2rem 1.75rem;
-  position: relative;
-  overflow: hidden;
-  isolation: isolate;
+  gap: 0.6rem;
+  width: 100%;
+  max-width: 26rem;
+  padding: 1rem;
   background: var(--surface-glass-accent), var(--surface-glass);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--panel-shell-radius);
-  text-decoration: none;
-  color: var(--text-1);
   box-shadow: var(--shadow-card);
-  transition: border-color var(--transition), transform var(--transition), box-shadow var(--transition);
 }
 
-.card:hover {
-  border-color: var(--border-strong);
-  box-shadow: var(--shadow-card-hover);
-  transform: translateY(-2px);
-}
-
-.card h2 {
-  font-size: 1.25rem;
+.landing-join label {
+  font-size: var(--fs-small);
   font-weight: 600;
-  letter-spacing: -0.01em;
-  margin-bottom: 0.4rem;
+  color: var(--text-1);
 }
 
-.card p {
-  font-size: 0.9375rem;
-  line-height: 1.55;
+.landing-join-row {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.landing-join .input-code {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  min-height: var(--tap-min);
+}
+
+.landing-join .btn {
+  min-height: var(--tap-min);
+}
+
+.landing-join-error {
+  color: #f5a3a3;
+  font-size: var(--fs-small);
+}
+
+.landing-facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  font-size: var(--fs-small);
   color: var(--text-2);
-  margin-bottom: 1.25rem;
+}
+
+.landing-facts li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.landing-facts svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+/* Decorative stand-in for a live room; the only place colour literals live. */
+.landing-preview {
+  min-width: 0;
+}
+
+.landing-preview-screen {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--panel-shell-radius);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(135deg, #1c2340, #12141d 60%, #2a1d3d);
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.7);
+}
+
+.landing-preview-window {
+  position: absolute;
+  inset: 16% 12% 18%;
+  display: flex;
+  flex-direction: column;
+  gap: 8%;
+  padding: 5%;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, #232636, #181a25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.landing-preview-bar {
+  height: 8%;
+  width: 30%;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(100deg, #5b8def, #b46cf0);
+}
+
+.landing-preview-line {
+  height: 6%;
+  width: 90%;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.landing-preview-line-short {
+  width: 55%;
+}
+
+.landing-preview-block {
   flex: 1;
+  border-radius: var(--radius);
+  background: rgba(91, 141, 239, 0.18);
 }
 
-/* Each badge takes one half of the mark's gradient, so the landing cards read
-   as the two strokes of the "N". `color` is the fallback wherever
-   background-clip: text is unsupported. */
-.card-badge {
-  font-size: 0.875rem;
+.landing-preview-badge,
+.landing-preview-meta,
+.landing-preview-code {
+  position: absolute;
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-label);
   font-weight: 600;
-  color: var(--brand-cyan);
-  background-image: linear-gradient(100deg, var(--brand-cyan), var(--brand-blue));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
+  background: rgba(10, 11, 16, 0.72);
+  color: #e8eaf2;
 }
 
-.card-watch .card-badge {
-  color: var(--brand-magenta);
-  background-image: linear-gradient(100deg, var(--brand-magenta), var(--brand-violet));
+.landing-preview-badge {
+  top: 4%;
+  left: 3%;
+  background: #d94a4a;
+  color: #fff;
+  letter-spacing: 0.06em;
 }
 
-.landing-footer {
-  text-align: center;
+.landing-preview-meta {
+  bottom: 4%;
+  left: 3%;
+}
+
+.landing-preview-code {
+  bottom: 4%;
+  right: 3%;
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+}
+
+@media (min-width: 900px) {
+  .landing-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 48px;
+    align-items: center;
+  }
+}
+
+@media (max-width: 639px) {
+  .landing-preview {
+    display: none;
+  }
 }
 
 /* ========== VIEW & ARTICLES ========== */
@@ -1168,14 +1303,14 @@ input.select-input {
 }
 
 .view-header h1 {
-  font-size: 1.25rem;
+  font-size: var(--fs-heading);
   font-weight: 600;
   margin-bottom: 0.15rem;
 }
 
 .subtitle {
   color: var(--text-3);
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
 }
 
 /* Prose keeps a readable measure while wide blocks - the browser support table -
@@ -1198,7 +1333,7 @@ input.select-input {
 }
 
 .article-container h1 {
-  font-size: clamp(1.5rem, 1.15rem + 1.5vw, 2rem);
+  font-size: var(--fs-title);
   color: var(--text-1);
   margin-bottom: 2rem;
   font-weight: 600;
@@ -1208,7 +1343,7 @@ input.select-input {
 /* Grid items do not margin-collapse, so this pairs with the 1rem bottom margin
    on the preceding block to land on the same 2.5rem gap it had in normal flow. */
 .article-container h2 {
-  font-size: clamp(1.1rem, 1rem + 0.5vw, 1.25rem);
+  font-size: var(--fs-heading);
   color: var(--text-1);
   margin-top: 1.5rem;
   margin-bottom: 1rem;
@@ -1230,6 +1365,18 @@ input.select-input {
   margin-bottom: 0.5rem;
 }
 
+/* A command line scrolls inside its own box, never the page. */
+.article-container pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* A long inline address (the WHEP URL) wraps instead of widening the page.
+   It does not reach code inside pre, which keeps white-space: pre. */
+.article-container :not(pre) > code {
+  overflow-wrap: anywhere;
+}
+
 .article-container a {
   color: var(--accent);
 }
@@ -1240,8 +1387,8 @@ input.select-input {
 
 .article-step {
   padding: 1rem;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
+  background: var(--surface-glass-accent), var(--surface-glass);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-lg);
   margin-bottom: 1rem;
 }
@@ -1262,7 +1409,7 @@ input.select-input {
 }
 
 .legal-eyebrow {
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-3);
@@ -1281,6 +1428,242 @@ input.select-input {
   display: block;
   color: var(--text-1);
   margin-bottom: 0.45rem;
+}
+
+/* ========== HOW TO USE ========== */
+/* The guide is an article, so it keeps the article grid. Every rule is scoped
+   under .howto: .article-container, .article-step and the table classes are
+   shared with the Privacy, Copyright and Status pages. */
+.howto {
+  font-size: var(--fs-body);
+}
+
+/* The tab row and the step cards leave the reading measure like the support
+   table does: five tabs do not fit 40rem, and three cards need the room. */
+.howto > .howto-tabs {
+  grid-column: full;
+  justify-self: center;
+  max-width: min(70rem, 100% - var(--shell-pad-inline) * 2);
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+  /* Room for the focus ring, which an overflow box would clip. */
+  padding: 4px;
+  overflow-x: auto;
+}
+
+.howto-tab {
+  flex: none;
+  min-height: var(--tap-min);
+  padding: 0 1.1rem;
+  background: var(--surface-button-quiet);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--text-2);
+  font-family: inherit;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.howto-tab:hover {
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+.howto-tab[aria-selected='true'] {
+  background: var(--surface-button);
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+/* A panel is a grid with the article's own columns, so its prose keeps the
+   measure while the step cards reach the full width. It spans the whole row
+   and so is as wide as the article: inheriting the template gives the same
+   tracks. display: grid would beat the hidden attribute, hence the rule. */
+.howto > .howto-panel {
+  grid-column: full;
+  display: grid;
+  grid-template-columns: inherit;
+}
+
+.howto > .howto-panel[hidden] {
+  display: none;
+}
+
+.howto-panel > * {
+  grid-column: content;
+}
+
+.howto-panel > .howto-steps {
+  grid-column: full;
+  justify-self: center;
+  width: min(70rem, 100% - var(--shell-pad-inline) * 2);
+}
+
+.howto-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 1rem;
+}
+
+.howto-steps > .article-step {
+  margin-bottom: 0;
+}
+
+.howto-steps .article-step strong {
+  display: block;
+}
+
+.howto-steps .article-step p {
+  margin: 0.35rem 0 0;
+}
+
+/* The pictures are plain elements: no image file to load or to describe. */
+.howto-art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  height: 96px;
+  margin-bottom: 0.75rem;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.howto-art-button {
+  padding: 0.5rem 1rem;
+  background: var(--surface-button);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text-1);
+  font-size: var(--fs-small);
+  font-weight: 500;
+}
+
+.howto-art-window {
+  width: 2.25rem;
+  height: 3rem;
+  background: var(--bg-3);
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.howto-art-window.is-picked {
+  background: var(--accent-muted);
+  border-color: var(--accent);
+}
+
+.howto-art-chip {
+  padding: 0.4rem 0.9rem;
+  background: var(--bg-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  letter-spacing: 0.08em;
+}
+
+/* A command sits in a box with its Copy button at the top right. The box's top
+   padding keeps the button off the first line; the line itself scrolls sideways
+   inside the box and never wraps. */
+.howto-code {
+  position: relative;
+  margin: 0.75rem 0 1rem;
+  padding-top: 3rem;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.howto-code pre {
+  margin: 0;
+  padding: 0 1rem 1rem;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.howto-copy {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+}
+
+/* Fold-outs: a hairline above each one and one under the last. */
+.howto-folds {
+  margin: 1.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.howto-fold {
+  border-top: 1px solid var(--border);
+}
+
+.howto-fold > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: var(--tap-min);
+  padding-block: 0.5rem;
+  color: var(--text-1);
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  list-style: none;
+}
+
+.howto-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.howto-fold > summary::after {
+  content: '';
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform var(--transition);
+}
+
+.howto-fold[open] > summary::after {
+  transform: translateY(2px) rotate(-135deg);
+}
+
+.howto-fold-body {
+  padding-bottom: 0.5rem;
+}
+
+.howto-fold-body > .article-step {
+  margin-bottom: 1rem;
+}
+
+@media (max-width: 899px) {
+  .howto-steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .howto-code {
+    padding-top: 3.5rem;
+  }
+
+  .howto-copy {
+    min-height: var(--tap-min);
+    min-width: var(--tap-min);
+  }
 }
 
 /* ========== VIDEO STAGE ========== */
@@ -1313,15 +1696,15 @@ input.select-input {
   background: #0a0a0c;
 }
 
-/* The viewer page carries less below the stage than the host page does - no
-   capture rows, no start controls - so it can afford a taller stage before the
-   page would scroll. Without its own value it would inherit the host's budget
-   and shrink the video for chrome that is not there. On a landscape phone this
-   budget is still larger than the viewport is tall, and --stage-min-width keeps
-   the stage from collapsing. */
+/* Once joined, the viewer page is the top bar and the picture: no page header,
+   no rows under the stage (its controls sit on it, see WATCH STAGE), so 7rem
+   is the top bar and the page's block padding. Without its own value it would
+   inherit the host's budget and shrink the video for chrome that is not there.
+   On a landscape phone this budget is still larger than the viewport is tall,
+   and --stage-min-width keeps the stage from collapsing. */
 .watch-video {
-  max-width: 60%;
-  --stage-chrome: 19rem;
+  max-width: 100%;
+  --stage-chrome: 7rem;
 }
 
 .video-overlay {
@@ -1336,20 +1719,22 @@ input.select-input {
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   color: var(--text-3);
-  font-size: 0.875rem;
+  font-size: var(--fs-small);
   text-align: center;
   padding: 1rem;
 }
 
 .video-overlay-sub {
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
   color: var(--text-3);
 }
 
-.host-ended {
-  color: var(--err);
-  font-weight: 500;
-  font-size: 1.2rem;
+/* "Starting the picture…": the existing spinner beside one line of text. */
+.video-overlay-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--text-2);
 }
 
 .controls {
@@ -1361,64 +1746,146 @@ input.select-input {
   margin-bottom: 1rem;
 }
 
-/* Quality toggles sit under the start controls rather than in the side panel,
-   so the middle card carries only room options. Bare rows, no card shell. */
-.capture-settings {
-  display: flex;
-  justify-content: center;
-  /* Row gap matches .controls margin-bottom so the start button, resolution,
-     and frame rate rows are evenly spaced once the rows wrap. */
-  gap: 1rem 1.5rem;
+/* ========== LIVE STATUS LINE ==========
+   While sharing, one quiet line under the preview, as wide as the preview: a
+   red dot, Live, the running time and the viewer count on the left, the quality
+   button on the right. It is a .controls row so the rules for the rows under
+   the preview still reach it. The quality button opens a small panel above it
+   with the Resolution and Frame rate groups; the panel is as wide as the line
+   up to 20rem, so it fits a 320px viewport. The sentence "Streaming (...)" is a
+   visually hidden status for assistive technology. */
+.controls.live-status {
+  --live-stage-width: min(
+    100%,
+    var(--media-stage-max-width),
+    max(var(--stage-min-width), (100svh - var(--stage-chrome)) * 16 / 9)
+  );
+  position: relative;
+  box-sizing: border-box;
+  width: var(--live-stage-width);
+  min-height: 2.75rem;
+  margin: 0 auto;
+  flex-direction: row;
   flex-wrap: wrap;
-  margin-bottom: 1rem;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  color: var(--text-2);
+  font-size: var(--fs-small);
 }
 
-.capture-settings .setting-row {
-  margin: 0;
-  padding: 0;
-  background: none;
-  border: none;
-  box-shadow: none;
-  width: auto;
-}
-
-/* Hug the label and select instead of the side panel's fixed label column. */
-.capture-settings .setting-row-inline {
-  grid-template-columns: auto auto;
-  gap: 0.6rem;
-}
-
-/* Short labels ("1080p", "60 fps") do not need the tuning toggle's wider cells. */
-.capture-settings .mode-toggle button {
-  min-width: 5.25rem;
-}
-
-/* A toggle clips its own cells (overflow: hidden), and as a grid item it shrinks
-   below its content instead of pushing the row wider. The Resolution toggle
-   (three 5.25rem cells, 260px) beside its label needs 332px plus the 1rem page
-   padding, so on a viewport narrower than about 365px it was squeezed and the
-   1080p cell was cut off with no way to scroll to it (about half of it at 320px).
-   Below 23em (368px: a few pixels over the exact fit, for labels that render
-   wider in a platform's system font, and under the 375px phones) the label sits
-   above its toggle, which then has the row's full width. em in a media query
-   follows the browser's default font size, as the rem cell widths do. */
-@media (max-width: 23em) {
-  .capture-settings .setting-row-inline {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0.35rem;
-  }
-}
-
-.status-bar {
+.live-status-text {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  justify-content: center;
   flex-wrap: wrap;
-  width: min(100%, var(--media-stage-max-width));
-  margin: 0 auto;
+  gap: 0 0.35rem;
+  min-width: 0;
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  margin-right: 0.15rem;
+  border-radius: 50%;
+  background: var(--err);
+}
+
+.live-word {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.live-timer {
+  font-variant-numeric: tabular-nums;
+}
+
+.live-status .viewer-count {
+  display: inline;
+  padding-top: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+.live-status .room-meta {
+  margin: 0 0 0 0.35rem;
+  font-size: inherit;
+}
+
+.quality-control {
+  margin-left: auto;
+}
+
+.quality-button {
+  min-height: 2.25rem;
+  padding: 0.35rem 0.75rem;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.quality-chevron {
+  flex: none;
+}
+
+.quality-button[aria-expanded="true"] .quality-chevron {
+  transform: rotate(180deg);
+}
+
+.quality-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.5rem);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  box-sizing: border-box;
+  width: min(20rem, 100%);
+  padding: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-lg);
+  background: var(--surface-glass-accent), var(--surface-glass);
+  box-shadow: var(--shadow-card);
+}
+
+.quality-menu[hidden] {
+  display: none;
+}
+
+.quality-menu-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.quality-menu-label {
   color: var(--text-3);
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
+}
+
+/* The groups fill the panel and size their cells to the panel, not to the
+   6.4rem of the page's other toggles, so three cells fit at 320px. */
+.quality-menu .mode-toggle {
+  display: flex;
+  width: 100%;
+  box-shadow: none;
+}
+
+.quality-menu .mode-toggle button {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 2.25rem;
+  padding: 0.4rem 0.5rem;
+  font-size: var(--fs-small);
+}
+
+/* Stop sits under the invite card, away from the quality button, as wide as the
+   card. A direct row of the host grid: below 900px it follows the card, from
+   900px it is the second row of the card's column (see the invite card rules). */
+.host-stop {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  font-size: var(--fs-small);
 }
 
 .status-dot {
@@ -1449,7 +1916,7 @@ input.select-input {
 .media-status {
   text-align: center;
   color: var(--text-3);
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
   margin-top: 0.25rem;
 }
 
@@ -1469,66 +1936,600 @@ input.select-input {
   }
 }
 
-/* ========== HOST LAYOUT ========== */
-.host-layout {
+/* ========== WATCH STAGE ==========
+   The viewer's joined view: the picture as large as the window allows, with its
+   own control bar on it. The bar fades while the picture plays and nobody uses
+   it; it is hidden with opacity only, so the keyboard, touch and the tests can
+   always reach its buttons. From 640px down it sits under the picture instead. */
+.view-container.watch-live {
+  padding-block: 12px;
+}
+
+/* Joined, the window is the top bar and the picture (--stage-chrome on
+   .watch-video budgets nothing else); the footer would push the page into a
+   scrollbar. It is back as soon as the viewer leaves the room, and phones,
+   whose page scrolls anyway, keep it. */
+@media (min-width: 641px) {
+  .app-layout:has(.watch-live) .site-footer {
+    display: none;
+  }
+}
+
+/* "Fit to page": back inside the page margins, at most 1040px wide. */
+.watch-video.is-fit {
+  max-width: 65rem;
+}
+
+.watch-video:fullscreen {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  aspect-ratio: auto;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg-0);
+}
+
+/* The <video>, its overlays and the notices; the stage itself draws the frame. */
+.watch-picture {
+  position: absolute;
+  inset: 0;
+}
+
+/* Notices, the media-control line and "Tap for sound", top centre. */
+.watch-top {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(90%, 40rem);
   display: flex;
-  gap: var(--host-panel-gap);
-  align-items: flex-start;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.watch-notices {
+  display: grid;
+  gap: 0.5rem;
+  width: 100%;
+  border-radius: var(--radius);
+  background: var(--bg-1);
+}
+
+.watch-notices .alert {
+  margin: 0;
+}
+
+.watch-control-status {
+  margin: 0;
+  padding: 0.25rem 0.75rem;
+  border-radius: var(--radius-pill);
+  background: var(--bg-1);
+  color: var(--text-2);
+}
+
+.watch-sound-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: var(--tap-min);
+  padding: 0 1rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface-button-quiet);
+  color: var(--text-1);
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.watch-sound-chip:hover {
+  border-color: var(--border-focus);
+}
+
+.watch-controls {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  padding: 12px 16px;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+/* The bottom-to-top shade that keeps the bar readable on a bright picture. */
+.watch-controls::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: -1;
+  height: 96px;
+  min-height: 100%;
+  background: linear-gradient(to top, rgba(10, 10, 12, 0.85), transparent);
+  pointer-events: none;
+}
+
+/* Shown while nothing plays, after recent input (.controls-shown, set by
+   WatchView), while the pointer is over the stage, and while keyboard focus
+   is inside it. */
+.watch-video.controls-shown .watch-controls,
+.watch-video:has(:focus-visible) .watch-controls {
+  opacity: 1;
+}
+
+@media (hover: hover) {
+  .watch-video:hover .watch-controls {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .watch-controls {
+    transition: none;
+  }
+}
+
+.watch-controls-info,
+.watch-controls-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.watch-controls-actions {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.watch-live-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: var(--surface-button-stop);
+  color: var(--text-1);
+  font-size: var(--fs-label);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.watch-room-code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  color: var(--text-1);
+  letter-spacing: 0.06em;
+}
+
+.watch-status {
+  position: relative;
+}
+
+.watch-status-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--tap-min);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.watch-status-panel {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.25rem);
+  width: max-content;
+  max-width: min(20rem, 80vw);
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-glass-accent), var(--surface-glass);
+  box-shadow: var(--shadow-card);
+  color: var(--text-2);
+  font-size: var(--fs-label);
+}
+
+.watch-status-panel[hidden] {
+  display: none;
+}
+
+.watch-status-numbers {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  gap: 0.25rem 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.watch-status-numbers dt {
+  color: var(--text-3);
+}
+
+.watch-status-numbers dd {
+  margin: 0.15rem 0 0;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+}
+
+.watch-status-sentence {
+  margin: 0;
+}
+
+.watch-btn {
+  min-height: var(--tap-min);
+  padding: 0 1rem;
+}
+
+.watch-btn-icon {
+  width: var(--tap-min);
+  padding: 0;
+}
+
+/* Icon buttons keep their text as their name, out of sight on the picture. */
+.watch-btn-icon .watch-btn-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.watch-icon {
+  flex: 0 0 auto;
+}
+
+.watch-turn-hint {
+  display: none;
+}
+
+/* Phones: the picture keeps the page margin and its corners, and the controls
+   sit under it - one line of status, then sound, full screen and leave as three
+   large buttons, then anything else. */
+@media (max-width: 640px) {
+  .watch-video {
+    aspect-ratio: auto;
+    overflow: visible;
+    background: none;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .watch-picture {
+    position: relative;
+    inset: auto;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--panel-shell-radius);
+  }
+
+  .watch-video .watch-controls {
+    position: static;
+    display: grid;
+    gap: 0.75rem;
+    padding: 0.75rem 0 0;
+    opacity: 1;
+  }
+
+  .watch-controls::before {
+    display: none;
+  }
+
+  .watch-controls-info {
+    flex-wrap: nowrap;
+  }
+
+  .watch-status {
+    order: 1;
+  }
+
+  .watch-room-code {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .watch-controls-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-left: 0;
+  }
+
+  .watch-controls-actions .watch-btn {
+    grid-column: 1 / -1;
+    order: 1;
+  }
+
+  .watch-controls-actions .watch-btn-main {
+    grid-column: auto;
+    order: 0;
+    flex-direction: column;
+    gap: 0.25rem;
+    width: auto;
+    min-width: 0;
+    min-height: 3rem;
+    padding: 0.4rem 0.25rem;
+    font-size: var(--fs-label);
+    white-space: normal;
+    text-align: center;
+  }
+
+  .watch-btn-icon .watch-btn-text {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
+  }
+
+  .watch-btn-fit {
+    display: none;
+  }
+
+  .watch-video:fullscreen {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 1rem;
+  }
+}
+
+@media (max-width: 640px) and (orientation: portrait) {
+  .watch-turn-hint {
+    display: block;
+    margin: 0;
+    font-size: var(--fs-small);
+    color: var(--text-3);
+    text-align: center;
+  }
+}
+
+/* The picture's states (starting, waiting for the host, the host dropped out,
+   ended): a readable title, one plain line and, where there is one, the next
+   step. They sit on .video-overlay, which dims what is behind them. */
+.watch-state-title {
+  margin: 0;
+  font-size: var(--fs-heading);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.watch-state-sub {
+  margin: 0;
+  max-width: 28rem;
+  font-size: var(--fs-small);
+  color: var(--text-2);
+}
+
+.watch-state-actions {
+  display: flex;
+  flex-wrap: wrap;
   justify-content: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+/* The last picture, kept behind "The host dropped out": above the <video>,
+   under the overlays. A canvas 0 wide holds no frame and stays out of sight. */
+.watch-last-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.watch-last-frame[hidden],
+.watch-last-frame[width="0"] {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .watch-state-title {
+    font-size: var(--fs-body);
+  }
+}
+
+/* ========== HOST LAYOUT ==========
+   One column on a phone or tablet: tabs, preview, settings panel, alerts,
+   diagnostics. From 900px the preview and the settings panel sit side by side
+   under the tabs; the preview alone sets the height of that row, and the panel
+   is exactly as tall (see .host-settings-panel). The preview column is as wide
+   as the stage the height budget allows, so the panel stays next to it. */
+.host-layout {
+  --host-stage-width: min(
+    800px,
+    max(var(--stage-min-width), (100svh - var(--stage-chrome)) * 16 / 9)
+  );
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem var(--host-panel-gap);
   margin-top: var(--row-gap);
 }
 
+.host-layout > .source-tabs-row,
+.host-layout > .alert,
+.host-layout > .host-diagnostics {
+  grid-column: 1 / -1;
+}
+
+.host-layout > .alert,
+.host-layout > .host-diagnostics {
+  margin: 0;
+}
+
+@media (min-width: 900px) {
+  .host-layout {
+    grid-template-columns: minmax(0, var(--host-stage-width)) auto;
+    justify-content: center;
+  }
+}
+
 .host-video-section {
-  flex: 1;
-  max-width: 720px;
   min-width: 0;
 }
 
+/* The settings panel ends where the preview ends, so nothing may hang below it. */
+.host-video-section .video-container {
+  margin-bottom: 0;
+}
+
+.host-video-section .video-container + .controls {
+  margin-top: 0.5rem;
+}
+
+/* The capture source is the first choice on the host page: two tabs above the
+   preview. The radio inputs stay in the tab (invisible, covering it) so a click
+   anywhere on a tab is a click on its radio and the arrow keys move between
+   them. The group looks like .mode-toggle but is not one: the host page's
+   toggle cells are listed by that class. */
+.source-tabs-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+
+.source-tabs {
+  display: inline-flex;
+  padding: 2px;
+  background: rgba(17, 18, 24, 0.58);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-lg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.source-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  min-width: 7.5rem;
+  padding: 0 1.1rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  color: #9ea6c7;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  transition: all var(--transition);
+}
+
+.source-tab input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+
+.source-tab:has(input:checked) {
+  background: var(--surface-button);
+  border-color: rgba(151, 175, 255, 0.22);
+  box-shadow:
+    0 14px 28px rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+
+.source-tab:has(input:not(:checked):not(:disabled)):hover {
+  color: var(--text-1);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.source-tab:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.source-tab:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.source-tab-icon {
+  flex: none;
+}
+
+.source-tabs-hint {
+  flex: 1 1 12rem;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  line-height: 1.38;
+}
+
+/* The empty preview: what will happen, and the page's one main button. */
+.host-stage-empty {
+  gap: 0.5rem;
+}
+
+.host-stage-empty-icon {
+  color: var(--text-3);
+}
+
+.host-stage-empty-title {
+  color: var(--text-1);
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+.host-stage-empty .controls {
+  margin: 0.5rem 0 0;
+}
+
 .host-side-panel {
-  flex: 0 0 auto;
   width: var(--host-side-card-width);
   max-width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--host-panel-gap);
-  transition: width var(--transition-panel), flex var(--transition-panel);
 }
 
-.host-side-panel:has(.settings-expanded),
-.host-side-panel:has(.streaming-info-row) {
-  width: calc(var(--host-side-card-width) * 2 + var(--host-panel-gap));
-  flex: 0 0 auto;
-}
-
-.streaming-info-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--host-panel-gap);
-  width: 100%;
-}
-
-.streaming-info-row>.room-info,
-.streaming-info-row>.obs-whip-setup-panel {
-  width: 100%;
-}
-
-.host-side-panel>.settings-panel,
-.host-side-panel>.room-info {
-  margin: 0;
-  width: 100%;
-}
-
-.host-side-panel .room-info {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 1rem;
+/* ========== HOST SETTINGS PANEL ==========
+   The one quiet surface on the host page: flat rows, hairlines between groups,
+   no shadow and no hover change. Its height is the preview's: height 0 with a
+   min-height of 100% takes none of the row's height, so the content scrolls
+   inside .host-settings-body instead of making the panel taller. */
+.settings-wrapper {
+  position: relative;
 }
 
 /* Host sign-in: the card a host on another computer gets in place of the room
-   settings (HostSignInPanel). It is a .settings-panel, so only its own text and
-   spacing are set here. */
+   settings (HostSignInPanel). It takes the settings panel's place and look. */
+.host-sign-in {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 13px 14px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, rgba(35, 36, 46, 0.5), rgba(24, 24, 31, 0.5));
+}
+
 .host-sign-in-text {
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   line-height: 1.5;
   color: var(--text-2);
   margin-bottom: 0.75rem;
@@ -1552,7 +2553,7 @@ input.select-input {
   margin-top: 1rem;
 }
 
-/* "Signed in with the host password" and its Sign out button, under the settings card. */
+/* "Signed in with the host password" and its Sign out button, under the settings panel. */
 .host-session-row {
   display: flex;
   align-items: center;
@@ -1560,77 +2561,420 @@ input.select-input {
   flex-wrap: wrap;
   gap: 0.5rem 0.75rem;
   padding: 0 0.25rem;
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
   color: var(--text-2);
 }
 
-.room-info {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  width: min(100%, var(--media-stage-max-width));
-  position: relative;
-  overflow: hidden;
-  isolation: isolate;
-  background: var(--surface-glass-accent), var(--surface-glass);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--panel-shell-radius);
-  box-shadow: var(--shadow-card);
-  padding: 1.25rem 1.5rem;
-  margin: 0 auto 1rem;
-}
-
-.room-info::before {
-  content: '';
-  position: absolute;
-  inset: 0 0 auto;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
-  opacity: 0.7;
-  pointer-events: none;
-}
-
-.room-info>* {
-  position: relative;
-  z-index: 1;
-}
-
-.room-info h3 {
-  font-size: 1rem;
-  margin: 0 0 0.5rem;
-}
-
-.room-code-display {
+.host-settings-panel {
+  --panel-hairline: 1px solid rgba(255, 255, 255, 0.06);
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  width: 100%;
+  height: 0;
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 13px 14px 11px;
+  border: var(--panel-hairline);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, rgba(35, 36, 46, 0.5), rgba(24, 24, 31, 0.5));
+  overflow: hidden;
 }
 
-.room-links-row {
+/* The 3px of padding keeps a focus ring from being clipped at the scroll edge. */
+.host-settings-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: -3px;
+  padding: 3px;
   display: flex;
-  gap: 0.85rem 2rem;
-  margin-top: 1rem;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 11px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.host-settings-body > * {
+  flex: none;
+}
+
+.host-settings-body > * + * {
+  padding-top: 11px;
+  border-top: var(--panel-hairline);
+}
+
+.host-settings-panel .settings-group {
+  display: grid;
+  gap: 11px;
+}
+
+.host-settings-panel .settings-group[hidden] {
+  display: none;
+}
+
+.host-settings-panel .setting-row,
+.host-settings-panel .setting-row:hover {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+}
+
+.host-settings-panel .setting-row .setting-row-label {
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  line-height: 1.3;
+}
+
+.host-settings-panel .select-input {
+  min-height: 32px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  box-shadow: none;
+  font-size: var(--fs-small);
+}
+
+.host-settings-panel .select-input::placeholder {
+  color: var(--text-3);
+}
+
+/* A switch row: the label on the left, the switch on the right. The checkbox is
+   the switch (not hidden), so it stays a real control and its own click target. */
+.host-settings-panel .setting-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 20px;
+  color: var(--text-2);
+  font-size: var(--fs-label);
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.host-settings-panel .setting-switch:has(input:disabled) {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+
+.host-settings-panel .setting-switch input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: none;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  border-radius: var(--radius-pill);
+  background: #33333d;
+  cursor: inherit;
+  transition: background var(--transition);
+}
+
+.host-settings-panel .setting-switch input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform var(--transition);
+}
+
+.host-settings-panel .setting-switch input[type='checkbox']:checked {
+  background: var(--accent);
+}
+
+.host-settings-panel .setting-switch input[type='checkbox']:checked::after {
+  transform: translateX(14px);
+}
+
+.host-settings-panel .setting-switch input[type='checkbox']:disabled {
+  opacity: 0.45;
+}
+
+.host-settings-panel .setting-switch input[type='checkbox']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.host-settings-panel .setting-note {
+  color: var(--text-3);
+  font-size: var(--fs-label);
+  line-height: 1.3;
+}
+
+/* Picture rows while "Set OBS up for me" is off: OBS keeps its own settings, so
+   the buttons do nothing. The line under them says why. */
+.host-settings-panel .setting-row-off {
+  opacity: 0.45;
+}
+
+.host-settings-panel .capture-settings > .setting-note {
+  font-size: var(--fs-small);
+}
+
+/* Rarely used options: the last row, pinned to the bottom of the panel. */
+.host-more-options {
+  margin-top: auto;
+}
+
+.host-more-options summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 20px;
+  color: var(--text-2);
+  font-size: var(--fs-label);
+  cursor: pointer;
+  list-style: none;
+}
+
+.host-more-options summary::-webkit-details-marker {
+  display: none;
+}
+
+.host-more-options summary::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin-right: 3px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform var(--transition);
+}
+
+.host-more-options[open] summary::after {
+  transform: translateY(1px) rotate(-135deg);
+}
+
+.host-more-options[open] > .settings-group {
+  margin-top: 11px;
+}
+
+/* In OBS mode the room rows follow the three OBS switches, set off by a hairline. */
+.host-more-options .more-options-room {
+  padding-top: 11px;
+  border-top: var(--panel-hairline);
+}
+
+/* The invite card and, in OBS mode, the manual OBS setup under it are items
+   of the side panel's column; their wrapper adds no box. */
+.invite-column {
+  display: contents;
+}
+
+.streaming-info-row>.obs-manual-details {
+  width: 100%;
+  margin: 0;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--panel-shell-radius);
+  background: var(--surface-glass);
 }
 
 .viewer-count {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  font-size: 0.825rem;
+  font-size: var(--fs-small);
   color: var(--text-3);
   padding-top: 0.25rem;
   flex-wrap: wrap;
 }
 
 .room-meta {
-  font-size: 0.7rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
   margin-top: 0.25rem;
 }
 
+/* ========== INVITE CARD ==========
+   While a room is open the invite card sits beside the preview, about 350px
+   wide: the room code, then one row per link, the one to share marked and
+   given the page's one main button. From 900px it has the preview's top and
+   bottom, by the technique of the settings panel: the preview alone sets the
+   height of its grid row, so the Stop row and the status line under it become
+   rows of the host grid (the section adds no box), and the card has height 0
+   and a min-height of 100%, so the link list scrolls inside it if it ever
+   overflows. While the settings panel (a room waiting for Resume Sharing) or
+   the manual OBS setup shares the column, the card takes its natural height. */
+@media (min-width: 900px) {
+  .host-layout:has(.invite-card) {
+    row-gap: 0;
+  }
+
+  .host-layout:has(.invite-card) > .host-video-section {
+    display: contents;
+  }
+
+  .host-layout:has(.invite-card) > .host-video-section > * {
+    grid-column: 1;
+    min-width: 0;
+    order: 1;
+  }
+
+  .host-layout:has(.invite-card) > .host-video-section > .video-container {
+    order: 0;
+  }
+
+  /* The rows the grid gap spaced before it was taken out of this layout. */
+  .host-layout:has(.invite-card) > .source-tabs-row {
+    margin-bottom: 0.5rem;
+  }
+
+  .host-layout:has(.invite-card) > .alert,
+  .host-layout:has(.invite-card) > .host-diagnostics {
+    order: 1;
+    margin-top: 0.5rem;
+  }
+
+  .host-side-panel:has(.invite-card) {
+    width: 21.875rem;
+  }
+
+  /* Stop is under the card, in the row of the status line. */
+  .host-layout > .host-stop {
+    grid-column: 2;
+    order: 1;
+    align-self: start;
+  }
+
+  .host-layout:has(.invite-card) > .host-stop {
+    margin-top: 0.5rem;
+  }
+
+  .host-side-panel:has(.host-settings-panel) {
+    width: var(--host-side-card-width);
+  }
+}
+
+.invite-card {
+  --invite-hairline: 1px solid rgba(255, 255, 255, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  height: 0;
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--panel-shell-radius);
+  background: var(--surface-glass-accent), var(--surface-glass);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.host-side-panel:has(.host-settings-panel, .obs-manual-details) .invite-card {
+  height: auto;
+  min-height: 0;
+}
+
+.invite-card > * {
+  flex: none;
+}
+
+.invite-card-title {
+  margin: 0;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-1);
+}
+
+.invite-code .copy-field-label {
+  font-size: var(--fs-label);
+  color: var(--text-3);
+}
+
+.invite-code .copy-field-copy {
+  align-self: end;
+}
+
+.invite-code > .copy-field-value {
+  font-size: var(--fs-title);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+/* The 6px of inline padding keeps the main button's ring and the focus rings
+   from being clipped at the scroll edge. */
+.invite-card > .invite-links {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-inline: -6px;
+  padding-inline: 6px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.invite-link {
+  flex: none;
+  padding-block: 10px;
+  border-top: var(--invite-hairline);
+}
+
+.invite-link .copy-field-label {
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.invite-link > .copy-field-value {
+  font-size: var(--fs-label);
+  line-height: 18px;
+}
+
+.invite-tag {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid rgba(60, 203, 127, 0.5);
+  border-radius: var(--radius);
+  color: #a9ecc8;
+  font-size: var(--fs-label);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.invite-card .copy-field-main {
+  min-height: 44px;
+  height: 44px;
+  margin-top: 7px;
+}
+
+.invite-note {
+  margin: 0;
+  padding-top: 10px;
+  border-top: var(--invite-hairline);
+  color: var(--text-3);
+  font-size: var(--fs-small);
+  line-height: 1.4;
+}
+
 .obs-status-line {
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   margin-bottom: 0.5rem;
 }
 
@@ -1647,7 +2991,7 @@ input.select-input {
 }
 
 .obs-manual-details {
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   margin-bottom: 0.5rem;
 }
 
@@ -1658,10 +3002,6 @@ input.select-input {
 
 .obs-manual-details>div {
   margin-top: 0.5rem;
-}
-
-.obs-manual-field {
-  margin-bottom: 0.5rem;
 }
 
 .obs-manual-note {
@@ -1677,8 +3017,135 @@ input.select-input {
   margin-bottom: 0.75rem;
 }
 
-.obs-connection-status {
-  margin-top: 0.5rem;
+/* The three OBS setup steps in the preview: a numbered list before sharing,
+   with a state per row from Start Sharing until OBS streams. */
+.obs-steps {
+  list-style: none;
+  width: 100%;
+  max-width: 22rem;
+  margin: 0 auto;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+
+.obs-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.obs-step-marker {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  color: var(--text-2);
+}
+
+.obs-step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  font-size: var(--fs-label);
+  font-weight: 600;
+  line-height: 1;
+}
+
+.obs-step.is-done .obs-step-marker,
+.obs-step.is-done .obs-step-state {
+  color: var(--ok);
+}
+
+.obs-step.is-working .obs-step-marker {
+  color: var(--info);
+}
+
+.obs-step.is-attention .obs-step-marker,
+.obs-step.is-attention .obs-step-state {
+  color: var(--warn);
+}
+
+.obs-step-spinner {
+  animation: spin 0.9s linear infinite;
+}
+
+.obs-step-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.obs-step-label {
+  color: var(--text-1);
+  font-size: var(--fs-small);
+  line-height: 1.3;
+}
+
+.obs-step-hint {
+  color: var(--text-2);
+  font-size: var(--fs-label);
+  line-height: 1.3;
+}
+
+.obs-step-state {
+  flex: none;
+  color: var(--text-2);
+  font-size: var(--fs-label);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .obs-step-spinner {
+    animation: none;
+  }
+}
+
+/* While sharing, the steps sit between the title and the setup's one status
+   line. A long status message scrolls inside the preview rather than past it. */
+.obs-setup-overlay {
+  gap: 0.6rem;
+  justify-content: safe center;
+  overflow-y: auto;
+}
+
+.obs-setup-overlay>p {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.obs-setup-overlay .obs-status-line {
+  max-width: 28rem;
+  margin: 0;
+}
+
+.obs-setup-overlay .obs-retry-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 0;
+}
+
+.obs-manual-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--fs-label);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.obs-manual-link:hover {
+  color: var(--accent-hover);
 }
 
 .input-textarea {
@@ -1705,36 +3172,165 @@ input.select-input {
 .join-form {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 0.65rem;
+  align-items: stretch;
+  gap: 1rem;
   margin-top: 3rem;
 }
 
+.join-card {
+  width: 100%;
+  max-width: 26rem;
+  margin: clamp(1.5rem, 8vh, 4.5rem) auto 0;
+  padding: 1.5rem;
+  background: var(--surface-glass-accent), var(--surface-glass);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--panel-shell-radius);
+  box-shadow: var(--shadow-card);
+}
+
+.join-card h1 {
+  font-size: var(--fs-title);
+  text-align: center;
+}
+
 .join-hint {
-  font-size: 0.78rem;
-  color: var(--text-3);
+  font-size: var(--fs-small);
+  color: var(--text-2);
   text-align: center;
 }
 
 .join-field {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 0.35rem;
+  align-items: stretch;
+  gap: 0.5rem;
   width: 100%;
   max-width: 100%;
 }
 
 .input-label {
-  font-size: 0.78rem;
+  font-size: var(--fs-label);
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .input-code[aria-invalid='true'] {
   border-color: var(--err);
+}
+
+.field-error {
+  color: #f5a3a3;
+  font-size: var(--fs-small);
+  text-align: center;
+}
+
+.join-card .field-error {
+  font-size: var(--fs-small);
+}
+
+.join-step-note {
+  font-size: var(--fs-small);
+  color: var(--text-2);
+}
+
+.join-passphrase {
+  min-height: 2.75rem;
+  text-align: left;
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+}
+
+.join-passphrase[aria-invalid='true'] {
+  border-color: var(--err);
+}
+
+.join-paste-hint {
+  font-size: var(--fs-small);
+  color: var(--text-3);
+  text-align: center;
+}
+
+.join-link {
+  align-self: center;
+  padding: 0.5rem;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: var(--fs-small);
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* The six boxes are decoration; the real input lies over them, transparent. */
+.code-entry {
+  position: relative;
+  border-radius: var(--radius);
+}
+
+.code-entry:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.code-boxes {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+
+.code-box {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 3rem;
+  height: 3.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.code-box:nth-child(3) {
+  margin-right: 8px;
+}
+
+.code-entry:focus-within .code-box[data-active] {
+  border: 2px solid var(--accent);
+}
+
+.code-entry:has(input[aria-invalid='true']) .code-box,
+.code-entry:has(input[aria-invalid='true']):focus-within .code-box[data-active] {
+  border-color: var(--err);
+}
+
+.code-entry .input-code {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: transparent;
+  caret-color: transparent;
+}
+
+.code-entry .input-code:focus {
+  outline: none;
+}
+
+@media (max-width: 640px) {
+  .join-card {
+    padding: 1rem;
+  }
 }
 
 /* The alert is a flex row, so the message and this disclosure sat side by side
@@ -1756,25 +3352,6 @@ input.select-input {
   white-space: normal;
 }
 
-.input-group {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.advanced-settings {
-  margin-top: 0.85rem;
-  border-top: 1px solid var(--border);
-  padding-top: 0.7rem;
-}
-
-/* First block in the panel, so it needs no separator above it. */
-.advanced-settings-lead {
-  margin-top: 0;
-  border-top: none;
-  padding-top: 0;
-}
-
 /* ========== STATUS PAGE ========== */
 .status-container {
   max-width: 960px;
@@ -1793,7 +3370,7 @@ input.select-input {
 }
 
 .status-head h1 {
-  font-size: 1.25rem;
+  font-size: var(--fs-heading);
   font-weight: 600;
 }
 
@@ -1810,13 +3387,13 @@ input.select-input {
 
 .stat-card {
   padding: 1rem 1.1rem;
-  border-radius: var(--radius-xl);
-  border: 1px solid var(--border);
-  background: var(--bg-1);
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--surface-glass-accent), var(--surface-glass);
 }
 
 .stat-value {
-  font-size: 1.6rem;
+  font-size: var(--fs-title);
   font-weight: 650;
   font-family: var(--font-mono);
   color: var(--text-1);
@@ -1824,7 +3401,7 @@ input.select-input {
 }
 
 .stat-label {
-  font-size: 0.72rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -1858,7 +3435,7 @@ input.select-input {
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8rem;
+  font-size: var(--fs-small);
 }
 
 .data-table th,
@@ -1870,7 +3447,7 @@ input.select-input {
 }
 
 .data-table th {
-  font-size: 0.68rem;
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-3);
@@ -1896,7 +3473,103 @@ input.select-input {
   padding: 2rem;
   text-align: center;
   color: var(--text-3);
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
+}
+
+.status-health {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0;
+  color: var(--text-2);
+}
+
+.status-updated {
+  margin-left: auto;
+  font-size: var(--fs-small);
+  color: var(--text-3);
+}
+
+.status-head h1 {
+  font-size: var(--fs-title);
+}
+
+.status-headline-stats {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.status-headline-stats .stat-value {
+  font-size: var(--fs-title);
+}
+
+.status-headline-stats .stat-label {
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.status-rooms {
+  list-style: none;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-glass-accent), var(--surface-glass);
+}
+
+.status-rooms li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.status-rooms li:last-child {
+  border-bottom: none;
+}
+
+.status-room-code {
+  color: var(--text-1);
+}
+
+.status-room-age {
+  margin-left: auto;
+}
+
+.status-more > summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+  color: var(--text-2);
+  margin-bottom: 0.75rem;
+}
+
+@media (max-width: 640px) {
+  .status-headline-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .status-headline-stats .stat-card {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+  }
+
+  .status-headline-stats .stat-label {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 639px) {
+  .status-rooms li > :nth-child(3) {
+    flex-basis: 100%;
+  }
 }
 
 .status-error-card {
@@ -1908,11 +3581,48 @@ input.select-input {
   border: 1px solid var(--border);
   background: var(--bg-1);
   color: var(--text-2);
-  font-size: 0.875rem;
+  font-size: var(--fs-small);
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
   align-items: center;
+}
+
+/* ========== TOUCH TARGETS ========== */
+/* A finger needs about 44px. A mouse on a larger screen keeps the compact
+   layout the Host page needs to fit a laptop without scrolling. */
+@media (max-width: 640px), (pointer: coarse) {
+  :where(.btn, .btn-small) {
+    min-height: var(--tap-min);
+  }
+
+  .footer-links a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--tap-min);
+    padding-inline: 0.5rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .site-footer-inner {
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.25rem;
+    text-align: center;
+  }
+
+  .footer-links {
+    flex-wrap: nowrap;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+
+  .footer-links a {
+    font-size: var(--fs-small);
+    color: var(--text-2);
+  }
 }
 
 /* ========== MODAL ========== */
@@ -1937,7 +3647,7 @@ input.select-input {
   flex-direction: column;
   gap: 0.8rem;
   padding: 1.35rem 1.45rem 1.45rem;
-  border-radius: 24px;
+  border-radius: var(--panel-shell-radius);
   border: 1px solid rgba(255, 255, 255, 0.1);
   background:
     radial-gradient(circle at top right, rgba(91, 141, 239, 0.16), transparent 34%),
@@ -1955,7 +3665,7 @@ input.select-input {
 }
 
 .settings-modal-eyebrow {
-  font-size: 0.72rem;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -1965,13 +3675,13 @@ input.select-input {
 
 .settings-modal-head h3 {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: var(--fs-heading);
   color: var(--text-1);
 }
 
 .settings-modal-head p {
   margin: 0.45rem 0 0;
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   color: rgba(236, 236, 240, 0.66);
   max-width: 42ch;
   line-height: 1.55;
@@ -2014,13 +3724,13 @@ input.select-input {
 }
 
 .center-page h1 {
-  font-size: 1.5rem;
+  font-size: var(--fs-title);
   font-weight: 650;
 }
 
 .center-page p {
   color: var(--text-2);
-  font-size: 0.9rem;
+  font-size: var(--fs-small);
   max-width: 44ch;
 }
 
@@ -2032,9 +3742,43 @@ input.select-input {
   margin-top: 0.5rem;
 }
 
+/* Host page on a touch device that cannot capture a screen. */
+.cannot-share {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  max-width: 26rem;
+  margin: 8vh auto 0;
+  padding: 0 16px;
+  text-align: center;
+}
+
+.cannot-share h2 {
+  font-size: var(--fs-heading);
+}
+
+.cannot-share p {
+  font-size: var(--fs-body);
+  color: var(--text-2);
+}
+
+.cannot-share .btn {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 640px) {
+  .cannot-share .btn {
+    width: 100%;
+  }
+}
+
 .center-page-code {
   font-family: var(--font-mono);
-  font-size: 0.75rem;
+  font-size: var(--fs-label);
   color: var(--text-3);
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -2046,83 +3790,9 @@ input.select-input {
 
 /* ========== RESPONSIVE ==========
 
-   The host page has three tiers, because its two settings cards are the widest
-   thing in the app:
-
-     >= 1280px  video stage beside both settings cards, side by side
-     900-1280px video stage beside one settings column, OBS card stacked under it
-     < 900px    everything in a single column
-
-   1280px is the width where two side-by-side cards still leave the stage above
-   560px, so the cards stop sharing a row there rather than where the whole
-   layout stacks. Keeping them side by side for as long as possible also keeps
-   the page short: stacked, the two cards sum their heights instead of the taller
-   one winning, which costs ~440px of vertical space. */
-@media (max-width: 1279px) {
-
-  .settings-wrapper,
-  .settings-wrapper.settings-expanded {
-    display: block;
-    width: 100%;
-  }
-
-  .settings-wrapper.settings-expanded .settings-panel {
-    width: 100%;
-    height: auto;
-  }
-
-  /* The OBS card leaves its second column and reveals downward instead. */
-  .settings-wrapper .settings-panel.obs-config-panel {
-    position: relative;
-    left: auto;
-    top: auto;
-    bottom: auto;
-    width: 100%;
-    max-height: 0;
-    margin-top: -0.6rem;
-    opacity: 0;
-    visibility: hidden;
-    transform: translateY(-14px);
-    clip-path: inset(0 0 100% 0 round 18px);
-    filter: none;
-    transition:
-      max-height var(--transition-panel),
-      margin-top var(--transition-panel),
-      opacity var(--transition-panel),
-      transform var(--transition-panel),
-      clip-path var(--transition-panel),
-      visibility 0s linear var(--transition-panel);
-  }
-
-  /* max-height has to clear the card's natural height or the reveal clips it.
-     The card measures 541px with every row present; 46rem leaves headroom for
-     the AV1 hint text without making the collapse look like it starts late. */
-  .settings-wrapper.settings-expanded .settings-panel.obs-config-panel {
-    max-height: 46rem;
-    margin-top: 0;
-    opacity: 1;
-    visibility: visible;
-    transform: translateY(0);
-    clip-path: inset(0 0 0 0 round 18px);
-    transition:
-      max-height var(--transition-panel),
-      margin-top var(--transition-panel),
-      opacity var(--transition-panel),
-      transform var(--transition-panel),
-      clip-path var(--transition-panel),
-      visibility 0s linear 0s;
-  }
-
-  .streaming-info-row {
-    grid-template-columns: 1fr;
-  }
-
-  /* The side panel is one card wide again, so it must not keep reserving two. */
-  .host-side-panel:has(.settings-expanded),
-  .host-side-panel:has(.streaming-info-row) {
-    width: var(--host-side-card-width);
-  }
-}
+   The host page has two tiers: from 900px the video stage and the settings
+   panel sit side by side; below that everything is one full-width column. The
+   invite card shown while sharing follows the same two tiers (see INVITE CARD). */
 
 /* Laptop-height viewports. The clamps above already shrink the page padding and
    the row rhythm; this trims the fixed chrome around them - nav, footer, page
@@ -2130,19 +3800,18 @@ input.select-input {
    or 720px screen without a scrollbar. Nothing is hidden, only tightened. */
 @media (max-height: 820px) {
   :root {
-    /* The stage gives up height in step with everything else, otherwise it
-       becomes the tallest column and undoes the savings. Because the stage is
-       16:9, this token is "viewport height minus stage height" for as long as
-       the stage is above --stage-min-width, so it only needs to be large enough
-       to keep the stage shorter than the settings column beside it - going
-       further just shrinks the preview for nothing. Below the floor the stage
-       stops shrinking, which is a viewport under about 36rem tall. */
-    --stage-chrome: 26rem;
+    /* The page chrome tightens in step with the viewport: 18.5rem measured at
+       1366x768 (17.5rem at 1280x720, where the 740px tier trims it again).
+       Because the stage is 16:9, this token is "viewport height minus stage
+       height" for as long as the stage is above --stage-min-width. Below the
+       floor the stage stops shrinking, which is a viewport under about 36rem
+       tall. */
+    --stage-chrome: 18.75rem;
     --shell-pad-block: clamp(1rem, 3vh, 2.5rem);
   }
 
   .main-nav {
-    padding-block: 0.55rem;
+    padding-block: 0.1rem;
   }
 
   .site-footer {
@@ -2154,27 +3823,20 @@ input.select-input {
   }
 
   .view-header h1 {
-    font-size: 1.1rem;
+    font-size: var(--fs-heading);
   }
 
-  .settings-panel h3,
   .panel-heading {
     margin-bottom: 0.45rem;
   }
 
   .setting-row label,
   .setting-row-label {
-    font-size: 0.84rem;
+    font-size: var(--fs-small);
     line-height: 1.3;
   }
 
-  .setting-row .setting-hint {
-    font-size: 0.72rem;
-    margin-top: 0.15rem;
-  }
-
-  .controls,
-  .capture-settings {
+  .controls {
     margin-bottom: 0.6rem;
   }
 }
@@ -2194,15 +3856,6 @@ input.select-input {
     padding-inline: 0.75rem;
   }
 
-  /* The OBS card carries the longest hints, so it is the taller of the two
-     side-by-side cards and sets the row height for both. */
-  .setting-row .setting-hint {
-    font-size: 0.7rem;
-    line-height: 1.25;
-    margin-top: 0.1rem;
-  }
-
-  .settings-panel h3,
   .panel-heading {
     margin-bottom: 0.3rem;
   }
@@ -2212,25 +3865,51 @@ input.select-input {
   }
 
   .view-header h1 {
-    font-size: 1rem;
+    font-size: var(--fs-body);
+  }
+
+  /* Tighter rows in the settings panel: 8px between rows, 4px between a label
+     and its control. */
+  .host-settings-panel .settings-group {
+    gap: 8px;
+  }
+
+  .host-settings-panel .setting-row,
+  .host-settings-panel .setting-row:hover {
+    gap: 4px;
+  }
+}
+
+/* One column below 900px: the panel and the invite card fill it and take their
+   natural height, so nothing scrolls inside them. */
+@media (max-width: 899px) {
+  .host-side-panel {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .host-settings-panel {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .host-settings-body {
+    overflow-y: visible;
+  }
+
+  .invite-card {
+    height: auto;
+    min-height: 0;
+  }
+
+  .invite-card > .invite-links {
+    overflow-y: visible;
   }
 }
 
 @media (max-width: 900px) {
   .watch-video {
-    max-width: 100%;
-  }
-
-  .host-layout {
-    flex-direction: column;
-  }
-
-  /* Matches the :has() rules above on specificity, which a bare .host-side-panel
-     selector does not - it would lose to them and never apply. */
-  .host-side-panel,
-  .host-side-panel:has(.settings-expanded),
-  .host-side-panel:has(.streaming-info-row) {
-    width: 100%;
     max-width: 100%;
   }
 
@@ -2249,7 +3928,7 @@ input.select-input {
   .settings-modal {
     width: 100%;
     max-height: min(92dvh, 900px);
-    border-radius: 22px 22px 18px 18px;
+    border-radius: var(--panel-shell-radius);
     padding: 1.1rem 1rem 1rem;
   }
 
@@ -2271,22 +3950,8 @@ input.select-input {
 }
 
 @media (max-width: 640px) {
-  .room-info {
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-
-  .room-code-display {
-    align-items: stretch;
-  }
-
   .copy-field-value.copy-field-strong {
-    font-size: 1.25rem;
-  }
-
-  .input-group {
-    flex-direction: column;
-    width: 100%;
+    font-size: var(--fs-heading);
   }
 
   .input-code {
@@ -2298,13 +3963,54 @@ input.select-input {
     align-items: stretch;
   }
 
+  .quality-button {
+    min-height: 44px;
+  }
+
+  .quality-menu .mode-toggle button {
+    min-height: 44px;
+  }
+
+  /* A 200px-tall preview has room for the title and the button only. */
+  .host-stage-empty-icon,
+  .host-stage-empty-sub,
+  .host-stage-empty .obs-steps {
+    display: none;
+  }
+
+  .host-stage-empty .controls {
+    margin-top: 0;
+  }
+
+  .source-tabs-hint {
+    flex-basis: 100%;
+  }
+
+  .nav-menu-button {
+    display: inline-flex;
+  }
+
   .nav-links {
-    gap: 0.9rem;
-    font-size: 0.8rem;
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    flex-wrap: nowrap;
+    gap: 0;
+    padding: 0 var(--shell-pad-inline);
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .nav-links.nav-links-open {
+    display: flex;
   }
 
   .nav-links a {
-    font-size: inherit;
+    font-size: var(--fs-body);
   }
 
   .brand-logo-nav {
@@ -2316,9 +4022,24 @@ input.select-input {
     gap: 0.65rem;
   }
 
-  .room-links-row {
-    flex-direction: column;
-    gap: 0.85rem;
+  /* Every control in the host settings panel is a 44px target. */
+  .mode-toggle-small button {
+    min-height: 44px;
+  }
+
+  .host-settings-panel .select-input {
+    min-height: 44px;
+    height: 44px;
+  }
+
+  .host-settings-panel .setting-switch,
+  .host-more-options summary {
+    min-height: 44px;
+  }
+
+  .copy-field-copy {
+    width: 44px;
+    height: 44px;
   }
 }
 
@@ -2327,19 +4048,11 @@ input.select-input {
 @media (max-width: 400px) {
   .input-code {
     width: 100%;
-    font-size: 0.95rem;
-  }
-
-  .input-group {
-    align-items: stretch;
-  }
-
-  .input-group .btn {
-    width: 100%;
+    font-size: var(--fs-body);
   }
 
   .copy-field-value.copy-field-strong {
-    font-size: 1.1rem;
+    font-size: var(--fs-heading);
   }
 
   .btn-large {
@@ -2347,14 +4060,10 @@ input.select-input {
   }
 
   .video-overlay {
-    font-size: 0.8rem;
-  }
-
-  .room-links-row {
-    gap: 1rem;
+    font-size: var(--fs-small);
   }
 
   .view-header h1 {
-    font-size: 1.5rem;
+    font-size: var(--fs-title);
   }
 }

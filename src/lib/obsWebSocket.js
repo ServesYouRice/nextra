@@ -966,9 +966,13 @@ async function writeEncoderSettingsFile(transaction, writeEncoderSettings, { pro
  *   passed to withObsConnection().
  * @param {object} [opts.encoderResetOptions] - how long to wait for the encoder-reset
  *   test stream to stop ({ stopPollIntervalMs, stopPollAttempts }), for tests.
+ * @param {function} [opts.onProgress] - (stage) => void; called with 'connected' once
+ *   OBS has accepted the connection and with 'configured' once the settings are
+ *   written, before any auto-start. An exception it throws is ignored.
  */
-export async function configureObsStream({ whipUrl, bearerToken, password = '', autoStart = false, videoSettings = null, encoderSettings = null, writeEncoderSettings = null, listEncoders = null, transactionOptions = undefined, connectionOptions = undefined, encoderResetOptions = undefined }) {
+export async function configureObsStream({ whipUrl, bearerToken, password = '', autoStart = false, videoSettings = null, encoderSettings = null, writeEncoderSettings = null, listEncoders = null, transactionOptions = undefined, connectionOptions = undefined, encoderResetOptions = undefined, onProgress = null }) {
     return withObsConnection(password, async (rawSendRequest, done, { signal, onDeadline }) => {
+        try { onProgress?.('connected'); } catch { /* progress is only shown, never needed */ }
         const transaction = createObsConfigurationTransaction(rawSendRequest, transactionOptions);
         const requestedAv1 = String(encoderSettings?.videoCodec || encoderSettings?.encoder || '').toLowerCase() === 'av1';
         const sendRequest = transaction.request;
@@ -1321,6 +1325,7 @@ export async function configureObsStream({ whipUrl, bearerToken, password = '', 
             applied.push('color: 709/Full');
         }
 
+        try { onProgress?.('configured'); } catch { /* progress is only shown, never needed */ }
         // OBS would start with the old mode or encoder, so the start waits for the restart.
         if (autoStart && !restartRequired) {
             // Let OBS finish resetting its video pipeline before starting the output.

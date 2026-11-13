@@ -79,3 +79,11 @@ test('public tunnel startup and failure remain non-blocking local-room warnings'
     assert.deepEqual(failed.blockers, []);
     assert.match(failed.warnings[0].message, /cloudflared missing/);
 });
+
+test('a touch device without screen capture cannot share; every other combination can', async () => {
+    const { deviceCannotShare } = await import('../src/lib/hostPreflight.mjs');
+    assert.equal(deviceCannotShare({ captureApiAvailable: false, coarsePointer: true }), true);
+    assert.equal(deviceCannotShare({ captureApiAvailable: false, coarsePointer: false }), false);
+    assert.equal(deviceCannotShare({ captureApiAvailable: true, coarsePointer: true }), false);
+    assert.equal(deviceCannotShare({ captureApiAvailable: true, coarsePointer: false }), false);
+});

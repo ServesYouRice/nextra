@@ -40,6 +40,15 @@ async function settledBox(page, selector) {
     return previous;
 }
 
+// At phone widths the main links sit behind the Menu button.
+async function mainLink(page, name) {
+    const menuButton = page.getByRole('button', { name: 'Menu' });
+    if ((await menuButton.isVisible()) && (await menuButton.getAttribute('aria-expanded')) !== 'true') {
+        await menuButton.click();
+    }
+    return page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name });
+}
+
 async function horizontalOverflow(page) {
     return page.evaluate(() => ({
         documentScrollWidth: document.documentElement.scrollWidth,
@@ -94,12 +103,12 @@ test('each route sets its own title and user navigation moves focus without stea
     expect(await page.evaluate(() => document.activeElement?.id || '')).not.toBe('main');
     await expect(page.getByTestId('route-announcer')).toHaveText('');
 
-    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'How to Use' }).click();
+    await (await mainLink(page, 'How to Use')).click();
     await expect(page).toHaveTitle('How to Use · Nextra');
     await expect(page.getByTestId('route-announcer')).toHaveText('How to Use');
     await expect.poll(() => page.evaluate(() => document.activeElement?.id || '')).toBe('main');
 
-    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Watch' }).click();
+    await (await mainLink(page, 'Watch')).click();
     await expect(page).toHaveTitle('Watch · Nextra');
     await expect(page.getByTestId('route-announcer')).toHaveText('Watch');
 
@@ -115,7 +124,7 @@ test('the status route renders live metrics instead of the error boundary', asyn
     page.on('pageerror', (err) => pageErrors.push(err.message));
 
     await page.goto('/');
-    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Status' }).click();
+    await (await mainLink(page, 'Status')).click();
 
     await expect(page.getByRole('heading', { name: 'Server Status' })).toBeVisible();
     await expect(page.getByText('Something went wrong')).toHaveCount(0);
@@ -229,6 +238,31 @@ for (const width of REFLOW_WIDTHS) {
     });
 }
 
+for (const width of [320, 375, 390]) {
+    test(`the How to Use page does not scroll sideways at ${width}px once it has rendered`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 800 });
+        await page.goto('/#how-to');
+        await expect(page.getByRole('heading', { name: 'How to use Nextra' })).toBeVisible();
+        const pre = page.locator('.article-step pre').first();
+        await expect(pre).toBeVisible();
+
+        const metrics = await horizontalOverflow(page);
+        expect(metrics.documentScrollWidth, `document at ${width}px`)
+            .toBeLessThanOrEqual(metrics.clientWidth + 1);
+        expect(metrics.bodyScrollWidth, `body at ${width}px`)
+            .toBeLessThanOrEqual(metrics.clientWidth + 1);
+
+        const box = await pre.evaluate((el) => ({
+            scrollWidth: el.scrollWidth,
+            clientWidth: el.clientWidth,
+            right: el.getBoundingClientRect().right,
+            viewport: document.documentElement.clientWidth,
+        }));
+        expect(box.scrollWidth, 'the command block scrolls inside itself').toBeGreaterThan(box.clientWidth);
+        expect(box.right, 'the command block stays inside the viewport').toBeLessThanOrEqual(box.viewport + 1);
+    });
+}
+
 // Selecting OBS ingest adds the OBS card and the tuning-profile toggle to the
 // host page. The loop above never selects it, so a layout that only overflows
 // with OBS on went unnoticed: at 320px the three-cell toggle was wider than the
@@ -256,7 +290,7 @@ for (const width of REFLOW_WIDTHS) {
                 bodyScrollWidth: document.body.scrollWidth,
                 viewportWidth: document.documentElement.clientWidth,
                 stageRight: right('.video-container'),
-                tuningRight: right('.controls .mode-toggle'),
+                tuningRight: right('.capture-settings .mode-toggle[aria-label="Picture preset"]'),
             };
         });
         const label = `host with OBS on at ${width}px (stage right edge ${metrics.stageRight}, tuning toggle ${metrics.tuningRight})`;
@@ -321,7 +355,7 @@ for (const width of TOGGLE_WIDTHS) {
         await settledBox(page, '.video-container');
         await expectHostToggleCellsVisible(
             page,
-            ['OBS tuning profile', 'Resolution', 'Frame rate'],
+            ['Resolution', 'Frame rate', 'Picture preset'],
             `at ${width}px, OBS on`,
         );
     });
@@ -351,6 +385,7 @@ test('every live toggle cell is fully visible at every tested width while sharin
     await page.goto('/#host');
     await page.getByRole('button', { name: 'Start Sharing' }).click();
     await expect(page.getByText(/Streaming \(/)).toBeVisible();
+    await page.getByRole('button', { name: /^Quality/ }).click();
 
     for (const width of TOGGLE_WIDTHS) {
         await page.setViewportSize({ width, height: 800 });
@@ -462,7 +497,6 @@ test('a viewer joining while the leave-host dialog is open keeps focus on the bu
         const viewer = await viewerContext.newPage();
         await viewer.goto(`/#watch/${code}`);
         await viewer.getByRole('button', { name: 'Join Room' }).click();
-        await viewer.getByRole('button', { name: 'Watch Stream' }).click();
         await expect(dialog.getByText(/1 viewer is currently watching/)).toBeVisible();
         await expect(leave).toBeFocused();
         await expect(stay).not.toBeFocused();
@@ -614,20 +648,25 @@ for (const { width, height } of [{ width: 1440, height: 900 }, { width: 1366, he
             await page.goto('/#host');
             await expect(page.locator('.host-side-panel')).toBeVisible();
             const host = await stageWidths(page);
-            // 26rem of chrome from 820px down, 24rem above it.
-            const hostChromeRem = height <= 820 ? 26 : 24;
+            // 18.75rem of chrome from 820px down, 22rem above it.
+            const hostChromeRem = height <= 820 ? 18.75 : 22;
             expect(host.stage.width, `host at ${width}x${height}`)
                 .toBeCloseTo(stageWidthWithoutFloor(host, { chromeRem: hostChromeRem }), 0);
             expect(host.stage.width).toBeGreaterThan(STAGE_MIN_WIDTH_PX);
+            if (width === 1440) {
+                expect(Math.abs(host.stage.width - 800), `host stage at ${width}x${height}`).toBeLessThanOrEqual(1);
+            }
 
             await page.goto(`/#watch/${code}`);
             await page.getByRole('button', { name: 'Join Room' }).click();
             await expect(page.locator('.watch-video')).toBeVisible();
             const watch = await stageWidths(page);
-            // .watch-video brings its own 19rem of chrome and a 60% cap above 900px.
+            // .watch-video keeps only 7rem free, for the top bar and its padding, and has no width cap.
             expect(watch.stage.width, `watch at ${width}x${height}`)
-                .toBeCloseTo(stageWidthWithoutFloor(watch, { chromeRem: 19, maxWidthShare: 0.6 }), 0);
+                .toBeCloseTo(stageWidthWithoutFloor(watch, { chromeRem: 7 }), 0);
             expect(watch.stage.width).toBeGreaterThan(STAGE_MIN_WIDTH_PX);
+            expect(watch.stage.width, `watch share at ${width}x${height}`)
+                .toBeGreaterThan(watch.containerWidth * 0.6);
         } finally {
             await desktopContext.close();
             await hostContext.close();

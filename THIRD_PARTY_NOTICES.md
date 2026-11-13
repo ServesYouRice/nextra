@@ -29,5 +29,14 @@ The pinned archives and their SHA-256 digests are listed in
 - macOS arm64 build (Martin Riedl): https://ffmpeg.martin-riedl.de/ and
   https://git.martin-riedl.de/ffmpeg/build-script
 
+The client bundle includes the Inter and JetBrains Mono typefaces as WOFF2
+files, licensed under the SIL Open Font License 1.1. The license texts are in
+`licenses/Inter-OFL-1.1.txt` and `licenses/JetBrainsMono-OFL-1.1.txt`, obtained
+from the npm packages `@fontsource-variable/inter` and
+`@fontsource-variable/jetbrains-mono`. Upstream projects:
+
+- https://github.com/rsms/inter
+- https://github.com/JetBrains/JetBrainsMono
+
 This notice is informational and does not replace review of the final release
 artifact and its complete dependency licenses.

@@ -44,7 +44,6 @@ test('packaged executable delivers decoded frames after media-worker replacement
 
     await viewerPage.goto(`/#watch/${code}`);
     await viewerPage.getByRole('button', { name: 'Join Room' }).click();
-    await viewerPage.getByRole('button', { name: 'Watch Stream' }).click();
     await expect(viewerPage.getByText(/WebRTC mode active/)).toBeVisible();
     await expect.poll(() => viewerPage.locator('video').evaluate((video) => (
         video.videoWidth > 0

@@ -32,6 +32,12 @@ async function loadViteConfig(env = {}) {
     }
 }
 
+test('the build never inlines assets, so fonts stay same-origin files', async () => {
+    const config = await loadViteConfig();
+
+    assert.equal(config.build.assetsInlineLimit, 0);
+});
+
 test('the dev and preview servers do not allow quick-tunnel hosts by default', async () => {
     const config = await loadViteConfig();
 
