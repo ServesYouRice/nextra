@@ -24,10 +24,16 @@ const mediasoupClientModule = import('../src/lib/mediasoupClient.js');
 
 // OBS's configuration folder with one profile, "Streaming". Returns the folders the
 // server looks in (as APPDATA on Windows, XDG_CONFIG_HOME elsewhere) and the profile.
-function fakeObsConfig(t) {
+// The OBS profile folder in a throwaway config home. `platform` picks where OBS
+// keeps it: under APPDATA (or XDG_CONFIG_HOME) everywhere but macOS, where it
+// is under HOME/Library/Application Support, as lib/obsProfile.js looks for it.
+function fakeObsConfig(t, platform = 'win32') {
     const configHome = fsSync.mkdtempSync(path.join(os.tmpdir(), 'nextra-obs-restore-'));
     t.after(() => fsSync.rmSync(configHome, { recursive: true, force: true }));
-    const dir = path.join(configHome, 'obs-studio', 'basic', 'profiles', 'Streaming');
+    const obsRoot = platform === 'darwin'
+        ? path.join(configHome, 'Library', 'Application Support', 'obs-studio')
+        : path.join(configHome, 'obs-studio');
+    const dir = path.join(obsRoot, 'basic', 'profiles', 'Streaming');
     fsSync.mkdirSync(dir, { recursive: true });
     fsSync.writeFileSync(path.join(dir, 'basic.ini'), '﻿[General]\r\nName=Streaming\r\n\r\n[Output]\r\nMode=Advanced\r\n');
     return { configHome, dir, file: path.join(dir, 'streamEncoder.json'), options: { env: { APPDATA: configHome }, platform: 'win32' } };
@@ -256,7 +262,8 @@ function waitForExit(child, timeoutMs = 10_000) {
 test('the real server puts the settings file back for the local host of an OBS room, and for no one else', { concurrency: false, timeout: 40_000 }, async (t) => {
     const { port, rtcPort } = await claimServerPorts();
     const baseUrl = `http://127.0.0.1:${port}`;
-    const config = fakeObsConfig(t);
+    // The spawned server looks for OBS where this platform keeps it.
+    const config = fakeObsConfig(t, process.platform);
     fsSync.writeFileSync(config.file, encoderFileBefore);
     const distDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-obs-restore-dist-'));
     await fs.writeFile(path.join(distDir, 'index.html'), '<!doctype html><html><body><div id="root"></div></body></html>');
@@ -292,6 +299,7 @@ test('the real server puts the settings file back for the local host of an OBS r
             LOG_LEVEL: 'warn',
             APPDATA: config.configHome,
             XDG_CONFIG_HOME: config.configHome,
+            ...(process.platform === 'darwin' ? { HOME: config.configHome } : {}),
         },
     });
     child.stdout.on('data', (chunk) => { output += chunk.toString(); });
