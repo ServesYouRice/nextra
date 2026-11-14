@@ -114,7 +114,8 @@ test('Copy command puts the three Mac lines on the clipboard', async ({ browser 
         await expect(copy).toBeVisible();
         await copy.click();
 
-        const text = await page.evaluate(() => navigator.clipboard.readText());
+        // The Windows clipboard gives text back with \r\n line ends; the page copies \n.
+        const text = (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, '\n');
         expect(text.startsWith('chmod +x ./Nextra-macos-arm64')).toBe(true);
         expect(text).toBe(MAC_COMMAND);
         await expect(copy).toHaveText('Copied');
