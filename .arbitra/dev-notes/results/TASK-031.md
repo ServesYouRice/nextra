@@ -1,9 +1,0 @@
-TASK-031 (lane netcheck): startup log retention now treats a session and all its rotated generations as one unit. The pruning moved out of lib/startupRuntime.js into the new side-effect-free lib/startupLogRetention.js (pruneOldLogs(logDir, { fs, keep })), which startupRuntime requires; it deletes every .log, .log.N file of sessions beyond the newest 10. Lint, typecheck and npm test pass (1138 tests; tests/startupLogRetention.test.js 13, all new).
-
-Choices and differences from the prompt:
-- The prompt lists lib/startupLogRetention.js and tests/startupLogRetention.test.js under read_first; neither existed, both are new here.
-- scripts/package-app.js is not changed: sourceEntries copies lib/ whole, so the new module ships. A test pins that (and that the helper needs only fs and path); the packager itself was not run.
-- pruneOldLogs returns the names it deleted (the old one returned nothing); startupRuntime ignores it. Stems are sorted as strings, descending, exactly as before, so the order of two sessions started in the same second is as ambiguous as it was.
-- Retention count (10), rotation settings, redaction, startup-latest.log* handling and the swallowed failures are unchanged. startup-latest.log and its generations never match the session pattern.
-- Proof: the unchanged logic was first moved verbatim into the helper and the new test file run on it (output in TASK-031-before.txt): 9 of 13 failed, 5 of them for the reported reason (rotated .log.N files of pruned sessions left behind), 4 only because the verbatim extraction has no keep option and no return value. Then the helper was replaced by the fix.
-- One test starts lib/startupRuntime.js in a child process (node -r, NEXTRA_LOG_DIR in a temporary directory, no ports), which is the only way to show startupRuntime itself uses the helper.

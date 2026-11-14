@@ -1,1 +1,0 @@
-TASK-097: the armed-probe test now sends two wrong tokens (one hex character off, and one shorter) from inside fetchImpl before the correct download. Both get 404, the armed download still succeeds, and the spent-token and pre-arm checks are unchanged. Verified against a temporary mutant handler that serves any token while armed (reverted; lib/relayCapacityProbe.js unchanged).
