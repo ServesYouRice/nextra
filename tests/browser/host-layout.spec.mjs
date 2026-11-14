@@ -161,17 +161,60 @@ test('every segmented control lives inside the settings panel', async ({ page })
     expect(outside).toBe(0);
 });
 
-test('opening More options does not change the panel height', async ({ page }) => {
+test('browser mode shows every option as a row and has no More options', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await openHost(page);
+    await expect(page.getByText('More options', { exact: true })).toBeHidden();
+    await expect(page.locator('#hostMoreOptions')).toBeHidden();
+    await expect(page.getByLabel('Optional room passphrase')).toBeVisible();
+    await expect(page.getByLabel('Allow recovery after reload')).toBeVisible();
+    // This server does not allow remote pause/play, so there is no dead switch for it.
+    await expect(page.locator('#allowMediaControl')).toHaveCount(0);
+    await expect(page.getByText('Disabled by the server operator')).toHaveCount(0);
+    const body = await page.locator('.host-settings-body').evaluate((el) => ({
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+    }));
+    expect(body.scrollHeight).toBeLessThanOrEqual(body.clientHeight + 1);
+});
+
+test('the hint beside the tabs ends at the right edge of the settings panel', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openHost(page);
+    for (const obsMode of [false, true]) {
+        if (obsMode) await page.locator('#obsMode').check();
+        const hint = page.locator('.source-tabs-hint');
+        await expect(hint).toHaveText(obsMode ? 'Needs OBS Studio 28 or newer on this computer' : 'Viewers just open a link');
+        const edges = await page.evaluate(() => ({
+            hint: document.querySelector('.source-tabs-hint').getBoundingClientRect().right,
+            panel: document.querySelector('.host-settings-panel').getBoundingClientRect().right,
+            tabs: document.querySelector('.source-tabs').getBoundingClientRect().right,
+            hintLeft: document.querySelector('.source-tabs-hint').getBoundingClientRect().left,
+        }));
+        expect(Math.abs(edges.hint - edges.panel), `OBS ${obsMode}: hint ${edges.hint} vs panel ${edges.panel}`).toBeLessThanOrEqual(1);
+        expect(edges.hintLeft).toBeGreaterThan(edges.tabs);
+    }
+});
+
+test('opening More options does not change the panel height and brings its rows into view', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 660 });
+    await openHost(page);
+    await page.locator('#obsMode').check();
+    await expect(page.locator('.obs-config-panel')).toBeVisible();
     const panel = page.locator('.host-settings-panel');
     const before = await panel.boundingBox();
-    const media = page.locator('#allowMediaControl');
-    await expect(media).toBeHidden();
+    const autoStart = page.locator('#obsAutoStart');
+    await expect(autoStart).toBeHidden();
     await page.locator('.host-more-options summary').click();
-    await expect(media).toBeVisible();
+    await expect(autoStart).toBeVisible();
     const after = await panel.boundingBox();
     expect(Math.abs(after.height - before.height)).toBeLessThanOrEqual(1);
+    // The panel is only as tall as the preview, so it scrolls the opened rows up into it.
+    await expect.poll(() => page.evaluate(() => {
+        const box = document.querySelector('.host-settings-panel').getBoundingClientRect();
+        const row = document.querySelector('#obsAutoStart').getBoundingClientRect();
+        return row.top >= box.top && row.bottom <= box.bottom;
+    })).toBe(true);
 });
 
 test('the switches stay real checkboxes that the labels check', async ({ page }) => {
@@ -266,6 +309,8 @@ test.describe('host settings panel in OBS mode at 1440x900', () => {
         await page.locator('#obsMode').check();
         await expect(page.locator('.obs-config-panel')).toBeVisible();
         expect(await visibleRowLabels(page)).toEqual(['Resolution', 'Frame rate', 'Picture preset', 'OBS password', 'More options']);
+        // No switch on the panel itself: they are all in "More options".
+        await expect(page.locator('.host-settings-panel input[type="checkbox"]:visible')).toHaveCount(0);
         const password = page.locator('#obsPassword');
         await expect(password).toHaveAttribute('type', 'password');
         await expect(password).toHaveAttribute('placeholder', 'Leave blank if none');
@@ -282,7 +327,7 @@ test.describe('host settings panel in OBS mode at 1440x900', () => {
         }
     });
 
-    test('the OBS switches live in More options with plain names', async ({ page }) => {
+    test('the OBS switches and the room rows live in More options with plain names', async ({ page }) => {
         await page.locator('#obsMode').check();
         const more = page.locator('#hostMoreOptions');
         for (const id of ['obsApplySettings', 'obsAutoStart', 'obsTryAv1']) {
@@ -298,7 +343,7 @@ test.describe('host settings panel in OBS mode at 1440x900', () => {
         await expect(page.locator('#obsTryAv1')).toBeVisible();
         const order = await more.evaluate((el) => [...el.querySelectorAll('input[type="checkbox"], #roomPassphrase')]
             .map((input) => input.id));
-        expect(order).toEqual(['obsApplySettings', 'obsAutoStart', 'obsTryAv1', 'roomPassphrase', 'reloadRecoveryEnabled', 'allowMediaControl']);
+        expect(order).toEqual(['obsApplySettings', 'obsAutoStart', 'obsTryAv1', 'roomPassphrase', 'reloadRecoveryEnabled']);
     });
 
     test('turning Set OBS up for me off disables the three picture groups and says why', async ({ page }) => {
@@ -314,6 +359,17 @@ test.describe('host settings panel in OBS mode at 1440x900', () => {
         await page.locator('.host-more-options summary').click();
         await page.locator('#obsApplySettings').uncheck();
         await expect(note).toBeVisible();
+        // The line sits with the picture rows it explains, where it shows while
+        // "More options" is closed, and the rows still fit the panel.
+        expect(await note.evaluate((el) => el.parentElement.classList.contains('capture-settings'))).toBe(true);
+        await page.locator('.host-more-options summary').click();
+        await expect(note).toBeVisible();
+        const body = await page.locator('.host-settings-body').evaluate((el) => ({
+            scrollHeight: el.scrollHeight,
+            clientHeight: el.clientHeight,
+        }));
+        expect(body.scrollHeight).toBeLessThanOrEqual(body.clientHeight + 1);
+        await page.locator('.host-more-options summary').click();
         for (const group of groups) await expect(group).toHaveAttribute('aria-disabled', 'true');
         for (const group of buttons) {
             for (const button of await group.all()) await expect(button).toBeDisabled();
@@ -340,7 +396,84 @@ test.describe('host settings panel in OBS mode at 1440x900', () => {
     });
 });
 
-for (const { width, height } of [{ width: 1440, height: 900 }, { width: 1280, height: 720 }]) {
+// The two capture modes look alike: the same preview (title, line, button) and
+// controls of the same height in the panel, at every window size.
+async function modeLook(page) {
+    return page.evaluate(() => {
+        const size = (el) => {
+            if (!el || el.getClientRects().length === 0) return null;
+            const rect = el.getBoundingClientRect();
+            return { width: rect.width, height: rect.height };
+        };
+        const stage = document.querySelector('.host-stage-empty');
+        const button = stage.querySelector('.btn-main');
+        return {
+            // Icons in the preview outside its button: none, in either mode.
+            looseIcons: [...stage.querySelectorAll('svg')].filter((svg) => !svg.closest('button, .obs-steps')).length,
+            title: size(stage.querySelector('.host-stage-empty-title')),
+            titleFont: getComputedStyle(stage.querySelector('.host-stage-empty-title')).fontSize,
+            lineFont: getComputedStyle(stage.querySelector('.host-stage-empty-sub, .obs-step-label')).fontSize,
+            lineColor: getComputedStyle(stage.querySelector('.host-stage-empty-sub, .obs-step-label')).color,
+            button: size(button),
+            buttonIcons: button.querySelectorAll('svg').length,
+            buttonText: button.textContent.trim(),
+            controls: [...document.querySelectorAll('.host-settings-panel .mode-toggle-small, .host-settings-panel .select-input')]
+                .filter((el) => el.getClientRects().length > 0)
+                // Content of a closed disclosure is not on screen, whatever its boxes say.
+                .filter((el) => !el.closest('details:not([open])'))
+                .map((el) => el.getBoundingClientRect().height),
+            firstControlTop: document.querySelector('.host-settings-panel .mode-toggle-small').getBoundingClientRect().top,
+            overflow: (() => {
+                const box = stage.getBoundingClientRect();
+                return [...stage.children].filter((el) => el.getClientRects().length > 0).every((el) => {
+                    const rect = el.getBoundingClientRect();
+                    return rect.top >= box.top && rect.bottom <= box.bottom;
+                });
+            })(),
+        };
+    });
+}
+
+for (const { width, height } of [{ width: 1440, height: 900 }, { width: 1280, height: 660 }, { width: 1366, height: 620 }]) {
+    test(`at ${width}x${height} the two capture modes have the same preview and the same control height`, async ({ page }, testInfo) => {
+        test.skip(testInfo.project.name !== 'chromium', 'desktop layout tiers');
+        await page.setViewportSize({ width, height });
+        await openHost(page);
+        const browserLook = await modeLook(page);
+        await page.locator('#obsMode').check();
+        await expect(page.locator('.obs-config-panel')).toBeVisible();
+        const obsLook = await modeLook(page);
+
+        // The preview: the same title and line size, and the same Start button, icon included.
+        expect(obsLook.title).toEqual(browserLook.title);
+        expect(obsLook.titleFont).toBe(browserLook.titleFont);
+        expect(obsLook.lineFont).toBe(browserLook.lineFont);
+        expect(obsLook.lineColor).toBe(browserLook.lineColor);
+        expect(obsLook.buttonText).toBe('Start Sharing');
+        expect(browserLook.buttonText).toBe('Start Sharing');
+        expect(obsLook.buttonIcons).toBe(1);
+        expect(browserLook.buttonIcons).toBe(1);
+        expect(Math.abs(obsLook.button.width - browserLook.button.width)).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(obsLook.button.height - browserLook.button.height)).toBeLessThanOrEqual(0.5);
+        // The source's icon is in the button only; the preview has no icon of its own.
+        expect(browserLook.looseIcons).toBe(0);
+        expect(obsLook.looseIcons).toBe(0);
+        expect(browserLook.overflow, 'browser preview content stays inside the preview').toBe(true);
+        expect(obsLook.overflow, 'OBS preview content stays inside the preview').toBe(true);
+
+        // The panel: every segmented control and input is one height, in both modes.
+        expect(browserLook.controls.length).toBe(3);
+        expect(obsLook.controls.length).toBe(4);
+        const reference = browserLook.controls[0];
+        expect(reference).toBeGreaterThanOrEqual(32);
+        for (const controlHeight of [...browserLook.controls, ...obsLook.controls]) {
+            expect(Math.abs(controlHeight - reference), `${controlHeight} vs ${reference}`).toBeLessThanOrEqual(0.5);
+        }
+    });
+}
+
+// 1280x660 and 1366x620 are what a 1080p screen at 150% zoom and a 768p laptop leave a browser window.
+for (const { width, height } of [{ width: 1440, height: 900 }, { width: 1280, height: 720 }, { width: 1280, height: 660 }, { width: 1366, height: 620 }]) {
     test(`in OBS mode at ${width}x${height} the panel keeps the preview's top and bottom and the rows do not scroll`, async ({ page }, testInfo) => {
         test.skip(testInfo.project.name !== 'chromium', 'desktop layout tiers');
         await page.setViewportSize({ width, height });

@@ -743,6 +743,8 @@ input.select-input {
 .mode-toggle-small {
   display: flex;
   width: 100%;
+  min-height: var(--panel-control-height, 2rem);
+  box-sizing: border-box;
   padding: 2px;
   border-radius: var(--radius);
   box-shadow: none;
@@ -751,13 +753,17 @@ input.select-input {
 .mode-toggle-small button {
   flex: 1 1 0;
   min-width: 0;
-  padding: 5px 6px;
+  padding: 0 0.375rem;
+  color: var(--text-3);
   font-size: var(--fs-small);
+  font-weight: 500;
+  line-height: 1.2;
   border-radius: var(--radius);
 }
 
 .mode-toggle-small button.active {
   box-shadow: none;
+  font-weight: 600;
 }
 
 /* Three 6.4rem cells (the OBS tuning profiles, or the live resolution toggle)
@@ -985,22 +991,21 @@ input.select-input {
 }
 
 /* A copy field with its own square copy button: the label row (label and an
-   optional tag), then the value, with the button beside both; an optional
-   main button spans the row under them. The button shows a tick while the
-   unseen "Copied!" status is announced. */
+   optional tag), then the value, with the button beside both. The button
+   shows a tick while the unseen "Copied!" status is announced. */
 .copy-field-split {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 3px 10px;
+  gap: 0.1875rem 0.625rem;
 }
 
 .copy-field-top {
   grid-column: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 0.5rem;
   min-width: 0;
 }
 
@@ -1039,8 +1044,8 @@ input.select-input {
   grid-row: 1 / span 2;
   display: inline-grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 2.25rem;
+  height: 2.25rem;
   padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: var(--radius);
@@ -1051,6 +1056,18 @@ input.select-input {
   transition: color var(--transition), border-color var(--transition);
 }
 
+/* The icons follow the text size, as the buttons do. */
+.copy-field-copy svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.btn-main svg {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
 .copy-field-copy:hover {
   color: var(--text-1);
   border-color: rgba(255, 255, 255, 0.2);
@@ -1058,11 +1075,6 @@ input.select-input {
 
 .copy-field-copy.is-copied {
   color: var(--ok);
-}
-
-.copy-field-main {
-  grid-column: 1 / -1;
-  width: 100%;
 }
 
 .code-block {
@@ -1815,9 +1827,12 @@ input.select-input {
   margin-left: auto;
 }
 
+/* The quality button and Stop (in the card's column) are the two controls of
+   the row under the preview: the same height, the row's own, so they start and
+   end on the same lines. */
 .quality-button {
-  min-height: 2.25rem;
-  padding: 0.35rem 0.75rem;
+  min-height: var(--tap-min);
+  padding: 0 1rem;
   font-size: var(--fs-small);
   font-variant-numeric: tabular-nums;
 }
@@ -1884,7 +1899,8 @@ input.select-input {
 .host-stop {
   box-sizing: border-box;
   width: 100%;
-  min-height: 44px;
+  min-height: var(--tap-min);
+  padding-block: 0;
   font-size: var(--fs-small);
 }
 
@@ -2061,17 +2077,23 @@ input.select-input {
 }
 
 /* Shown while nothing plays, after recent input (.controls-shown, set by
-   WatchView), while the pointer is over the stage, and while keyboard focus
-   is inside it. */
+   WatchView), while the pointer is on the bar itself, and while keyboard focus
+   is inside the stage. A pointer that only rests on the picture does not keep
+   it: full screen is all picture, so the bar would never go. */
 .watch-video.controls-shown .watch-controls,
 .watch-video:has(:focus-visible) .watch-controls {
   opacity: 1;
 }
 
 @media (hover: hover) {
-  .watch-video:hover .watch-controls {
+  .watch-controls:hover {
     opacity: 1;
   }
+}
+
+/* Full screen: the pointer goes with the bar. */
+.watch-video:fullscreen:not(.controls-shown) .watch-picture {
+  cursor: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2192,6 +2214,67 @@ input.select-input {
   flex: 0 0 auto;
 }
 
+/* The sound button and its volume slider. --volume-fill is the slider's value,
+   set by WatchView, for the filled part of the track. */
+.watch-volume {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.watch-volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 6rem;
+  height: var(--tap-min);
+  margin: 0;
+  padding: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  cursor: pointer;
+}
+
+.watch-volume-slider::-webkit-slider-runnable-track {
+  height: 0.25rem;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(
+    to right,
+    var(--text-1) var(--volume-fill, 100%),
+    rgba(255, 255, 255, 0.3) var(--volume-fill, 100%)
+  );
+}
+
+.watch-volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 0.875rem;
+  height: 0.875rem;
+  margin-top: -0.3125rem;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.watch-volume-slider::-moz-range-track {
+  height: 0.25rem;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.watch-volume-slider::-moz-range-progress {
+  height: 0.25rem;
+  border-radius: var(--radius-pill);
+  background: var(--text-1);
+}
+
+.watch-volume-slider::-moz-range-thumb {
+  width: 0.875rem;
+  height: 0.875rem;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+}
+
 .watch-turn-hint {
   display: none;
 }
@@ -2247,6 +2330,16 @@ input.select-input {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     margin-left: 0;
+  }
+
+  /* A phone sets the volume with its own buttons: only the sound button stays,
+     as one of the three large controls. */
+  .watch-volume {
+    display: contents;
+  }
+
+  .watch-volume-slider {
+    display: none;
   }
 
   .watch-controls-actions .watch-btn {
@@ -2402,6 +2495,7 @@ input.select-input {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: space-between;
   gap: 0.5rem 1rem;
 }
 
@@ -2469,30 +2563,70 @@ input.select-input {
 
 .source-tab-icon {
   flex: none;
+  width: 1.125rem;
+  height: 1.125rem;
 }
 
+/* One line at the right end of the row, over the settings panel. */
 .source-tabs-hint {
-  flex: 1 1 12rem;
+  flex: 0 1 auto;
   min-width: 0;
-  margin: 0;
+  margin: 0 0 0 auto;
   color: var(--text-3);
   font-size: var(--fs-small);
   line-height: 1.38;
+  text-align: right;
 }
 
 /* The empty preview: what will happen, and the page's one main button. */
 .host-stage-empty {
-  gap: 0.5rem;
-}
-
-.host-stage-empty-icon {
-  color: var(--text-3);
+  gap: 0.75rem;
 }
 
 .host-stage-empty-title {
   color: var(--text-1);
-  font-size: var(--fs-body);
+  font-size: var(--fs-title);
   font-weight: 600;
+  line-height: 1.2;
+}
+
+.host-stage-empty-sub {
+  color: var(--text-2);
+  font-size: var(--fs-body);
+}
+
+/* The OBS steps before sharing read like the browser mode's one line: the same
+   size and the same quiet grey. */
+.host-stage-empty .obs-steps {
+  width: auto;
+  gap: 0.5rem;
+}
+
+.host-stage-empty .obs-step {
+  gap: 0.75rem;
+}
+
+.host-stage-empty .obs-step-marker {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.host-stage-empty .obs-step-label {
+  color: var(--text-2);
+  font-size: var(--fs-body);
+}
+
+/* The preview is a size container, so the line and the list give way in both
+   capture modes when it is too short for them. */
+.host-video-section .video-container {
+  container: host-stage / size;
+}
+
+@container host-stage (max-height: 16rem) {
+  .host-stage-empty-sub,
+  .host-stage-empty .obs-steps {
+    display: none;
+  }
 }
 
 .host-stage-empty .controls {
@@ -2512,7 +2646,25 @@ input.select-input {
    The one quiet surface on the host page: flat rows, hairlines between groups,
    no shadow and no hover change. Its height is the preview's: height 0 with a
    min-height of 100% takes none of the row's height, so the content scrolls
-   inside .host-settings-body instead of making the panel taller. */
+   inside .host-settings-body instead of making the panel taller.
+
+   Every size inside is in rem, so the rows keep their proportions when the
+   browser's font size is not 16px.
+
+   Rows are --panel-row-gap apart, a label sits half of that above its control,
+   and the segmented controls and the inputs are --panel-control-height tall.
+   Beside the preview both follow the panel's height (the panel is a size
+   container), so the rows fill the panel instead of leaving it empty at the
+   bottom.
+
+   The controls are the same height in both capture modes. OBS mode has the
+   most rows (four controls and "More options"), so it decides: its controls
+   grow from --panel-control-min to --panel-control-max once its gaps are at
+   --panel-gap-mid. Each mode then spreads what is left of its own panel over
+   its gaps, from --panel-gap-min up to --panel-gap-max. A mode says what it
+   holds: --panel-fixed is the height of its labels, switch rows and hairline,
+   --panel-controls how many controls it has and --panel-gaps how many row
+   gaps (a label gap counts as half). */
 .settings-wrapper {
   position: relative;
 }
@@ -2522,7 +2674,7 @@ input.select-input {
 .host-sign-in {
   box-sizing: border-box;
   width: 100%;
-  padding: 13px 14px 11px;
+  padding: 0.8125rem 0.875rem 0.6875rem;
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: var(--radius-lg);
   background: linear-gradient(180deg, rgba(35, 36, 46, 0.5), rgba(24, 24, 31, 0.5));
@@ -2567,13 +2719,28 @@ input.select-input {
 
 .host-settings-panel {
   --panel-hairline: 1px solid rgba(255, 255, 255, 0.06);
+  /* In one column (below 900px) the panel has no height to follow. */
+  --panel-row-gap: 0.875rem;
+  --panel-control-height: 2.5rem;
+  --panel-control-min: 2rem;
+  --panel-control-max: 2.75rem;
+  --panel-gap-min: 0.375rem;
+  --panel-gap-mid: 0.6rem;
+  --panel-gap-max: 1rem;
+  /* OBS mode: four labels (1.05rem each), "More options" and the hairline. */
+  --panel-obs-fixed: calc(5.575rem + 1px);
+  --panel-obs-gaps: 7;
+  /* Browser mode: three labels, one switch row and the hairline. */
+  --panel-fixed: calc(4.525rem + 1px);
+  --panel-controls: 3;
+  --panel-gaps: 5.5;
   display: flex;
   flex-direction: column;
   width: 100%;
   height: 0;
   min-height: 100%;
   box-sizing: border-box;
-  padding: 13px 14px 11px;
+  padding: 0.8125rem 0.875rem 0.6875rem;
   border: var(--panel-hairline);
   border-radius: var(--radius-lg);
   background: linear-gradient(180deg, rgba(35, 36, 46, 0.5), rgba(24, 24, 31, 0.5));
@@ -2586,12 +2753,54 @@ input.select-input {
   min-height: 0;
   margin: -3px;
   padding: 3px;
+  --panel-label-gap: calc(var(--panel-row-gap) / 2);
   display: flex;
   flex-direction: column;
-  gap: 11px;
+  gap: var(--panel-row-gap);
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
+}
+
+@media (min-width: 900px) {
+  .host-settings-panel {
+    container-type: size;
+  }
+
+  /* The control height is what the OBS rows leave each of their four controls
+     with the gaps at --panel-gap-mid; the gap is what this mode's rows leave
+     once its controls have that height. 1px is spare for rounding. */
+  .host-settings-body {
+    --panel-control-height: clamp(
+      var(--panel-control-min),
+      (100cqh - var(--panel-obs-fixed) - 1px - var(--panel-obs-gaps) * var(--panel-gap-mid)) / 4,
+      var(--panel-control-max)
+    );
+    --panel-row-gap: clamp(
+      var(--panel-gap-min),
+      (100cqh - var(--panel-fixed) - 1px - var(--panel-controls) * var(--panel-control-height)) / var(--panel-gaps),
+      var(--panel-gap-max)
+    );
+  }
+}
+
+/* Browser mode on a server that allows remote pause/play: one more switch row. */
+.host-settings-panel.with-media-control {
+  --panel-fixed: calc(5.9rem + 1px);
+  --panel-gaps: 6.5;
+}
+
+/* The line under the picture rows while "Set OBS up for me" is off is one more
+   OBS row, 0.975rem tall. */
+.host-settings-panel.pictures-off {
+  --panel-obs-fixed: calc(6.55rem + 1px);
+  --panel-obs-gaps: 8;
+}
+
+.host-settings-panel.settings-expanded {
+  --panel-fixed: var(--panel-obs-fixed);
+  --panel-controls: 4;
+  --panel-gaps: var(--panel-obs-gaps);
 }
 
 .host-settings-body > * {
@@ -2599,16 +2808,18 @@ input.select-input {
 }
 
 .host-settings-body > * + * {
-  padding-top: 11px;
+  padding-top: var(--panel-row-gap);
   border-top: var(--panel-hairline);
 }
 
-.host-settings-panel .settings-group {
+.host-settings-panel .settings-group,
+.host-settings-panel .obs-config-panel {
   display: grid;
-  gap: 11px;
+  gap: var(--panel-row-gap);
 }
 
-.host-settings-panel .settings-group[hidden] {
+.host-settings-panel .settings-group[hidden],
+.host-settings-panel .obs-config-panel[hidden] {
   display: none;
 }
 
@@ -2616,7 +2827,7 @@ input.select-input {
 .host-settings-panel .setting-row:hover {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 5px;
+  gap: var(--panel-label-gap);
   margin: 0;
   padding: 0;
   border: none;
@@ -2627,13 +2838,13 @@ input.select-input {
 .host-settings-panel .setting-row .setting-row-label {
   color: var(--text-3);
   font-size: var(--fs-small);
-  line-height: 1.3;
+  line-height: 1.2;
 }
 
 .host-settings-panel .select-input {
-  min-height: 32px;
-  height: 32px;
-  padding: 0 10px;
+  min-height: 0;
+  height: var(--panel-control-height);
+  padding: 0 0.625rem;
   border-radius: var(--radius);
   box-shadow: none;
   font-size: var(--fs-small);
@@ -2649,8 +2860,8 @@ input.select-input {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  min-height: 20px;
+  gap: 0.625rem;
+  min-height: 1.375rem;
   color: var(--text-2);
   font-size: var(--fs-label);
   line-height: 1.3;
@@ -2667,8 +2878,8 @@ input.select-input {
   -webkit-appearance: none;
   position: relative;
   flex: none;
-  width: 32px;
-  height: 18px;
+  width: 2.5rem;
+  height: 1.375rem;
   margin: 0;
   border-radius: var(--radius-pill);
   background: #33333d;
@@ -2679,10 +2890,10 @@ input.select-input {
 .host-settings-panel .setting-switch input[type='checkbox']::after {
   content: '';
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 12px;
-  height: 12px;
+  top: 0.1875rem;
+  left: 0.1875rem;
+  width: 1rem;
+  height: 1rem;
   border-radius: 50%;
   background: #fff;
   transition: transform var(--transition);
@@ -2693,7 +2904,7 @@ input.select-input {
 }
 
 .host-settings-panel .setting-switch input[type='checkbox']:checked::after {
-  transform: translateX(14px);
+  transform: translateX(1.125rem);
 }
 
 .host-settings-panel .setting-switch input[type='checkbox']:disabled {
@@ -2717,10 +2928,6 @@ input.select-input {
   opacity: 0.45;
 }
 
-.host-settings-panel .capture-settings > .setting-note {
-  font-size: var(--fs-small);
-}
-
 /* Rarely used options: the last row, pinned to the bottom of the panel. */
 .host-more-options {
   margin-top: auto;
@@ -2730,7 +2937,7 @@ input.select-input {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 20px;
+  min-height: 1.375rem;
   color: var(--text-2);
   font-size: var(--fs-label);
   cursor: pointer;
@@ -2743,9 +2950,9 @@ input.select-input {
 
 .host-more-options summary::after {
   content: '';
-  width: 6px;
-  height: 6px;
-  margin-right: 3px;
+  width: 0.4375rem;
+  height: 0.4375rem;
+  margin-right: 0.25rem;
   border-right: 1.5px solid currentColor;
   border-bottom: 1.5px solid currentColor;
   transform: translateY(-2px) rotate(45deg);
@@ -2757,29 +2964,13 @@ input.select-input {
 }
 
 .host-more-options[open] > .settings-group {
-  margin-top: 11px;
+  margin-top: var(--panel-row-gap);
 }
 
-/* In OBS mode the room rows follow the three OBS switches, set off by a hairline. */
+/* The room rows follow the OBS switches, set off by a hairline. */
 .host-more-options .more-options-room {
-  padding-top: 11px;
+  padding-top: var(--panel-row-gap);
   border-top: var(--panel-hairline);
-}
-
-/* The invite card and, in OBS mode, the manual OBS setup under it are items
-   of the side panel's column; their wrapper adds no box. */
-.invite-column {
-  display: contents;
-}
-
-.streaming-info-row>.obs-manual-details {
-  width: 100%;
-  margin: 0;
-  box-sizing: border-box;
-  padding: 12px 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--panel-shell-radius);
-  background: var(--surface-glass);
 }
 
 .viewer-count {
@@ -2800,14 +2991,17 @@ input.select-input {
 
 /* ========== INVITE CARD ==========
    While a room is open the invite card sits beside the preview, about 350px
-   wide: the room code, then one row per link, the one to share marked and
-   given the page's one main button. From 900px it has the preview's top and
+   wide: the room code, then one row per link, each with its own copy button;
+   the one to share is marked and its button is the bright one. From 900px it
+   has the preview's top and
    bottom, by the technique of the settings panel: the preview alone sets the
    height of its grid row, so the Stop row and the status line under it become
    rows of the host grid (the section adds no box), and the card has height 0
    and a min-height of 100%, so the link list scrolls inside it if it ever
-   overflows. While the settings panel (a room waiting for Resume Sharing) or
-   the manual OBS setup shares the column, the card takes its natural height. */
+   overflows. In OBS mode the manual OBS setup is the list's last row, so the
+   card is the same in both capture modes. While the settings panel (a room
+   waiting for Resume Sharing) shares the column, the card takes its natural
+   height. */
 @media (min-width: 900px) {
   .host-layout:has(.invite-card) {
     row-gap: 0;
@@ -2862,12 +3056,12 @@ input.select-input {
   --invite-hairline: 1px solid rgba(255, 255, 255, 0.07);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 1rem;
   width: 100%;
   height: 0;
   min-height: 100%;
   box-sizing: border-box;
-  padding: 16px;
+  padding: 1.125rem 1rem 1rem;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--panel-shell-radius);
   background: var(--surface-glass-accent), var(--surface-glass);
@@ -2875,7 +3069,7 @@ input.select-input {
   overflow: hidden;
 }
 
-.host-side-panel:has(.host-settings-panel, .obs-manual-details) .invite-card {
+.host-side-panel:has(.host-settings-panel) .invite-card {
   height: auto;
   min-height: 0;
 }
@@ -2890,6 +3084,11 @@ input.select-input {
   font-weight: 600;
   line-height: 1.4;
   color: var(--text-1);
+}
+
+/* A label sits clear of its value, in the code block and in each link row. */
+.invite-card .copy-field-split {
+  row-gap: 0.375rem;
 }
 
 .invite-code .copy-field-label {
@@ -2910,8 +3109,8 @@ input.select-input {
   word-break: normal;
 }
 
-/* The 6px of inline padding keeps the main button's ring and the focus rings
-   from being clipped at the scroll edge. */
+/* The 6px of inline padding keeps the focus rings from being clipped at the
+   scroll edge. */
 .invite-card > .invite-links {
   flex: 1 1 auto;
   min-height: 0;
@@ -2926,8 +3125,24 @@ input.select-input {
 
 .invite-link {
   flex: none;
-  padding-block: 10px;
+  padding-block: 0.875rem;
   border-top: var(--invite-hairline);
+}
+
+/* The link to share has the card's one bright button. */
+.invite-link-recommended .copy-field-copy {
+  border-color: rgba(151, 175, 255, 0.3);
+  background: var(--surface-button);
+  color: #fff;
+}
+
+.invite-link-recommended .copy-field-copy:hover {
+  border-color: rgba(173, 194, 255, 0.55);
+  background: var(--surface-button-hover);
+}
+
+.invite-link-recommended .copy-field-copy.is-copied {
+  color: #fff;
 }
 
 .invite-link .copy-field-label {
@@ -2942,12 +3157,12 @@ input.select-input {
 
 .invite-link > .copy-field-value {
   font-size: var(--fs-label);
-  line-height: 18px;
+  line-height: 1.5;
 }
 
 .invite-tag {
   flex: none;
-  padding: 1px 6px;
+  padding: 0.0625rem 0.375rem;
   border: 1px solid rgba(60, 203, 127, 0.5);
   border-radius: var(--radius);
   color: #a9ecc8;
@@ -2958,15 +3173,21 @@ input.select-input {
   text-transform: uppercase;
 }
 
-.invite-card .copy-field-main {
-  min-height: 44px;
-  height: 44px;
-  margin-top: 7px;
+/* The note and the manual OBS setup close the list: the first of them sits at
+   the bottom of the card while the rows above leave room. */
+.invite-links > .invite-note,
+.invite-links > .obs-manual-details {
+  flex: none;
+  margin-top: auto;
+}
+
+.invite-links > .invite-note + .obs-manual-details {
+  margin-top: 0.875rem;
 }
 
 .invite-note {
   margin: 0;
-  padding-top: 10px;
+  padding-top: 0.875rem;
   border-top: var(--invite-hairline);
   color: var(--text-3);
   font-size: var(--fs-small);
@@ -2990,18 +3211,59 @@ input.select-input {
   color: var(--warn);
 }
 
+/* "Set it up by hand": a quiet row with a chevron, like "More options" in the
+   settings panel; its fields open under it, inside the card's list. */
 .obs-manual-details {
+  padding-top: 0.875rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
   font-size: var(--fs-small);
-  margin-bottom: 0.5rem;
 }
 
 .obs-manual-details summary {
-  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 1.375rem;
   color: var(--text-2);
+  cursor: pointer;
+  list-style: none;
 }
 
-.obs-manual-details>div {
-  margin-top: 0.5rem;
+.obs-manual-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.obs-manual-details summary::after {
+  content: '';
+  width: 0.4375rem;
+  height: 0.4375rem;
+  margin-right: 0.25rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform var(--transition);
+}
+
+.obs-manual-details[open] summary::after {
+  transform: translateY(1px) rotate(-135deg);
+}
+
+.obs-manual-details > div {
+  display: grid;
+  gap: 0.875rem;
+  margin-top: 0.875rem;
+}
+
+.obs-manual-field .copy-field-label {
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.obs-manual-field > .copy-field-value {
+  font-size: var(--fs-label);
+  line-height: 1.5;
 }
 
 .obs-manual-note {
@@ -3010,7 +3272,6 @@ input.select-input {
 
 .obs-av1-note {
   color: var(--warn);
-  margin-top: 0.5rem;
 }
 
 .obs-retry-row {
@@ -3867,17 +4128,6 @@ input.select-input {
   .view-header h1 {
     font-size: var(--fs-body);
   }
-
-  /* Tighter rows in the settings panel: 8px between rows, 4px between a label
-     and its control. */
-  .host-settings-panel .settings-group {
-    gap: 8px;
-  }
-
-  .host-settings-panel .setting-row,
-  .host-settings-panel .setting-row:hover {
-    gap: 4px;
-  }
 }
 
 /* One column below 900px: the panel and the invite card fill it and take their
@@ -3972,10 +4222,13 @@ input.select-input {
   }
 
   /* A 200px-tall preview has room for the title and the button only. */
-  .host-stage-empty-icon,
   .host-stage-empty-sub,
   .host-stage-empty .obs-steps {
     display: none;
+  }
+
+  .host-stage-empty-title {
+    font-size: var(--fs-heading);
   }
 
   .host-stage-empty .controls {
@@ -3984,6 +4237,8 @@ input.select-input {
 
   .source-tabs-hint {
     flex-basis: 100%;
+    margin-left: 0;
+    text-align: left;
   }
 
   .nav-menu-button {

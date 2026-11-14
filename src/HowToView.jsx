@@ -203,7 +203,7 @@ export default function HowToView() {
                     <ul>
                         <li><strong>Resolution</strong> - 1080p, 1440p, or 4K. Nextra defaults from your screen size.</li>
                         <li><strong>Frame rate</strong> - 30 or 60 fps.</li>
-                        <li><strong>Allow viewers to pause/play media</strong> (under <strong>More options</strong>) - lets viewers send a Play/Pause media key to the host machine.</li>
+                        <li><strong>Let viewers pause/play media</strong> - gives viewers a button that presses the Play/Pause media key on the computer that runs Nextra, so anyone watching can pause a film for everyone. The switch is only shown when the server allows it (<code>ALLOW_REMOTE_MEDIA_CONTROL=true</code>); it is off by default because it lets people outside press a key on that computer.</li>
                         <li><strong>This browser / OBS</strong> - the tabs above the preview. <strong>This browser</strong> captures a screen, window or tab; <strong>OBS</strong> switches the host flow to OBS (see the <strong>Use OBS</strong> tab of this guide).</li>
                     </ul>
                 </div>

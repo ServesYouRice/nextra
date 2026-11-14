@@ -154,6 +154,8 @@ export default function WatchView({ initialCode = '' }) {
     const [hasProducer, setHasProducer] = useState(false);
     const [allowMediaControl, setAllowMediaControl] = useState(false);
     const [isMuted, setIsMuted] = useState(false);
+    // The picture's volume, 0 to 1, as the slider beside the sound button shows it.
+    const [volume, setVolume] = useState(1);
     const [joining, setJoining] = useState(false);
     const [passphrase, setPassphrase] = useState('');
     const [passphraseRequired, setPassphraseRequired] = useState(false);
@@ -348,6 +350,31 @@ export default function WatchView({ initialCode = '' }) {
         }
         setIsMuted(muted);
     }, []);
+
+    // The slider sets the volume; at 0 the picture is muted, and any other
+    // value turns the sound back on.
+    const handleVolumeInput = useCallback((evt) => {
+        const video = videoRef.current;
+        if (!video) return;
+        const next = Math.min(1, Math.max(0, Number(evt.target.value) / 100));
+        video.volume = next;
+        setVolume(next);
+        setSoundBlocked(false);
+        syncMutedState(next === 0);
+    }, [syncMutedState]);
+
+    // The sound button. Turning the sound on from a volume of 0 would stay
+    // silent, so it comes back at half.
+    const handleToggleMuted = useCallback(() => {
+        const video = videoRef.current;
+        if (!video) return;
+        setSoundBlocked(false);
+        if (video.muted && video.volume === 0) {
+            video.volume = 0.5;
+            setVolume(0.5);
+        }
+        syncMutedState(!video.muted);
+    }, [syncMutedState]);
 
     // isCurrent tells a superseded attempt's autoplay retry to leave the shared
     // video element alone.
@@ -1919,6 +1946,8 @@ export default function WatchView({ initialCode = '' }) {
     const controlsShown = !pictureLive || controlsAwake || statusPanelShown;
     const playing = watching || fallbackMode;
     const showSoundChip = soundBlocked && isMuted && playing;
+    // What the volume slider shows: nothing while muted.
+    const shownVolume = isMuted ? 0 : Math.round(volume * 100);
     // An ended room says why in its own overlay, so the notice stack leaves it out.
     const hasStageNotice = (Boolean(error) && !hostDisconnected) || whipReconnecting
         || (ingestMode === 'obs' && obsVideoCodec === 'av1' && codecUnsupported);
@@ -2078,7 +2107,10 @@ export default function WatchView({ initialCode = '' }) {
                                 muted={isMuted}
                                 onPlay={() => { userPausedRef.current = false; }}
                                 onPause={() => { userPausedRef.current = true; }}
-                                onVolumeChange={(evt) => setIsMuted(evt.target.muted)}
+                                onVolumeChange={(evt) => {
+                                    setIsMuted(evt.target.muted);
+                                    setVolume(evt.target.volume);
+                                }}
                             />
 
                             {/* The last picture behind "The host dropped out"; drawn by
@@ -2274,19 +2306,30 @@ export default function WatchView({ initialCode = '' }) {
                                 )}
 
                                 {playing && (
-                                    <button
-                                        className="btn btn-secondary watch-btn watch-btn-icon watch-btn-main"
-                                        type="button"
-                                        title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
-                                        onClick={() => {
-                                            if (!videoRef.current) return;
-                                            setSoundBlocked(false);
-                                            syncMutedState(!videoRef.current.muted);
-                                        }}
-                                    >
-                                        <ControlIcon name={isMuted ? 'muted' : 'sound'} />
-                                        <span className="watch-btn-text">{isMuted ? 'Unmute Audio' : 'Mute Audio'}</span>
-                                    </button>
+                                    <div className="watch-volume">
+                                        <button
+                                            className="btn btn-secondary watch-btn watch-btn-icon watch-btn-main"
+                                            type="button"
+                                            title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
+                                            onClick={handleToggleMuted}
+                                        >
+                                            <ControlIcon name={isMuted ? 'muted' : 'sound'} />
+                                            <span className="watch-btn-text">{isMuted ? 'Unmute Audio' : 'Mute Audio'}</span>
+                                        </button>
+                                        <input
+                                            type="range"
+                                            className="watch-volume-slider"
+                                            min="0"
+                                            max="100"
+                                            step="1"
+                                            value={shownVolume}
+                                            aria-label="Volume"
+                                            aria-valuetext={`${shownVolume}%`}
+                                            title={`Volume ${shownVolume}%`}
+                                            style={{ '--volume-fill': `${shownVolume}%` }}
+                                            onChange={handleVolumeInput}
+                                        />
+                                    </div>
                                 )}
 
                                 <button

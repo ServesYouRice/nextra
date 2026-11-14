@@ -407,12 +407,40 @@ test('the three OBS setup steps show where a failed setup stopped and recover on
     // The reason is shown once.
     await expect(page.getByRole('alert').filter({ hasText: /OBS WebSocket/ })).toHaveCount(1);
 
-    const manual = page.locator('details.obs-manual-details');
+    // The OBS room has the same invite card as a browser room, as tall as the
+    // preview; the manual setup is its last row, and Stop and the quality
+    // button share one row under it.
+    const manual = page.locator('.invite-card details.obs-manual-details');
+    await expect(manual).toHaveCount(1);
+    const liveLayout = async () => page.evaluate(() => {
+        const box = (selector) => {
+            const rect = document.querySelector(selector).getBoundingClientRect();
+            return { top: rect.top, bottom: rect.bottom, height: rect.height };
+        };
+        return { card: box('.invite-card'), stage: box('.video-container'), stop: box('.host-stop'), quality: box('.quality-button') };
+    });
+    const closed = await liveLayout();
+    expect(Math.abs(closed.card.top - closed.stage.top)).toBeLessThanOrEqual(1);
+    expect(Math.abs(closed.card.bottom - closed.stage.bottom)).toBeLessThanOrEqual(1);
+    expect(Math.abs(closed.stop.top - closed.quality.top)).toBeLessThanOrEqual(1);
+    expect(Math.abs(closed.stop.height - closed.quality.height)).toBeLessThanOrEqual(1);
+
     await expect(manual).not.toHaveAttribute('open', '');
     await page.getByRole('button', { name: 'Set it up by hand' }).click();
     await expect(manual).toHaveAttribute('open', '');
     await expect(manual.locator('summary')).toBeFocused();
     await expect(page.locator('.copy-field', { hasText: 'WHIP URL' })).toBeVisible();
+    // Open, it scrolls inside the card: the card keeps the preview's height
+    // and its fields come into view.
+    const open = await liveLayout();
+    expect(Math.abs(open.card.bottom - open.stage.bottom)).toBeLessThanOrEqual(1);
+    await expect.poll(() => page.evaluate(() => {
+        const card = document.querySelector('.invite-card').getBoundingClientRect();
+        const field = document.querySelector('.obs-manual-field').getBoundingClientRect();
+        return field.top >= card.top && field.bottom <= card.bottom;
+    })).toBe(true);
+    await expect(page.getByRole('button', { name: 'Copy WHIP URL' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Copy bearer token' })).toBeVisible();
 
     obs.mode = 'up';
     await page.getByRole('button', { name: 'Retry Auto-Configure OBS' }).click();
