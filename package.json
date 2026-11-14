@@ -56,7 +56,7 @@
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.2",
+    "@vitejs/plugin-react": "^6.3.0",
     "caxa": "^3.0.1",
     "concurrently": "^10.0.6",
     "eslint": "^10.13.0",
