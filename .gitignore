@@ -58,14 +58,8 @@ cloudflared
 
 # Local scratch and the maintainer's local hosting notes stay out of git.
 /testing/
-/implementation/*
-# The task queue, its prompts and the approved UI review are tracked.
-!/implementation/KANBAN.md
-!/implementation/tasks/
-!/implementation/tasks/**
-!/implementation/ui-review/
-!/implementation/ui-review/**
+/implementation/
 
-# arbitra's plans and dev notes are tracked. Keep this last so no rule above hides them.
+# arbitra's open follow-ups are tracked. Keep this last so no rule above hides them.
 !.arbitra/
 !.arbitra/**

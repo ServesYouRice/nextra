@@ -1,4 +1,0 @@
-Bundled cloudflared from CLOUDFLARED_PATH: C:\Users\V\AppData\Local\Temp\package-TASK-046-repro-6x3BSA\cloudflared-darwin-arm64.tgz
-staged cloudflared exists: 32 bytes, identical to the .tgz archive: false
-first bytes: 2321 (1f8b = gzip magic)
-mode: 666

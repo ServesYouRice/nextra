@@ -1,1 +1,0 @@
-TASK-049 (C-89a6711d2d4a): fixed on lane/scripts. generate-icons.ps1 no longer composes or saves the social card; both headers document ownership and run order. Committed PNGs not regenerated. The brandScripts test file named in the prompt's read_first did not exist; it was created as tests/brandScripts.test.js.

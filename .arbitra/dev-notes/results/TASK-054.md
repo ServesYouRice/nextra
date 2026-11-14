@@ -1,3 +1,0 @@
-TASK-054 (lane server): the CSP now carries upgrade-insecure-requests only when LOCAL_HTTPS is on and ALLOW_INSECURE_TRUSTED_LAN_RELAY is off (the per-request variant, UQ-005, was not built; the planned static default was used). Verify commands, lint, typecheck and npm test (501 tests) pass.
-
-Test notes: the prompt names no test file to extend beyond tests/serverIntegration.test.js, and VAL-080 allows an integration request, so the new test spawns the real server four times (about 7 seconds in all). For LOCAL_HTTPS=true it points HTTPS_CERT_DIR at a temporary folder, so no certificate is written into the shared certs link. The existing integration test already asserted the directive absent for LOCAL_HTTPS=false with the relay flag on; it was left unchanged.

@@ -1,1 +1,0 @@
-TASK-061 (client lane, branch lane/client, commit 6315eea): added tryAllTransports: true (socket.io-client 4.8.4 installed) in src/lib/socketOptions.mjs; SocketContext uses it. WebSocket stays first. Proof test failed on the old options (three websocket errors, never connected). Suite: lint and typecheck clean, npm test 502/502.

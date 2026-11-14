@@ -1,1 +1,0 @@
-TASK-095 (lane obs, commit beb4be6): the stop-before-rewrite test fake now records StartStream and toggles outputActive; the test asserts outputActive is false and order excludes StartStream. The order assertion is unchanged. Mutation check (StartStream injected at the end of configureObsStream, reverted): the test fails. Full suite: 1285 pass, 0 fail; lint and typecheck clean.

@@ -1,1 +1,0 @@
-TASK-059: skip link now moves focus to #main through an onClick (preventDefault), and the router ignores a '#main' hash by restoring the previous route and focusing main. Two Playwright tests (#watch, #host) failed before the fix with the NotFound view and the '#main' hash; they pass after. Full ui-semantics spec 40/40; lint, typecheck clean; npm test 500/500.
