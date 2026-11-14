@@ -929,8 +929,9 @@ test('fullscreen control exposes pressed state and exits fullscreen', async ({ b
 });
 
 // Joined, the viewer page is the top bar and the picture. The control bar sits
-// on the picture, rests after 3 seconds without input, and comes back for the
-// pointer and for keyboard focus.
+// on the picture, rests after 3 seconds without input (also under a pointer
+// that only rests on the picture, and in full screen), and comes back for the
+// pointer and for keyboard focus. It has a volume slider beside the sound button.
 test('the viewer\'s controls sit on the picture and the picture fills the window', async ({ browser, request }) => {
     const hostContext = await browser.newContext();
     const viewerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -1007,6 +1008,50 @@ test('the viewer\'s controls sit on the picture and the picture fills the window
     await expect(stage.getByRole('button', { name: 'Leave Room' })).toBeFocused();
     await viewerPage.waitForTimeout(4000);
     expect(await opacity(), 'keyboard focus inside the stage keeps the bar').toBe('1');
+
+    // A pointer that only rests on the picture does not keep the bar.
+    await viewerPage.evaluate(() => document.activeElement?.blur());
+    await viewerPage.mouse.move(stageBox.x + stageBox.width / 2, stageBox.y + stageBox.height / 2);
+    await expect.poll(opacity).toBe('1');
+    await viewerPage.waitForTimeout(4000);
+    expect(await opacity(), 'the bar rests under a still pointer').toBe('0');
+
+    // The volume slider: it sets the picture's volume, 0 mutes, and the sound
+    // button brings the sound back at half.
+    const playerVolume = () => viewerPage.locator('video')
+        .evaluate((video) => ({ percent: Math.round(video.volume * 100), muted: video.muted }));
+    const slider = stage.getByRole('slider', { name: 'Volume' });
+    await expect(slider).toHaveValue('100');
+    await slider.focus();
+    for (let press = 0; press < 30; press += 1) await viewerPage.keyboard.press('ArrowLeft');
+    await expect(slider).toHaveValue('70');
+    expect(await playerVolume()).toEqual({ percent: 70, muted: false });
+    await viewerPage.keyboard.press('Home');
+    await expect(slider).toHaveValue('0');
+    expect(await playerVolume()).toEqual({ percent: 0, muted: true });
+    await stage.getByRole('button', { name: 'Unmute Audio', exact: true }).click();
+    await expect(slider).toHaveValue('50');
+    expect(await playerVolume()).toEqual({ percent: 50, muted: false });
+    await stage.getByRole('button', { name: 'Mute Audio', exact: true }).click();
+    await expect(slider).toHaveValue('0');
+    expect(await playerVolume()).toEqual({ percent: 50, muted: true });
+    await stage.getByRole('button', { name: 'Unmute Audio', exact: true }).click();
+    await expect(slider).toHaveValue('50');
+
+    // Full screen is all picture: the bar and the pointer still go after a rest
+    // and come back when the pointer moves.
+    await stage.getByRole('button', { name: 'Fullscreen', exact: true }).click();
+    await expect.poll(() => viewerPage.evaluate(() => document.fullscreenElement === document.querySelector('.video-container')))
+        .toBe(true);
+    await viewerPage.mouse.move(400, 300);
+    await expect.poll(opacity).toBe('1');
+    await viewerPage.waitForTimeout(4000);
+    expect(await opacity(), 'the bar rests in full screen').toBe('0');
+    expect(await stage.locator('.watch-picture').evaluate((element) => getComputedStyle(element).cursor)).toBe('none');
+    await viewerPage.mouse.move(430, 320);
+    await expect.poll(opacity).toBe('1');
+    await stage.getByRole('button', { name: 'Exit Fullscreen', exact: true }).click();
+    await expect.poll(() => viewerPage.evaluate(() => document.fullscreenElement === null)).toBe(true);
 
     await expect(viewerPage.locator('.connection-quality')).toHaveCount(0);
     await expect(viewerPage.getByRole('status').filter({ hasText: 'WebRTC mode active' }))

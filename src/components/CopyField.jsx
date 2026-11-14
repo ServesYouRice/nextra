@@ -39,7 +39,6 @@ function splitAtMarker(value, marker) {
  * - shortenFrom: the value stays on one line; when it does not fit, it is cut
  *   in the middle, keeping its start and everything from this marker on. The
  *   element's text stays the full value.
- * - mainButtonText: a full-width main button under the value that copies it.
  * - tag: shown after the label; labelTitle and description explain the label
  *   (as its title and as a visually hidden description of the copy button).
  * - copyName: the name the toast uses instead of the label.
@@ -52,7 +51,6 @@ export default function CopyField({
     className = '',
     copyButtonLabel,
     shortenFrom,
-    mainButtonText,
     tag,
     labelTitle,
     description,
@@ -141,12 +139,6 @@ export default function CopyField({
             </button>
             {feedback}
             {description && <span className="visually-hidden" id={descriptionId}>{description}</span>}
-            {mainButtonText && (
-                <button type="button" className="btn btn-primary btn-main copy-field-main" onClick={handleCopy}>
-                    <CopyIcon />
-                    {mainButtonText}
-                </button>
-            )}
         </div>
     );
 }

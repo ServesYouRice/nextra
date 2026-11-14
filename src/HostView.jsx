@@ -18,6 +18,7 @@ import { ASSUMED_OPERATOR_ACCESS, fetchHostConfig, readOperatorAccess, signOutHo
 import { RELOAD_PRESERVE, createStartAttempt, startOperationGuardFor } from './lib/startOperationGuard.mjs';
 import { obsOperationQueue } from './lib/obsOperationQueue.mjs';
 import { obsSetupSteps } from './lib/obsSetupSteps.mjs';
+import { publicLinkNote } from './lib/inviteLinks.mjs';
 import {
     START_PHASES,
     createCancellableWait,
@@ -441,6 +442,41 @@ function forgetHostRecoverySession(stored) {
 // (styled in index.css) and sits inside its label, so the whole row is the click
 // target. The long hint is not shown: it is the label's title and a visually
 // hidden description. A note is shown, for the one thing the host must see.
+// The icon of a capture source: a screen for this browser, a ring for OBS. The
+// tab and the Start button show the same one, so the two capture modes look
+// alike. CSS sets the size in the button.
+function CaptureSourceIcon({ obs = false, className }) {
+    return (
+        <svg
+            className={className}
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+            focusable="false"
+        >
+            {obs
+                ? (
+                    <>
+                        <circle cx="12" cy="12" r="9" />
+                        <circle cx="12" cy="12" r="3" />
+                    </>
+                )
+                : (
+                    <>
+                        <rect x="3" y="4" width="18" height="13" rx="2" />
+                        <path d="M8 21h8M12 17v4" />
+                    </>
+                )}
+        </svg>
+    );
+}
+
 function SettingSwitch({ id, label, hint, note, checked, disabled = false, onChange }) {
     const describedBy = note || hint ? `${id}Hint` : undefined;
     return (
@@ -2311,13 +2347,7 @@ export default function HostView() {
     const localWatchLink = roomCode ? `${lanBaseUrl}/#watch/${roomCode}` : '';
     const publicWatchLink = roomCode && shareBaseUrl ? `${shareBaseUrl}/#watch/${roomCode}` : '';
     const showPublicLink = !!publicWatchLink && publicWatchLink !== localWatchLink;
-    const publicLinkHint = showPublicLink
-        ? ''
-        : publicShareStatus === 'starting'
-            ? 'Public link is starting automatically. Wait a few seconds and it will appear here.'
-            : publicShareStatus === 'error'
-                ? `Public link unavailable on this machine. ${publicShareError || 'Built-in tunnel startup failed.'}`
-                : 'Works for people on your network. There is no public link on this machine.';
+    const publicLinkHint = publicLinkNote({ showPublicLink, publicShareStatus, publicShareError, localWatchLink });
     const whepBaseUrl = shareBaseUrl || lanBaseUrl;
     const whepPlaybackUrl = whepEnabled && roomCode && whepBaseUrl
         ? `${whepBaseUrl}/whep/watch/${roomCode}`
@@ -2335,12 +2365,23 @@ export default function HostView() {
         whipConnected,
         autoStart: obsAutoStart,
     });
-    // The stage's "Set it up by hand" opens the manual fields beside it.
+    // The stage's "Set it up by hand" opens the manual fields in the invite card.
     const openObsManualSetup = () => {
         const details = obsManualDetailsRef.current;
         if (!details) return;
         details.open = true;
         details.querySelector('summary')?.focus();
+    };
+    // "More options" opens inside the settings panel and "Set it up by hand"
+    // inside the invite card, and both are only as tall as the preview: their
+    // rows would open below the edge, so the list they are in scrolls them to
+    // its top. On a phone neither list scrolls.
+    const handleDisclosureToggle = (evt) => {
+        const details = evt.currentTarget;
+        const body = details.parentElement;
+        if (!details.open || !body || body.scrollHeight <= body.clientHeight + 1) return;
+        const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+        body.scrollTo({ top: details.offsetTop - body.offsetTop, behavior: reducedMotion ? 'auto' : 'smooth' });
     };
     // The OBS codec and relay fallback state, for the diagnostics section.
     const obsDiagnosticSummary = ingestMode === 'obs' && roomCode
@@ -2355,10 +2396,15 @@ export default function HostView() {
         ].filter(Boolean).join(' | ')
         : '';
     // With "Set OBS up for me" off, Nextra sends OBS no picture settings, so the
-    // three picture rows have nothing to change.
+    // three picture rows have nothing to change. A line under them says so. The
+    // panel carries "pictures-off" in both capture modes while the switch is
+    // off, because that line makes the OBS rows taller and the OBS rows set the
+    // control height for both modes.
     const picturesOff = ingestMode === 'obs' && !obsApplySettings;
-    // The room rows: visible rows of the panel in browser mode, inside "More
-    // options" in OBS mode.
+    // The room rows: visible rows of the panel in browser mode, which has room
+    // for all of them, and inside "More options" in OBS mode. The pause/play
+    // switch is there only on a server that allows it (ALLOW_REMOTE_MEDIA_CONTROL):
+    // a host cannot turn the server's setting on from this page.
     const roomRows = (
         <>
             <div className="setting-row setting-row-inline">
@@ -2391,6 +2437,15 @@ export default function HostView() {
                 checked={reloadRecoveryEnabled}
                 onChange={(evt) => setReloadRecoveryEnabled(evt.target.checked)}
             />
+            {remoteMediaControlEnabled && (
+                <SettingSwitch
+                    id="allowMediaControl"
+                    label="Let viewers pause/play media"
+                    hint="Viewers get a button that presses the Play/Pause media key on the computer that runs Nextra"
+                    checked={allowMediaControl}
+                    onChange={(evt) => setAllowMediaControl(evt.target.checked)}
+                />
+            )}
         </>
     );
 
@@ -2450,10 +2505,7 @@ export default function HostView() {
                                     disabled={resumePending}
                                     onChange={() => handleIngestModeChange('browser')}
                                 />
-                                <svg className="source-tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                    <rect x="3" y="4" width="18" height="13" rx="2" />
-                                    <path d="M8 21h8M12 17v4" />
-                                </svg>
+                                <CaptureSourceIcon className="source-tab-icon" />
                                 This browser
                             </label>
                             <label className="source-tab">
@@ -2465,10 +2517,7 @@ export default function HostView() {
                                     disabled={resumePending}
                                     onChange={() => handleIngestModeChange('obs')}
                                 />
-                                <svg className="source-tab-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                    <circle cx="12" cy="12" r="9" />
-                                    <circle cx="12" cy="12" r="3" />
-                                </svg>
+                                <CaptureSourceIcon obs className="source-tab-icon" />
                                 OBS
                             </label>
                         </div>
@@ -2486,10 +2535,8 @@ export default function HostView() {
                         <video ref={videoRef} autoPlay muted playsInline className="video-player" />
                         {!isSharing && !showHostSignIn && (
                             <div className="video-overlay host-stage-empty">
-                                <svg className="host-stage-empty-icon" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                    <rect x="3" y="4" width="18" height="13" rx="2" />
-                                    <path d="M8 21h8M12 17v4" />
-                                </svg>
+                                {/* Both capture modes get the same preview: the title, a
+                                    quiet line or list, and the button with the source's icon. */}
                                 <p className="host-stage-empty-title">Nothing is being shared yet</p>
                                 {ingestMode === 'obs'
                                     ? <ObsSetupStepList steps={obsIdleSteps} />
@@ -2505,6 +2552,7 @@ export default function HostView() {
                                         onClick={handleStartSharing}
                                         disabled={status === 'connecting'}
                                     >
+                                        <CaptureSourceIcon obs={ingestMode === 'obs'} />
                                         {status === 'connecting'
                                             ? 'Connecting...'
                                             : resumePending
@@ -2518,10 +2566,6 @@ export default function HostView() {
                         )}
                         {showHostSignIn && (
                             <div className="video-overlay host-stage-empty">
-                                <svg className="host-stage-empty-icon" viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                    <rect x="3" y="4" width="18" height="13" rx="2" />
-                                    <path d="M8 21h8M12 17v4" />
-                                </svg>
                                 <p className="host-stage-empty-title">Nothing is being shared yet</p>
                                 <p className="video-overlay-sub host-stage-empty-sub">
                                     {operatorAccess.signInAvailable
@@ -2706,7 +2750,7 @@ export default function HostView() {
                         />
                     )}
                     {status === 'idle' && !showHostSignIn && (
-                        <div className={`settings-wrapper host-settings-panel${ingestMode === 'obs' ? ' settings-expanded' : ''}`}>
+                        <div className={`settings-wrapper host-settings-panel${ingestMode === 'obs' ? ' settings-expanded' : ''}${obsApplySettings ? '' : ' pictures-off'}${remoteMediaControlEnabled ? ' with-media-control' : ''}`}>
                             <h2 className="visually-hidden">Settings</h2>
                             <div className="host-settings-body">
                                 <div className="settings-group capture-settings">
@@ -2806,13 +2850,20 @@ export default function HostView() {
                                         {roomRows}
                                     </div>
                                 )}
-                                <details id="hostMoreOptions" className="host-more-options">
+                                {/* Browser mode shows every option, so it has no "More
+                                    options". The OBS switches stay in the page there,
+                                    unseen, as the rest of the OBS panel does. In OBS
+                                    mode the panel shows four controls, as tall as the
+                                    browser mode's three, and every switch is in here. */}
+                                <details
+                                    id="hostMoreOptions"
+                                    className="host-more-options"
+                                    hidden={ingestMode !== 'obs'}
+                                    inert={ingestMode !== 'obs' || undefined}
+                                    onToggle={handleDisclosureToggle}
+                                >
                                     <summary>More options</summary>
-                                    <div
-                                        className="settings-group"
-                                        hidden={ingestMode !== 'obs'}
-                                        inert={ingestMode !== 'obs' || undefined}
-                                    >
+                                    <div className="settings-group">
                                         <SettingSwitch
                                             id="obsApplySettings"
                                             label="Set OBS up for me"
@@ -2843,20 +2894,11 @@ export default function HostView() {
                                             onChange={(e) => handleObsTryAv1Change(e.target.checked)}
                                         />
                                     </div>
-                                    <div className={`settings-group${ingestMode === 'obs' ? ' more-options-room' : ''}`}>
-                                        {ingestMode === 'obs' && roomRows}
-                                        <SettingSwitch
-                                            id="allowMediaControl"
-                                            label="Allow viewers to pause/play media"
-                                            hint={remoteMediaControlEnabled
-                                                ? 'Viewers can remotely press Play/Pause on your keyboard'
-                                                : undefined}
-                                            note={remoteMediaControlEnabled ? undefined : 'Disabled by the server operator'}
-                                            checked={allowMediaControl}
-                                            disabled={!remoteMediaControlEnabled}
-                                            onChange={(evt) => setAllowMediaControl(evt.target.checked)}
-                                        />
-                                    </div>
+                                    {ingestMode === 'obs' && (
+                                        <div className="settings-group more-options-room">
+                                            {roomRows}
+                                        </div>
+                                    )}
                                 </details>
                             </div>
                         </div>
@@ -2877,8 +2919,9 @@ export default function HostView() {
                     )}
 
                     {roomCode && (
-                        <div className={`invite-column${ingestMode === 'obs' ? ' streaming-info-row' : ''}`}>
                         <section className="invite-card">
+                            {/* One card in both capture modes, as tall as the preview. In
+                                OBS mode its last row is the manual OBS setup. */}
                             <RoomSharePanel
                                 roomCode={roomCode}
                                 localWatchLink={localWatchLink}
@@ -2886,26 +2929,40 @@ export default function HostView() {
                                 showPublicLink={showPublicLink}
                                 publicLinkHint={publicLinkHint}
                                 whepPlaybackUrl={whepPlaybackUrl}
-                            />
-                        </section>
-                    {ingestMode === 'obs' && (
-                        <details className="obs-manual-details" ref={obsManualDetailsRef}>
-                            <summary>Set it up by hand</summary>
-                            <div>
-                                <CopyField label="WHIP URL" value={buildWhipBroadcastUrl(roomCode)} />
-                                <CopyField label="Bearer Token" value={hostToken} />
-                                <div className="obs-manual-note">
-                                    In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
-                                </div>
-                                {(obsAv1Mode || obsVideoCodec === 'av1') && (
-                                    <div className="obs-av1-note">
-                                        Keep AV1 selected in OBS output. This room disables relay fallback and expects viewers to connect over WebRTC.
-                                    </div>
+                            >
+                                {ingestMode === 'obs' && (
+                                    <details
+                                        className="obs-manual-details"
+                                        ref={obsManualDetailsRef}
+                                        onToggle={handleDisclosureToggle}
+                                    >
+                                        <summary>Set it up by hand</summary>
+                                        <div>
+                                            <CopyField
+                                                className="obs-manual-field"
+                                                label="WHIP URL"
+                                                value={buildWhipBroadcastUrl(roomCode)}
+                                                copyButtonLabel="Copy WHIP URL"
+                                            />
+                                            <CopyField
+                                                className="obs-manual-field"
+                                                label="Bearer Token"
+                                                value={hostToken}
+                                                copyButtonLabel="Copy bearer token"
+                                            />
+                                            <div className="obs-manual-note">
+                                                In OBS: Settings &rarr; Stream &rarr; Service: WHIP &rarr; Server: paste URL above &rarr; Bearer Token: paste token above
+                                            </div>
+                                            {(obsAv1Mode || obsVideoCodec === 'av1') && (
+                                                <div className="obs-av1-note">
+                                                    Keep AV1 selected in OBS output. This room disables relay fallback and expects viewers to connect over WebRTC.
+                                                </div>
+                                            )}
+                                        </div>
+                                    </details>
                                 )}
-                            </div>
-                        </details>
-                    )}
-                        </div>
+                            </RoomSharePanel>
+                        </section>
                     )}
                 </div>
                 {isSharing && (

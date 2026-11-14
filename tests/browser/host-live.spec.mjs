@@ -11,10 +11,12 @@ const { claimServerPorts } = require('../serverPorts.js');
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 // The invite card a host sees while sharing: the room code, one row per link
-// (public, local, player), the link to share marked with the page's one main
-// button, and the card as tall as the preview. The shared server has a public
+// (public, local, player), each with its own copy button, the link to share
+// marked, and the card as tall as the preview. The shared server has a public
 // and a local link; two servers of this spec's own show three links (WHEP on)
 // and one (no public link). Each server gets one room, which the test ends.
+// Every server here listens on this computer only, so its local link is a
+// localhost link: the card says so and never marks it as the one to share.
 
 // A canvas capture stub in place of the screen picker, as in ui-semantics.
 async function useFakeScreenShare(page) {
@@ -119,7 +121,7 @@ test.describe('on the shared server: a public and a local link', () => {
             expect(shownCode).toMatch(/^[A-Z0-9]{3}-[A-Z0-9]{3}$/);
             expect(shownCode.replace('-', '')).toBe(code);
 
-            expect(await rowLabels(page)).toEqual(['Public link', 'Local link · same network']);
+            expect(await rowLabels(page)).toEqual(['Public link', 'Local link · this computer only']);
             await expect(card.getByText('Share this', { exact: true })).toHaveCount(1);
             await expect(publicRow.getByText('Share this', { exact: true })).toBeVisible();
 
@@ -127,13 +129,33 @@ test.describe('on the shared server: a public and a local link', () => {
             await expect(page.locator('.copy-field', { hasText: 'Local Link' })).toHaveCount(1);
             await expect(page.getByText('Local Link')).toBeVisible();
 
-            const mainButtons = page.locator('.btn-main');
-            await expect(mainButtons).toHaveCount(1);
-            await expect(mainButtons).toHaveAccessibleName('Copy link');
-            await expect(publicRow.getByRole('button', { name: 'Copy link', exact: true })).toBeVisible();
-            await mainButtons.click();
+            // Each row copies with its own small button; the card has no large one.
+            await expect(page.locator('.btn-main')).toHaveCount(0);
+            await expect(card.getByRole('button', { name: 'Copy link', exact: true })).toHaveCount(0);
+            await expect(card.locator('.copy-field-copy')).toHaveCount(3);
+            await expect(card.locator('.invite-link-recommended')).toHaveCount(1);
+            await expect(publicRow).toHaveClass(/invite-link-recommended/);
+            await publicRow.getByRole('button', { name: 'Copy public link' }).click();
             await expect.poll(() => readClipboard(page)).toBe(publicLink);
             await expect(publicRow.locator('.copy-field-feedback')).toHaveText('Copied!');
+
+            // A label sits clear of its value, and the rows clear of each other.
+            const gaps = await card.evaluate((el) => {
+                const top = (node) => node.getBoundingClientRect().top;
+                const bottom = (node) => node.getBoundingClientRect().bottom;
+                const row = el.querySelector('.invite-link');
+                return {
+                    codeLabelToValue: top(el.querySelector('.invite-code .copy-field-value'))
+                        - bottom(el.querySelector('.invite-code .copy-field-top')),
+                    linkLabelToValue: top(row.querySelector('.copy-field-value')) - bottom(row.querySelector('.copy-field-top')),
+                    rowPadding: parseFloat(getComputedStyle(row).paddingTop),
+                };
+            });
+            expect(gaps.codeLabelToValue).toBeGreaterThanOrEqual(6);
+            expect(gaps.linkLabelToValue).toBeGreaterThanOrEqual(6);
+            expect(gaps.rowPadding).toBeGreaterThanOrEqual(14);
+            const copyBox = await card.locator('.copy-field-copy').first().boundingBox();
+            expect(copyBox.height).toBeGreaterThanOrEqual(36);
 
             await page.getByRole('button', { name: 'Copy local link' }).click();
             await expect.poll(() => readClipboard(page)).toBe(localLink);
@@ -181,6 +203,15 @@ test.describe('on the shared server: a public and a local link', () => {
             expect(Math.abs((stopBox.x + stopBox.width) - (cardBox.x + cardBox.width)), 'Stop and the card: right edges')
                 .toBeLessThanOrEqual(1);
             expect(stopBox.y, 'Stop is under the card').toBeGreaterThanOrEqual(cardBox.y + cardBox.height);
+            // Stop and the quality button are the two controls of one row: the
+            // same height, starting and ending on the same lines.
+            const qualityBox = await qualityButton.boundingBox();
+            expect(Math.abs(qualityBox.y - stopBox.y), `quality top ${qualityBox.y} vs Stop top ${stopBox.y}`).toBeLessThanOrEqual(1);
+            expect(Math.abs(qualityBox.height - stopBox.height), `quality ${qualityBox.height} vs Stop ${stopBox.height}`)
+                .toBeLessThanOrEqual(1);
+            const corners = await page.evaluate(() => ['.quality-button', '.host-stop']
+                .map((selector) => getComputedStyle(document.querySelector(selector)).borderRadius));
+            expect(corners[0]).toBe(corners[1]);
 
             await page.setViewportSize({ width: 1280, height: 720 });
             await expectLinksOnOneLine(page);
@@ -299,10 +330,39 @@ async function openHostContext(browser) {
 test.describe('on a server with WHEP on and a public address: three links', () => {
     let server = null;
     test.beforeAll(async () => {
-        server = await startServer({ WHEP_ENABLED: 'true', SHARE_BASE_URL: 'https://share.nextra.test' });
+        server = await startServer({
+            WHEP_ENABLED: 'true',
+            SHARE_BASE_URL: 'https://share.nextra.test',
+            ALLOW_REMOTE_MEDIA_CONTROL: 'true',
+        });
     });
     test.afterAll(async () => {
         if (server) await stopServer(server);
+    });
+
+    // This server allows remote pause/play, so the host gets the switch for it.
+    test('the pause/play switch is a row of the panel where the server allows it', async ({ browser }) => {
+        const context = await openHostContext(browser);
+        const page = await context.newPage();
+        try {
+            await page.goto(`${server.baseUrl}/#host`);
+            const media = page.getByLabel('Let viewers pause/play media');
+            await expect(media).toBeVisible();
+            await expect(media).toBeEnabled();
+            await expect(media).not.toBeChecked();
+            await expect(page.getByText('Disabled by the server operator')).toHaveCount(0);
+            const body = await page.locator('.host-settings-body').evaluate((el) => ({
+                scrollHeight: el.scrollHeight,
+                clientHeight: el.clientHeight,
+            }));
+            expect(body.scrollHeight).toBeLessThanOrEqual(body.clientHeight + 1);
+            await page.locator('#obsMode').check();
+            await expect(media).toBeHidden();
+            await page.locator('.host-more-options summary').click();
+            await expect(media).toBeVisible();
+        } finally {
+            await context.close();
+        }
     });
 
     test('the rows are public, local and player, and only the public row is marked', async ({ browser }) => {
@@ -312,12 +372,13 @@ test.describe('on a server with WHEP on and a public address: three links', () =
             await startSharing(page, `${server.baseUrl}/#host`);
             expect(await rowLabels(page)).toEqual([
                 'Public link',
-                'Local link · same network',
+                'Local link · this computer only',
                 'Player link · WHEP',
             ]);
             await expect(page.locator('.invite-card').getByText('Share this', { exact: true })).toHaveCount(1);
             await expect(linkRow(page, 'Public link').getByText('Share this', { exact: true })).toBeVisible();
-            await expect(page.locator('.btn-main')).toHaveCount(1);
+            await expect(page.locator('.btn-main')).toHaveCount(0);
+            await expect(page.locator('.invite-card .copy-field-copy')).toHaveCount(4);
 
             const playerRow = linkRow(page, 'Player link');
             const playerLink = await playerRow.locator('.copy-field-value').innerText();
@@ -349,20 +410,21 @@ test.describe('on a server with no public link and WHEP off: one link', () => {
         if (server) await stopServer(server);
     });
 
-    test('the local row is marked, has the Copy link button, and the card says why', async ({ browser }) => {
+    test('a localhost link is not marked as the one to share, and the card says nobody else can join', async ({ browser }) => {
         const context = await openHostContext(browser);
         const page = await context.newPage();
         try {
             await startSharing(page, `${server.baseUrl}/#host`);
-            expect(await rowLabels(page)).toEqual(['Local link · same network']);
+            expect(await rowLabels(page)).toEqual(['Local link · this computer only']);
             const localRow = linkRow(page, 'Local link');
-            await expect(localRow.getByText('Share this', { exact: true })).toBeVisible();
-            await expect(page.locator('.invite-card').getByText('Share this', { exact: true })).toHaveCount(1);
-            const copyLink = localRow.getByRole('button', { name: 'Copy link', exact: true });
-            await expect(copyLink).toHaveClass(/btn-main/);
-            await expect(page.locator('.btn-main')).toHaveCount(1);
-            await expect(page.getByText('Works for people on your network. There is no public link on this machine.'))
-                .toBeVisible();
+            await expect(localRow.locator('.copy-field-value')).toHaveText(/^http:\/\/localhost:\d+\/#watch\/[A-Z0-9]{6}$/);
+            await expect(page.locator('.invite-card').getByText('Share this', { exact: true })).toHaveCount(0);
+            await expect(page.locator('.invite-link-recommended')).toHaveCount(0);
+            const copyLink = localRow.getByRole('button', { name: 'Copy local link' });
+            await expect(page.locator('.btn-main')).toHaveCount(0);
+            const note = page.locator('.invite-note');
+            await expect(note).toHaveText(/^Nobody else can join yet: the local link only opens on this computer and there is no public link\./);
+            await expect(page.getByText('Works for people on your network', { exact: false })).toHaveCount(0);
 
             const localLink = await localRow.locator('.copy-field-value').innerText();
             await copyLink.click();
