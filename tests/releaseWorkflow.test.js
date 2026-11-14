@@ -35,7 +35,7 @@ test('the release matrix builds and uploads both platform artifacts', () => {
     const workflow = read('.github/workflows/release.yml');
 
     assert.match(workflow, /^\s*package-smoke:\s*$/m);
-    assert.match(workflow, /os: \[windows-2022, macos-14\]/);
+    assert.match(workflow, /os: \[windows-2022, macos-15\]/);
     assert.match(workflow, /Nextra-macos-arm64\r?$/m);
     assert.match(workflow, /Nextra-macos-arm64\.sha256\r?$/m);
     assert.match(workflow, /Nextra-\$\{\{ github\.ref_name \}\}-windows/);
@@ -73,7 +73,7 @@ test('pull-request macOS CI mirrors the same packaged smoke path', () => {
     const workflow = read('.github/workflows/ci.yml');
 
     assert.match(workflow, /macos-package:/);
-    assert.match(workflow, /macos-package:\r?\n\s+runs-on: macos-14/);
+    assert.match(workflow, /macos-package:\r?\n\s+runs-on: macos-15/);
     assert.match(workflow, /run: npm run package:artifact\r?$/m);
     assert.match(workflow, /npx playwright install chromium/);
     assert.match(workflow, /run: node scripts\/smoke-packaged\.js/);
