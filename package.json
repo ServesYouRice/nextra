@@ -62,7 +62,7 @@
     "eslint": "^10.13.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.7",
-    "globals": "^17.12.0",
+    "globals": "^17.14.0",
     "mediasoup-client": "^3.24.5",
     "rcedit": "^5.0.2",
     "react": "^19.3.1",
