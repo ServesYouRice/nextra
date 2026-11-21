@@ -7,7 +7,8 @@ set -uo pipefail
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
 run_checks() {
-  # REPO-SPECIFIC: the CI's verify and browser-media jobs.
+  # REPO-SPECIFIC: every Linux check. Hosted CI no longer runs them; it only
+  # builds and smoke-tests the Windows and macOS packages (.github/workflows/ci.yml).
   # release:prep = lint, typecheck, unit/integration tests, coverage gate,
   # build, packaging evaluation, open-source preflight and production audit.
   # Left out, because they cannot run in a Linux container: the Windows and
