@@ -114,6 +114,7 @@ docker run -d --name nextra --restart unless-stopped --network host \
 
 - **Host networking** lets viewers reach the media ports directly (`RTC_MIN_PORT` to `RTC_MAX_PORT`, UDP and TCP); open them in the firewall. Set `BIND_HOST`, `RTC_LISTEN_IP` and `PUBLIC_IP` for the server's address (see [Configuration](#configuration)).
 - Put a reverse proxy that ends TLS in front of port 3000 and keep that port closed to the internet. Set `SHARE_BASE_URL` to the public address, and name the proxy in `TRUSTED_PROXY_CIDRS` when it does not run on this machine's loopback.
+- Keep `TRUST_PROXY=1` when that reverse proxy is the only one in front of Nextra (the host name points straight at the server, for example a DNS-only record). Set `TRUST_PROXY=2` only when a CDN proxy such as Cloudflare's also sits in front of it: with 2 and no second proxy, Nextra believes an address the viewer wrote, and the per-viewer limits such as the sign-in lockout can be dodged.
 - The host signs in from another computer with the host password: see [Hosting from another computer](#hosting-from-another-computer).
 - The image sets `EXTERNAL_SUPERVISOR=true`, so a media-engine crash ends the container and the restart policy starts a new one. It runs as a non-root user on a read-only root, and `/healthz` and `/readyz` serve health checks.
 - `npm run release:image` is the local release. It runs every check, builds the image tagged with the commit, starts it locked down, and scans it; a fixable high or critical finding stops it. Add `-- --push` to publish the image and print its digest.
