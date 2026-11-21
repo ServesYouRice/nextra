@@ -716,3 +716,104 @@ test('a peer outside TRUSTED_PROXY_CIDRS that sends X-Forwarded-Proto: wss or ht
         viewer.close();
     }
 });
+
+// Remote OBS: a host on another computer cannot reach the loopback WHIP listener, so with PUBLIC_WHIP_ENABLED WHIP is
+// also served on the public listener behind the proxy. It takes the same authorisation as the loopback listener: the
+// room's host token as the Bearer token, never nothing.
+const WHIP_OFFER = [
+    'v=0',
+    'o=- 0 0 IN IP4 127.0.0.1',
+    's=-',
+    't=0 0',
+    'a=group:BUNDLE 0',
+    'a=ice-ufrag:testufrag',
+    'a=ice-pwd:testpwd1234567890123456',
+    'a=fingerprint:sha-256 11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00',
+    'a=setup:actpass',
+    'm=video 9 UDP/TLS/RTP/SAVPF 96',
+    'c=IN IP4 0.0.0.0',
+    'a=mid:0',
+    'a=sendonly',
+    'a=rtpmap:96 H264/90000',
+    'a=fmtp:96 profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1',
+    'a=ssrc:1111 cname:test',
+    '',
+].join('\r\n');
+
+test('with PUBLIC_WHIP_ENABLED the public listener accepts a WHIP publish with the host token and refuses one without', { concurrency: false, timeout: 60_000 }, async (t) => {
+    const proxy = await findNonLoopbackAddress();
+    if (!proxy) {
+        t.skip('this machine has no non-loopback IPv4 address to connect from');
+        return;
+    }
+    const { port: whipPort } = await claimServerPorts();
+    const { port } = await startServer(t, (claimedPort) => ({
+        LAN_IP: proxy,
+        TRUSTED_PROXY_CIDRS: `${proxy}/32`,
+        EXTRA_ALLOWED_ORIGINS: `https://${proxy}:${claimedPort}`,
+        OPERATOR_TOKEN,
+        WHIP_ENABLED: 'true',
+        PUBLIC_WHIP_ENABLED: 'true',
+        WHIP_HTTP_PORT: String(whipPort),
+        WHIP_BIND_HOST: '127.0.0.1',
+    }));
+    const sockets = [];
+    t.after(() => sockets.forEach((socket) => socket.close()));
+
+    // The page tells the host that WHIP is served on the public origin too.
+    const relayedConfig = (await requestFrom(proxy, port, { pathname: '/api/config', headers: { host: `${proxy}:${port}` } })).json;
+    assert.equal(relayedConfig.publicWhipEnabled, true);
+
+    const local = await connectSocket(`http://127.0.0.1:${port}`, { Origin: `http://127.0.0.1:${port}` });
+    sockets.push(local);
+    const created = await socketRequest(local, 'create-room', { ingestMode: 'obs' });
+    assert.equal(created.success, true, `the host's own socket could not create an OBS room: ${created.error}`);
+
+    const publish = (headers) => requestFrom(proxy, port, {
+        method: 'POST',
+        pathname: `/whip/broadcast/${created.code}`,
+        headers: {
+            host: 'stream.example.com',
+            'content-type': 'application/sdp',
+            'x-forwarded-for': '203.0.113.9',
+            'x-forwarded-proto': 'https',
+            'x-forwarded-host': 'stream.example.com',
+            ...headers,
+        },
+        body: WHIP_OFFER,
+    });
+
+    for (const [label, headers] of [
+        ['no token', {}],
+        ['another token', { authorization: 'Bearer not-the-host-token' }],
+        ['the operator token', { authorization: `Bearer ${OPERATOR_TOKEN}` }],
+    ]) {
+        const refused = await publish(headers);
+        assert.equal(refused.status, 403, `a public WHIP publish with ${label} was not refused`);
+    }
+
+    const accepted = await publish({ authorization: `Bearer ${created.hostToken}` });
+    assert.equal(accepted.status, 201, `a public WHIP publish with the host token was refused: ${JSON.stringify(accepted.json)}`);
+    assert.match(String(accepted.headers['content-type']), /^application\/sdp\b/);
+    // The resource OBS deletes at the end is on the public HTTPS origin too.
+    assert.match(String(accepted.headers.location), /^https:\/\/stream\.example\.com\/whip\/broadcast\/[^/]+$/);
+});
+
+test('without PUBLIC_WHIP_ENABLED the public listener serves no WHIP, even with the host token', { concurrency: false, timeout: 60_000 }, async (t) => {
+    const { port: whipPort } = await claimServerPorts();
+    const { port } = await startServer(t, { OPERATOR_TOKEN, WHIP_ENABLED: 'true', PUBLIC_WHIP_ENABLED: 'false', WHIP_HTTP_PORT: String(whipPort) });
+    const sockets = [];
+    t.after(() => sockets.forEach((socket) => socket.close()));
+    assert.equal((await requestFrom('127.0.0.1', port, { pathname: '/api/config', headers: { host: `127.0.0.1:${port}` } })).json.publicWhipEnabled, false);
+    const local = await connectSocket(`http://127.0.0.1:${port}`, { Origin: `http://127.0.0.1:${port}` });
+    sockets.push(local);
+    const created = await socketRequest(local, 'create-room', { ingestMode: 'obs' });
+    assert.equal(created.success, true, created.error);
+    const response = await requestFrom('127.0.0.1', port, {
+        method: 'POST',
+        pathname: `/whip/broadcast/${created.code}`,
+        headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/sdp', authorization: `Bearer ${created.hostToken}` },
+        body: WHIP_OFFER,
+    });
+    assert.equal(response.status, 404);
+});

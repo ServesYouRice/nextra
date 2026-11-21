@@ -295,6 +295,7 @@ A room can normally only be started on the machine that runs Nextra (or from `TR
 1. Set `OPERATOR_TOKEN` to at least 32 random characters. This is the **host password**. Without it the Host page tells a remote visitor that hosting from another computer is switched off.
 2. Serve Nextra over HTTPS: `LOCAL_HTTPS=true`, a tunnel, or a reverse proxy that ends TLS (see `TRUSTED_PROXY_CIDRS` above). The sign-in is refused on plain HTTP, and the page does not send the password from an `http://` address.
 3. Open **Host** through the same public address viewers use (the tunnel URL or `SHARE_BASE_URL`) and enter the host password. The Host page then works as it does locally, with a **Sign out** button.
+4. For OBS rooms, also set `PUBLIC_WHIP_ENABLED=true`. OBS on the host's computer cannot reach the WHIP listener, which stays on the server's loopback; the server then also serves WHIP under `/whip` on its public address, and the Host page gives OBS `https://<public address>/whip/broadcast/<room code>` with the room's host token as the Bearer token. Without it the Host page shows the loopback address, which works only on the server itself.
 
 How the sign-in works:
 
@@ -354,7 +355,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 | Variable | Default | Description |
 |---|---|---|
 | `WHIP_ENABLED` | `true` | Enable WHIP ingest endpoint |
-| `PUBLIC_WHIP_ENABLED` | `false` | Also mount WHIP on the main/public server; the dedicated loopback endpoint remains available when this is off |
+| `PUBLIC_WHIP_ENABLED` | `false` | Also mount WHIP on the main/public server (under `/whip`, with the same host-token check). A Host page opened over HTTPS on a public address then gives OBS that address instead of the loopback one, so a host on another computer can stream from OBS. The dedicated loopback endpoint stays available either way |
 | `PUBLIC_WHIP_RATE_LIMIT_MAX` | `5` | Public WHIP start attempts per IP per window (an IPv6 client counts by its /64; at most 10,000 clients are tracked, oldest dropped first) |
 | `PUBLIC_WHIP_MAX_PENDING_STARTS` | `2` | Global cap on concurrent public WHIP startups before SDP/media allocation |
 | `WHIP_HTTP_PORT` | `3001` | HTTP port for WHIP endpoint |

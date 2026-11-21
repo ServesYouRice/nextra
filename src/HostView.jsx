@@ -19,6 +19,7 @@ import { RELOAD_PRESERVE, createStartAttempt, startOperationGuardFor } from './l
 import { obsOperationQueue } from './lib/obsOperationQueue.mjs';
 import { obsSetupSteps } from './lib/obsSetupSteps.mjs';
 import { publicLinkNote } from './lib/inviteLinks.mjs';
+import { buildWhipBroadcastUrl as buildWhipUrl } from './lib/whipUrl.mjs';
 import {
     START_PHASES,
     createCancellableWait,
@@ -306,11 +307,6 @@ function isLikelyLocalOrigin(origin) {
     } catch {
         return true;
     }
-}
-
-function formatHostForUrl(host) {
-    const value = String(host || '127.0.0.1').trim() || '127.0.0.1';
-    return value.includes(':') && !value.startsWith('[') ? `[${value}]` : value;
 }
 
 function parseTurnUrlInput(value) {
@@ -609,6 +605,7 @@ export default function HostView() {
     const [hasTurnServer, setHasTurnServer] = useState(false);
     const [whipHttpHost, setWhipHttpHost] = useState('127.0.0.1');
     const [whipHttpPort, setWhipHttpPort] = useState(3001);
+    const [publicWhipEnabled, setPublicWhipEnabled] = useState(false);
     const [whipHttpStatus, setWhipHttpStatus] = useState('starting');
     const [whipHttpError, setWhipHttpError] = useState('');
     const [relayFlushIntervalMs, setRelayFlushIntervalMs] = useState(300);
@@ -754,9 +751,12 @@ export default function HostView() {
     const shouldPrewarmRelay = ingestMode !== 'obs' && hasRemoteShareLink && !effectiveTurnAvailability;
     const byokTurnSessionHint = 'Keeps TURN credentials in session storage so they survive reloads and are cleared when the tab or window closes.';
     const resumeModeLockHint = 'Locked while the recovered room waits for Resume Sharing: it keeps the ingest mode it was created with.';
-    const buildWhipBroadcastUrl = useCallback((code) => (
-        `http://${formatHostForUrl(whipHttpHost)}:${whipHttpPort}/whip/broadcast/${code}`
-    ), [whipHttpHost, whipHttpPort]);
+    const buildWhipBroadcastUrl = useCallback((code) => buildWhipUrl(code, {
+        publicWhipEnabled,
+        pageOrigin: window.location.origin,
+        whipHttpHost,
+        whipHttpPort,
+    }), [publicWhipEnabled, whipHttpHost, whipHttpPort]);
 
     const buildObsAutoConfig = useCallback((whipUrl, bearerToken) => {
         const obsOpts = {
@@ -2187,6 +2187,9 @@ export default function HostView() {
         }
         if (typeof data.whipHttpStatus === 'string') {
             setWhipHttpStatus(data.whipHttpStatus);
+        }
+        if (typeof data.publicWhipEnabled === 'boolean') {
+            setPublicWhipEnabled(data.publicWhipEnabled);
         }
         if (typeof data.whipHttpError === 'string') {
             setWhipHttpError(data.whipHttpError);

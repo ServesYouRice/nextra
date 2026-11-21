@@ -813,6 +813,7 @@ function buildSocketConfigPayload(socket) {
         whipHttpStatus,
         whipHttpError,
         whipHttpUrl: getWhipHttpBaseUrl(),
+        publicWhipEnabled: config.PUBLIC_WHIP_ENABLED,
     };
 }
 
@@ -917,6 +918,7 @@ app.get('/api/config', (req, res) => {
         whipHttpStatus,
         whipHttpError,
         whipHttpUrl: getWhipHttpBaseUrl(),
+        publicWhipEnabled: config.PUBLIC_WHIP_ENABLED,
         whepEnabled: config.WHEP_ENABLED,
     });
 });
