@@ -1,5 +1,6 @@
 // server.js - Entry point: Express + Socket.io + Mediasoup
-require('dotenv').config();
+// quiet: dotenv's own "injected env" line is not JSON and would be the first line of the JSON log.
+require('dotenv').config({ quiet: true });
 const { installConsoleLogger, runWithLogContext } = require('./lib/logger');
 installConsoleLogger();
 const express = require('express');
@@ -23,7 +24,7 @@ eventLoopDelay.enable();
 const isDevMode = process.argv.includes('--dev')
     || process.env.NODE_ENV === 'development'
     || process.env.APP_ENV === 'development';
-const { createMediasoupWorker, setWorkerDeathHandler } = require('./lib/mediasoup');
+const { createMediasoupWorker, describeRtcPorts, setWorkerDeathHandler } = require('./lib/mediasoup');
 const {
     registerSocketHandlers,
     startJoinCleanup,
@@ -1782,7 +1783,7 @@ async function startWhipHttpServer(whipRouter) {
         } else {
             console.log('   Public:  configured via SHARE_BASE_URL only');
         }
-        console.log(`   UDP:     ${config.RTC_MIN_PORT}-${config.RTC_MAX_PORT}`);
+        console.log(`   RTC:     ${describeRtcPorts()}`);
 
         // Start HTTP server for WHIP (OBS rejects self-signed HTTPS certs).
         startWhipHttpServer(whipRouter).catch((err) => {

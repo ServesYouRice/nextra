@@ -1105,3 +1105,54 @@ test('the default IPv4 binding still advertises 127.0.0.1 for the host page and 
         await stop(baseUrl);
     }
 });
+
+// The start-up output under LOG_FORMAT=json: every line is JSON (dotenv's own "injected env" line was not), and the
+// banner names the media port the shared WebRTC server binds, not the whole RTC range.
+test('with LOG_FORMAT=json every start-up line is JSON and the banner names only the bound media port', { concurrency: false, timeout: 30_000 }, async (t) => {
+    const { port, rtcPort } = await claimServerPorts();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nextra-json-log-'));
+    const distDir = path.join(workDir, 'dist');
+    await fs.mkdir(distDir);
+    await fs.writeFile(path.join(distDir, 'index.html'), '<!doctype html><div id="root"></div>');
+    // An env file in the working directory, as a deployment may have: dotenv loads it.
+    await fs.writeFile(path.join(workDir, '.env'), 'NEXTRA_JSON_LOG_TEST=1\n');
+    t.after(() => fs.rm(workDir, { recursive: true, force: true }));
+
+    // Both streams: a container's log is stdout and stderr together, and dotenv wrote its line to stderr.
+    let output = '';
+    const child = spawn(process.execPath, [path.join(projectRoot, 'server.js')], {
+        cwd: workDir,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+            ...createServerTestEnv({ port, rtcPort, distDir }),
+            // The range is two ports wide; with loopback media only the first is bound.
+            RTC_MAX_PORT: String(rtcPort + 1),
+            LOG_FORMAT: 'json',
+            LOG_LEVEL: 'info',
+        },
+    });
+    child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+    t.after(async () => {
+        if (child.exitCode === null) {
+            child.kill();
+            await new Promise((resolve) => child.once('exit', resolve));
+        }
+    });
+
+    await waitForReady(baseUrl, child, () => output);
+    const deadline = Date.now() + 5_000;
+    while (!output.includes('RTC:') && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const lines = output.split('\n').filter((line) => line.trim() !== '');
+    assert.ok(lines.length > 0, output);
+    const messages = lines.map((line) => {
+        assert.doesNotThrow(() => JSON.parse(line), `not a JSON log line: ${line}`);
+        return JSON.parse(line).message;
+    });
+    const rtcLine = messages.find((message) => /^\s*RTC:/.test(message));
+    assert.ok(rtcLine, `no RTC line in the banner\n${messages.join('\n')}`);
+    assert.equal(rtcLine.trim(), `RTC:     ${rtcPort} (udp/tcp)`);
+});
