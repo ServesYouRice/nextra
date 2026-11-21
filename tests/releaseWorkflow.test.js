@@ -79,6 +79,21 @@ test('pull-request macOS CI mirrors the same packaged smoke path', () => {
     assert.match(workflow, /run: node scripts\/smoke-packaged\.js/);
 });
 
+// Hosted CI may only build and test on platforms the dev PC cannot run. The Linux checks run in the local gate.
+test('hosted CI runs only the Windows and macOS packaging jobs, and the local gate runs the Linux checks', () => {
+    const workflow = read('.github/workflows/ci.yml');
+    const jobs = [...workflow.slice(workflow.search(/^jobs:/m)).matchAll(/^ {2}([a-z0-9-]+):\r?$/gm)].map((match) => match[1]);
+    assert.deepEqual(jobs, ['windows-package', 'macos-package']);
+    assert.doesNotMatch(workflow, /ubuntu/);
+
+    const gate = read('.claude/hooks/check.sh');
+    assert.match(gate, /npm run release:prep && npm run test:e2e/);
+    const pkg = JSON.parse(read('package.json'));
+    for (const step of ['npm run lint', 'npm run typecheck', 'npm test', 'npm run test:coverage', 'npm run build', 'npm run evaluate:packaging', 'npm run oss:check', 'npm run audit:prod']) {
+        assert.ok(pkg.scripts['release:prep'].includes(step), `release:prep no longer runs ${step}`);
+    }
+});
+
 test('workflows and package metadata use the dependency-supported Node 22 baseline', () => {
     const ciWorkflow = read('.github/workflows/ci.yml');
     const releaseWorkflow = read('.github/workflows/release.yml');

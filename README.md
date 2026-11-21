@@ -114,6 +114,7 @@ docker run -d --name nextra --restart unless-stopped --network host \
 
 - **Host networking** lets viewers reach the media ports directly (`RTC_MIN_PORT` to `RTC_MAX_PORT`, UDP and TCP); open them in the firewall. Set `BIND_HOST`, `RTC_LISTEN_IP` and `PUBLIC_IP` for the server's address (see [Configuration](#configuration)).
 - Put a reverse proxy that ends TLS in front of port 3000 and keep that port closed to the internet. Set `SHARE_BASE_URL` to the public address, and name the proxy in `TRUSTED_PROXY_CIDRS` when it does not run on this machine's loopback.
+- Keep `TRUST_PROXY=1` when that reverse proxy is the only one in front of Nextra (the host name points straight at the server, for example a DNS-only record). Set `TRUST_PROXY=2` only when a CDN proxy such as Cloudflare's also sits in front of it: with 2 and no second proxy, Nextra believes an address the viewer wrote, and the per-viewer limits such as the sign-in lockout can be dodged.
 - The host signs in from another computer with the host password: see [Hosting from another computer](#hosting-from-another-computer).
 - The image sets `EXTERNAL_SUPERVISOR=true`, so a media-engine crash ends the container and the restart policy starts a new one. It runs as a non-root user on a read-only root, and `/healthz` and `/readyz` serve health checks.
 - `npm run release:image` is the local release. It runs every check, builds the image tagged with the commit, starts it locked down, and scans it; a fixable high or critical finding stops it. Add `-- --push` to publish the image and print its digest.
@@ -294,6 +295,7 @@ A room can normally only be started on the machine that runs Nextra (or from `TR
 1. Set `OPERATOR_TOKEN` to at least 32 random characters. This is the **host password**. Without it the Host page tells a remote visitor that hosting from another computer is switched off.
 2. Serve Nextra over HTTPS: `LOCAL_HTTPS=true`, a tunnel, or a reverse proxy that ends TLS (see `TRUSTED_PROXY_CIDRS` above). The sign-in is refused on plain HTTP, and the page does not send the password from an `http://` address.
 3. Open **Host** through the same public address viewers use (the tunnel URL or `SHARE_BASE_URL`) and enter the host password. The Host page then works as it does locally, with a **Sign out** button.
+4. For OBS rooms, also set `PUBLIC_WHIP_ENABLED=true`. OBS on the host's computer cannot reach the WHIP listener, which stays on the server's loopback; the server then also serves WHIP under `/whip` on its public address, and the Host page gives OBS `https://<public address>/whip/broadcast/<room code>` with the room's host token as the Bearer token. Without it the Host page shows the loopback address, which works only on the server itself.
 
 How the sign-in works:
 
@@ -353,7 +355,7 @@ Copy `.env.example` to `.env` and edit as needed. Key options:
 | Variable | Default | Description |
 |---|---|---|
 | `WHIP_ENABLED` | `true` | Enable WHIP ingest endpoint |
-| `PUBLIC_WHIP_ENABLED` | `false` | Also mount WHIP on the main/public server; the dedicated loopback endpoint remains available when this is off |
+| `PUBLIC_WHIP_ENABLED` | `false` | Also mount WHIP on the main/public server (under `/whip`, with the same host-token check). A Host page opened over HTTPS on a public address then gives OBS that address instead of the loopback one, so a host on another computer can stream from OBS. The dedicated loopback endpoint stays available either way |
 | `PUBLIC_WHIP_RATE_LIMIT_MAX` | `5` | Public WHIP start attempts per IP per window (an IPv6 client counts by its /64; at most 10,000 clients are tracked, oldest dropped first) |
 | `PUBLIC_WHIP_MAX_PENDING_STARTS` | `2` | Global cap on concurrent public WHIP startups before SDP/media allocation |
 | `WHIP_HTTP_PORT` | `3001` | HTTP port for WHIP endpoint |

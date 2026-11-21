@@ -1,5 +1,6 @@
 // server.js - Entry point: Express + Socket.io + Mediasoup
-require('dotenv').config();
+// quiet: dotenv's own "injected env" line is not JSON and would be the first line of the JSON log.
+require('dotenv').config({ quiet: true });
 const { installConsoleLogger, runWithLogContext } = require('./lib/logger');
 installConsoleLogger();
 const express = require('express');
@@ -23,7 +24,7 @@ eventLoopDelay.enable();
 const isDevMode = process.argv.includes('--dev')
     || process.env.NODE_ENV === 'development'
     || process.env.APP_ENV === 'development';
-const { createMediasoupWorker, setWorkerDeathHandler } = require('./lib/mediasoup');
+const { createMediasoupWorker, describeRtcPorts, setWorkerDeathHandler } = require('./lib/mediasoup');
 const {
     registerSocketHandlers,
     startJoinCleanup,
@@ -45,6 +46,7 @@ const { fetchCloudflareTurnCredentials } = require('./lib/cloudflareTurn');
 const {
     normalizeIp,
     parseForwardedFirst,
+    parseForwardedProto,
     isLocalHostname,
     isLocalClientIp,
     isLoopbackIp,
@@ -390,8 +392,8 @@ function getHostOriginFromHeaders(headers = {}, remoteAddress = '', encrypted = 
     let proto = encrypted ? 'https' : 'http';
 
     if (shouldTrustRequestForwardedHeaders(headers, remoteAddress)) {
-        const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
-        if (forwardedProto === 'http' || forwardedProto === 'https') {
+        const forwardedProto = parseForwardedProto(headers['x-forwarded-proto']);
+        if (forwardedProto) {
             proto = forwardedProto;
         }
     }
@@ -469,13 +471,13 @@ function isOperatorSocketAuthorized(socket, providedToken = '') {
     return hasOperatorSession(socket?.handshake?.headers) && isSessionSocketOriginAllowed(socket);
 }
 
-// HTTPS as the client sees it: TLS on this listener, or X-Forwarded-Proto: https from a proxy whose forwarded
-// headers are trusted.
+// HTTPS as the client sees it: TLS on this listener, or X-Forwarded-Proto: https (wss on a WebSocket upgrade) from a
+// proxy whose forwarded headers are trusted.
 function isRequestExternallySecure(req) {
     if (req?.socket?.encrypted) return true;
     const headers = req?.headers || {};
     if (!shouldTrustRequestForwardedHeaders(headers, getRemoteAddressFromReq(req))) return false;
-    return parseForwardedFirst(headers['x-forwarded-proto']).toLowerCase() === 'https';
+    return parseForwardedProto(headers['x-forwarded-proto']) === 'https';
 }
 
 function isSocketExternallySecure(socket) {
@@ -486,7 +488,7 @@ function isSocketExternallySecure(socket) {
         || socket?.handshake?.address
         || '';
     if (!shouldTrustRequestForwardedHeaders(headers, remoteAddress)) return false;
-    return parseForwardedFirst(headers['x-forwarded-proto']).toLowerCase() === 'https';
+    return parseForwardedProto(headers['x-forwarded-proto']) === 'https';
 }
 
 function isRelayAuthorizedForSocket(socket) {
@@ -610,11 +612,10 @@ function getShareBaseUrl(req) {
     }
 
     if (shouldTrustRequestForwardedHeaders(req.headers || {}, getRemoteAddressFromReq(req))) {
-        const forwardedProto = parseForwardedFirst(req.headers['x-forwarded-proto']);
+        const proto = parseForwardedProto(req.headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(req.headers['x-forwarded-host']);
-        const proto = (forwardedProto || '').toLowerCase();
         const hostParts = parseUrlHostParts(forwardedHost);
-        if ((proto === 'http' || proto === 'https') && hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
+        if (proto && hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
             return `${proto}://${hostParts.hostWithPort}`;
         }
     }
@@ -733,11 +734,10 @@ async function exitIfAlreadyRunning() {
 
 function getShareBaseUrlFromHeaders(headers = {}, remoteAddress = '') {
     if (shouldTrustRequestForwardedHeaders(headers, remoteAddress)) {
-        const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
+        const proto = parseForwardedProto(headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(headers['x-forwarded-host']);
-        const proto = (forwardedProto || '').toLowerCase();
         const hostParts = parseUrlHostParts(forwardedHost);
-        if ((proto === 'http' || proto === 'https') && hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
+        if (proto && hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
             return `${proto}://${hostParts.hostWithPort}`;
         }
     }
@@ -814,6 +814,7 @@ function buildSocketConfigPayload(socket) {
         whipHttpStatus,
         whipHttpError,
         whipHttpUrl: getWhipHttpBaseUrl(),
+        publicWhipEnabled: config.PUBLIC_WHIP_ENABLED,
     };
 }
 
@@ -918,6 +919,7 @@ app.get('/api/config', (req, res) => {
         whipHttpStatus,
         whipHttpError,
         whipHttpUrl: getWhipHttpBaseUrl(),
+        publicWhipEnabled: config.PUBLIC_WHIP_ENABLED,
         whepEnabled: config.WHEP_ENABLED,
     });
 });
@@ -1781,7 +1783,7 @@ async function startWhipHttpServer(whipRouter) {
         } else {
             console.log('   Public:  configured via SHARE_BASE_URL only');
         }
-        console.log(`   UDP:     ${config.RTC_MIN_PORT}-${config.RTC_MAX_PORT}`);
+        console.log(`   RTC:     ${describeRtcPorts()}`);
 
         // Start HTTP server for WHIP (OBS rejects self-signed HTTPS certs).
         startWhipHttpServer(whipRouter).catch((err) => {

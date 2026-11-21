@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
     normalizeIp,
     parseForwardedFirst,
+    parseForwardedProto,
     parseForwardedLast,
     parseForwardedClient,
     hasForwardingEvidence,
@@ -49,6 +50,19 @@ test('operator capability comparison rejects missing, truncated, and different t
 test('parseForwardedFirst returns the first forwarded value', () => {
     assert.equal(parseForwardedFirst('198.51.100.10, 10.0.0.1'), '198.51.100.10');
     assert.equal(parseForwardedFirst(''), '');
+});
+
+// Traefik sends X-Forwarded-Proto: wss on a WebSocket upgrade; it means TLS just as https does.
+test('parseForwardedProto reads the WebSocket schemes as their HTTP equivalents', () => {
+    assert.equal(parseForwardedProto('https'), 'https');
+    assert.equal(parseForwardedProto('wss'), 'https');
+    assert.equal(parseForwardedProto('WSS, http'), 'https');
+    assert.equal(parseForwardedProto('http'), 'http');
+    assert.equal(parseForwardedProto('ws'), 'http');
+    assert.equal(parseForwardedProto(' Https '), 'https');
+    for (const other of ['', 'ftp', 'httpss', 'wss:', undefined, ['https']]) {
+        assert.equal(parseForwardedProto(other), '', JSON.stringify(other));
+    }
 });
 
 test('isLocalClientIp recognizes loopback and private ranges', () => {

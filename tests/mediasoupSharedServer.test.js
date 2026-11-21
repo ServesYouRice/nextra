@@ -111,7 +111,7 @@ test('shared WebRtcServer listenInfos for distinct public IP orders public first
             return fakeWorker;
         };
 
-        const { createMediasoupWorker } = require('../lib/mediasoup');
+        const { createMediasoupWorker, describeRtcPorts } = require('../lib/mediasoup');
         await createMediasoupWorker();
 
         assert.deepEqual(capturedListenInfos, [
@@ -120,6 +120,8 @@ test('shared WebRtcServer listenInfos for distinct public IP orders public first
             { protocol: 'udp', ip: '0.0.0.0', announcedAddress: '192.168.1.50', port: 40000 },
             { protocol: 'tcp', ip: '0.0.0.0', announcedAddress: '192.168.1.50', port: 40000 },
         ]);
+        // The start-up banner names the two bound ports, not the RTC range.
+        assert.equal(describeRtcPorts(), '40000, 40001 (udp/tcp)');
     } finally {
         harness.restore();
     }
@@ -199,6 +201,27 @@ test('rejected shared-server creation resolves and transports fall back to per-t
         assert.deepEqual(capturedTransportOptions.listenIps, [
             { ip: '0.0.0.0', announcedIp: '192.168.1.50' },
         ]);
+    } finally {
+        harness.restore();
+    }
+});
+
+test('without a shared WebRtcServer the start-up banner names the whole RTC range', { concurrency: false }, async () => {
+    const harness = setupSharedServerTest();
+    try {
+        config.RTC_LISTEN_IP = '127.0.0.1';
+        config.RTC_MIN_PORT = 40000;
+        config.RTC_MAX_PORT = 40050;
+        config.PUBLIC_IP = '';
+        mediasoup.createWorker = async () => {
+            const fakeWorker = new EventEmitter();
+            fakeWorker.createRouter = async () => ({ rtpCapabilities: {} });
+            fakeWorker.createWebRtcServer = async () => { throw new Error('bind failed'); };
+            return fakeWorker;
+        };
+        const { createMediasoupWorker, describeRtcPorts } = require('../lib/mediasoup');
+        await createMediasoupWorker();
+        assert.equal(describeRtcPorts(), '40000-40050 (udp/tcp, one port per transport)');
     } finally {
         harness.restore();
     }
