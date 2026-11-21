@@ -45,6 +45,7 @@ const { fetchCloudflareTurnCredentials } = require('./lib/cloudflareTurn');
 const {
     normalizeIp,
     parseForwardedFirst,
+    parseForwardedProto,
     isLocalHostname,
     isLocalClientIp,
     isLoopbackIp,
@@ -390,8 +391,8 @@ function getHostOriginFromHeaders(headers = {}, remoteAddress = '', encrypted = 
     let proto = encrypted ? 'https' : 'http';
 
     if (shouldTrustRequestForwardedHeaders(headers, remoteAddress)) {
-        const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
-        if (forwardedProto === 'http' || forwardedProto === 'https') {
+        const forwardedProto = parseForwardedProto(headers['x-forwarded-proto']);
+        if (forwardedProto) {
             proto = forwardedProto;
         }
     }
@@ -469,13 +470,13 @@ function isOperatorSocketAuthorized(socket, providedToken = '') {
     return hasOperatorSession(socket?.handshake?.headers) && isSessionSocketOriginAllowed(socket);
 }
 
-// HTTPS as the client sees it: TLS on this listener, or X-Forwarded-Proto: https from a proxy whose forwarded
-// headers are trusted.
+// HTTPS as the client sees it: TLS on this listener, or X-Forwarded-Proto: https (wss on a WebSocket upgrade) from a
+// proxy whose forwarded headers are trusted.
 function isRequestExternallySecure(req) {
     if (req?.socket?.encrypted) return true;
     const headers = req?.headers || {};
     if (!shouldTrustRequestForwardedHeaders(headers, getRemoteAddressFromReq(req))) return false;
-    return parseForwardedFirst(headers['x-forwarded-proto']).toLowerCase() === 'https';
+    return parseForwardedProto(headers['x-forwarded-proto']) === 'https';
 }
 
 function isSocketExternallySecure(socket) {
@@ -486,7 +487,7 @@ function isSocketExternallySecure(socket) {
         || socket?.handshake?.address
         || '';
     if (!shouldTrustRequestForwardedHeaders(headers, remoteAddress)) return false;
-    return parseForwardedFirst(headers['x-forwarded-proto']).toLowerCase() === 'https';
+    return parseForwardedProto(headers['x-forwarded-proto']) === 'https';
 }
 
 function isRelayAuthorizedForSocket(socket) {
@@ -610,11 +611,10 @@ function getShareBaseUrl(req) {
     }
 
     if (shouldTrustRequestForwardedHeaders(req.headers || {}, getRemoteAddressFromReq(req))) {
-        const forwardedProto = parseForwardedFirst(req.headers['x-forwarded-proto']);
+        const proto = parseForwardedProto(req.headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(req.headers['x-forwarded-host']);
-        const proto = (forwardedProto || '').toLowerCase();
         const hostParts = parseUrlHostParts(forwardedHost);
-        if ((proto === 'http' || proto === 'https') && hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
+        if (proto && hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
             return `${proto}://${hostParts.hostWithPort}`;
         }
     }
@@ -733,11 +733,10 @@ async function exitIfAlreadyRunning() {
 
 function getShareBaseUrlFromHeaders(headers = {}, remoteAddress = '') {
     if (shouldTrustRequestForwardedHeaders(headers, remoteAddress)) {
-        const forwardedProto = parseForwardedFirst(headers['x-forwarded-proto']);
+        const proto = parseForwardedProto(headers['x-forwarded-proto']);
         const forwardedHost = parseForwardedFirst(headers['x-forwarded-host']);
-        const proto = (forwardedProto || '').toLowerCase();
         const hostParts = parseUrlHostParts(forwardedHost);
-        if ((proto === 'http' || proto === 'https') && hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
+        if (proto && hostParts && !isLocalHostname(hostParts.hostname, config.LAN_IP)) {
             return `${proto}://${hostParts.hostWithPort}`;
         }
     }

@@ -639,6 +639,22 @@ test('on the real server a TRUSTED_PROXY_CIDRS peer relays and is never the oper
     sockets.push(local);
     const created = await socketRequest(local, 'create-room', { ingestMode: 'browser' });
     assert.equal(created.success, true, `the host's own socket could not create a room: ${created.error}`);
+
+    // The relay (the fallback when WebRTC fails) needs HTTPS as the viewer sees it. Traefik forwards a WebSocket
+    // upgrade with X-Forwarded-Proto: wss, which is TLS just as https is; ws and no header are plain HTTP.
+    const relayAllowedFor = async (forwardedFor, proto) => {
+        const viewer = await connectSocket(baseUrl, { ...origin, 'x-forwarded-for': forwardedFor, ...(proto ? { 'x-forwarded-proto': proto } : {}) });
+        sockets.push(viewer);
+        const joined = await socketRequest(viewer, 'join-room', { code: created.code });
+        assert.equal(joined.success, true, `a viewer behind the proxy (${proto || 'no proto'}) could not join: ${joined.error}`);
+        assert.deepEqual(await socketRequest(viewer, 'leave-room'), { success: true });
+        viewer.close();
+        return joined.relayAllowed;
+    };
+    assert.equal(await relayAllowedFor('198.51.100.91', 'wss'), true, 'a viewer joined over wss through the trusted proxy was refused the relay');
+    assert.equal(await relayAllowedFor('198.51.100.92', 'https'), true);
+    assert.equal(await relayAllowedFor('198.51.100.93', 'ws'), false);
+    assert.equal(await relayAllowedFor('198.51.100.94'), false);
 });
 
 test('invariant 3 on the real server: a LAN peer that is not in the list gains nothing from forwarding headers', { concurrency: false, timeout: 60_000 }, async (t) => {
@@ -670,4 +686,33 @@ test('invariant 3 on the real server: a LAN peer that is not in the list gains n
     const baseUrl = `http://${peer}:${port}`;
     assertAdmitted(await joinFrom(baseUrl, { Origin: baseUrl, 'x-forwarded-for': '198.51.100.81' }), 'first attempt');
     assertRateLimited(await joinFrom(baseUrl, { Origin: baseUrl, 'x-forwarded-for': '198.51.100.82' }), 'second attempt with a new X-Forwarded-For');
+});
+
+test('a peer outside TRUSTED_PROXY_CIDRS that sends X-Forwarded-Proto: wss or https is not given the relay', { concurrency: false, timeout: 60_000 }, async (t) => {
+    const peer = await findNonLoopbackAddress();
+    if (!peer) {
+        t.skip('this machine has no non-loopback IPv4 address to connect from');
+        return;
+    }
+    const otherProxy = addressOtherThan(peer, '203.0.113.200', '203.0.113.201');
+    const { port } = await startServer(t, { LAN_IP: peer, TRUSTED_LAN_CIDRS: '', TRUSTED_PROXY_CIDRS: otherProxy, OPERATOR_TOKEN, JOIN_RATE_LIMIT_MAX: '10' });
+    const sockets = [];
+    t.after(() => sockets.forEach((socket) => socket.close()));
+    const local = await connectSocket(`http://127.0.0.1:${port}`, { Origin: `http://127.0.0.1:${port}` });
+    sockets.push(local);
+    const created = await socketRequest(local, 'create-room', { ingestMode: 'browser' });
+    assert.equal(created.success, true, `the host's own socket could not create a room: ${created.error}`);
+
+    const baseUrl = `http://${peer}:${port}`;
+    for (const proto of ['wss', 'https', undefined]) {
+        const viewer = await connectSocket(baseUrl, { Origin: baseUrl, ...(proto ? { 'x-forwarded-proto': proto } : {}) });
+        sockets.push(viewer);
+        const joined = await socketRequest(viewer, 'join-room', { code: created.code });
+        assert.equal(joined.success, true, `the peer (${proto || 'no proto'}) could not join: ${joined.error}`);
+        assert.equal(joined.relayAllowed, false, `X-Forwarded-Proto: ${proto} from an untrusted peer granted the relay`);
+        const relay = await socketRequest(viewer, 'relay-consume-start');
+        assert.equal(relay.success, false);
+        assert.deepEqual(await socketRequest(viewer, 'leave-room'), { success: true });
+        viewer.close();
+    }
 });
